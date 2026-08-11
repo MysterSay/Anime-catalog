@@ -19,7 +19,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.4.2"
+APP_VERSION = "2.5.0"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -2043,6 +2043,61 @@ class Core:
 
         return self.merge_catalog_items([], result)
 
+    async def search_catalog_aliases_async(
+        self,
+        domain: str,
+        queries: list[str],
+        identity_aliases: list[str],
+        authority: AuthorityData,
+        *,
+        query_limit: int = 8,
+    ) -> list[dict[str, str]]:
+        """Search one catalog by several title variants concurrently.
+
+        The outer process launches this method for every catalog at the same time.
+        Inside a catalog, each useful alias is also searched concurrently; Core.request()
+        keeps total network concurrency bounded by self.http_sem.
+        """
+        names = unique_strings(queries, limit=query_limit)
+        if not names:
+            return []
+
+        jobs = [
+            asyncio.create_task(self.search_catalog_native(domain, [name], identity_aliases, authority))
+            for name in names
+        ]
+        results = await asyncio.gather(*jobs, return_exceptions=True)
+        merged: list[dict[str, str]] = []
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            merged = self.merge_catalog_items(merged, result)
+        return merged
+
+    async def google_catalog_fallback_async(
+        self,
+        domain: str,
+        queries: list[str],
+        identity_aliases: list[str],
+        *,
+        query_limit: int = 8,
+    ) -> list[dict[str, str]]:
+        """Run Google site: fallback for all useful aliases concurrently."""
+        names = unique_strings(queries, limit=query_limit)
+        if not names:
+            return []
+        # Reuse the proven single-query fallback, but launch each title variant in
+        # parallel.  Subclasses/tests can still override google_catalog_fallback.
+        groups = await asyncio.gather(*(
+            self.google_catalog_fallback(domain, [name], identity_aliases) for name in names
+        ), return_exceptions=True)
+        merged: list[dict[str, str]] = []
+        for group in groups:
+            if isinstance(group, Exception):
+                continue
+            merged = self.merge_catalog_items(merged, group)
+        return merged
+
     def catalog_item_key(self, url: str) -> str:
         url = compact_url(url)
         domain = self.source_catalog(url)
@@ -2132,6 +2187,7 @@ class Core:
             return {"status": 0, "ok": False, "error": str(error)}
 
     async def process(self, payload: InputPayload, *, callback: bool = True) -> dict[str, Any]:
+        started_at = time.perf_counter()
         # Authority resolution and source-page extraction are independent.
         authority_task = asyncio.create_task(self.resolve_authorities(payload))
         source_task = asyncio.create_task(self.seed_source_catalog(payload))
@@ -2141,8 +2197,12 @@ class Core:
         native_original = clean_title(authority.native or romanized or payload.title)
         self.log(f"Назва: input={clean_title(payload.title)!r}; native={native_original!r}; romaji={romanized!r}; english={clean_title(authority.english)!r}")
         english = clean_title(authority.english)
-        # Catalogs are much more likely to index Romaji/English than CJK native script.
-        base_queries = unique_strings([romanized, english, native_original], limit=3)
+        # Search every useful identity name, not only one translation.  The list is
+        # bounded so a noisy authority provider cannot explode the request count.
+        # Per-catalog searches for these names are executed concurrently below.
+        base_queries = unique_strings([
+            romanized, english, native_original, *authority.aliases,
+        ], limit=8)
         if not base_queries:
             base_queries = [clean_title(payload.title)]
 
@@ -2156,21 +2216,17 @@ class Core:
         if source_catalog and source_item:
             catalogs[source_catalog] = [source_item]
 
-        # PHASE 1. Native search on every catalog using only original + English.
-        # If both names are identical, unique_strings leaves a single query and no duplicate request is made.
-        phase1_tasks: dict[str, asyncio.Task] = {}
-        for domain in CATALOG_SITES:
-            if domain == source_catalog:
+        # PHASE 1. Every catalog is searched concurrently, and within each catalog
+        # the useful authority names/aliases are searched concurrently as well.
+        phase1_domains = [domain for domain in CATALOG_SITES if domain != source_catalog]
+        phase1_results = await asyncio.gather(*(
+            self.search_catalog_aliases_async(domain, base_queries, identity_aliases, authority)
+            for domain in phase1_domains
+        ), return_exceptions=True)
+        for domain, result in zip(phase1_domains, phase1_results):
+            if isinstance(result, Exception):
                 continue
-            phase1_tasks[domain] = asyncio.create_task(
-                self.search_catalog_native(domain, base_queries, identity_aliases, authority)
-            )
-
-        for domain, task in phase1_tasks.items():
-            try:
-                catalogs[domain] = self.merge_catalog_items(catalogs[domain], await task)
-            except Exception:
-                pass
+            catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
         self.log("Фаза 1 завершена: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
 
         # Learn real localized names from catalogs that proved the identity using original/English/IDs.
@@ -2187,21 +2243,23 @@ class Core:
         # PHASE 2. As soon as a real RU/UA catalog title is known, return to that language's catalogs.
         # Original/English were already tried in phase 1, so only the new localized query is sent here;
         # logically the order remains original -> English -> local without repeating network requests.
-        phase2_tasks: dict[str, asyncio.Task] = {}
+        phase2_domains: list[str] = []
+        phase2_jobs: list[Any] = []
         for domain in CATALOG_SITES:
             local = ua_title if domain in UA_SITES else ru_title
             if not local or normalize_title(local) in {normalize_title(x) for x in base_queries}:
                 continue
             local_identity = unique_strings([*identity_aliases, ru_title, ua_title], limit=34)
-            phase2_tasks[domain] = asyncio.create_task(
-                self.search_catalog_native(domain, [local], local_identity, authority)
-            )
+            phase2_domains.append(domain)
+            phase2_jobs.append(self.search_catalog_aliases_async(
+                domain, [local], local_identity, authority, query_limit=2
+            ))
 
-        for domain, task in phase2_tasks.items():
-            try:
-                catalogs[domain] = self.merge_catalog_items(catalogs[domain], await task)
-            except Exception:
-                pass
+        phase2_results = await asyncio.gather(*phase2_jobs, return_exceptions=True) if phase2_jobs else []
+        for domain, result in zip(phase2_domains, phase2_results):
+            if isinstance(result, Exception):
+                continue
+            catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
 
         # Re-evaluate localized titles after the second pass; another catalog may expose a cleaner base title.
         ru_candidates = [item.get("title", "") for d, items in catalogs.items() if d in RU_SITES for item in items]
@@ -2211,23 +2269,27 @@ class Core:
 
         all_identity = unique_strings([*identity_aliases, ru_title, ua_title], limit=36)
 
-        # PHASE 3. Google site: is a last resort only for catalogs still empty.
-        # Query order is strict: original -> English (if different) -> corresponding RU/UA title.
-        google_tasks: dict[str, asyncio.Task] = {}
+        # PHASE 3. Google site: is the last resort for still-empty catalogs.
+        # All remaining domains and all useful query variants run concurrently.
+        google_domains: list[str] = []
+        google_jobs: list[Any] = []
         for domain in CATALOG_SITES:
             if catalogs[domain]:
                 continue
             local = ua_title if domain in UA_SITES else ru_title
-            google_queries = unique_strings([romanized, english, native_original, local], limit=4)
-            google_tasks[domain] = asyncio.create_task(
-                self.google_catalog_fallback(domain, google_queries, all_identity)
-            )
+            google_queries = unique_strings([
+                romanized, english, native_original, payload.title, local, *authority.aliases,
+            ], limit=8)
+            google_domains.append(domain)
+            google_jobs.append(self.google_catalog_fallback_async(
+                domain, google_queries, all_identity, query_limit=8
+            ))
 
-        for domain, task in google_tasks.items():
-            try:
-                catalogs[domain] = self.merge_catalog_items(catalogs[domain], await task)
-            except Exception:
-                pass
+        google_results = await asyncio.gather(*google_jobs, return_exceptions=True) if google_jobs else []
+        for domain, result in zip(google_domains, google_results):
+            if isinstance(result, Exception):
+                continue
+            catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
         self.log("Пошук завершено: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
 
         # Final text fields are produced after catalog discovery so the real UA catalog title wins over MT.
@@ -2286,8 +2348,15 @@ class Core:
                 "mal_id": authority.mal_id,
                 "source_catalog": source_catalog or "",
                 "search_strategy": {
-                    "authority": "direct APIs(input, english) -> strict title-entry Google site fallback",
-                    "catalogs": "native title-page(romaji, english, native) -> native title-page(localized) -> Google title-page fallback",
+                    "authority": "fast /api/search: Google site -> direct authority fallback",
+                    "catalogs": "async all-catalog search(all useful aliases) -> async localized pass -> async Google fallback",
+                },
+                "catalog_search": {
+                    "async": True,
+                    "domains": len(CATALOG_SITES),
+                    "query_names": base_queries,
+                    "result_counts": {site: len(catalogs.get(site, [])) for site in CATALOG_SITES},
+                    "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
                 },
                 "generated_at_unix": int(time.time()),
             },
@@ -2311,12 +2380,12 @@ app.add_middleware(
 
 @app.get("/")
 async def root() -> dict[str, Any]:
-    return {"service": "anime-title-core", "version": APP_VERSION, "endpoints": ["/api/search", "/api/process"]}
+    return {"service": "anime-title-core", "version": APP_VERSION, "endpoints": ["/api/search", "/api/process-full", "/api/process"]}
 
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": APP_VERSION, "search": "/api/search", "process": "/api/process"}
+    return {"ok": True, "version": APP_VERSION, "search": "/api/search", "process_full": "/api/process-full", "process": "/api/process"}
 
 
 @app.post("/api/search")
@@ -2328,6 +2397,25 @@ async def search_endpoint(payload: SearchPayload, x_api_key: str | None = Header
     core = Core()
     try:
         return await core.search_authority_pages(payload.title, payload.limit)
+    finally:
+        await core.close()
+
+
+@app.post("/api/process-full")
+async def process_full_endpoint(payload: InputPayload, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    """Return the complete schema-v2 payload without sending a callback.
+
+    This endpoint is intended for the website flow: authority selection happens via
+    /api/search, then /api/process-full performs the asynchronous all-catalog search,
+    and Cloudflare ingests the returned JSON into Notion exactly once.
+    """
+    expected = clean_text(os.getenv("CORE_API_KEY"))
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid X-API-Key")
+
+    core = Core()
+    try:
+        return await core.process(payload, callback=False)
     finally:
         await core.close()
 
