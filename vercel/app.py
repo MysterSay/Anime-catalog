@@ -10,16 +10,17 @@ import time
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -2186,28 +2187,112 @@ class Core:
         except Exception as error:
             return {"status": 0, "ok": False, "error": str(error)}
 
-    async def process(self, payload: InputPayload, *, callback: bool = True) -> dict[str, Any]:
+    async def process(
+        self,
+        payload: InputPayload,
+        *,
+        callback: bool = True,
+        progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Build the complete schema-v2 payload.
+
+        `progress` receives small JSON-serializable packets.  Catalog work stays
+        concurrent, but each completed domain is reported immediately so browser
+        clients can render real progress instead of waiting for one huge response.
+        """
         started_at = time.perf_counter()
+        last_percent = 0
+
+        async def emit(stage: str, percent: int, message: str, **extra: Any) -> None:
+            nonlocal last_percent
+            percent = max(last_percent, min(99, int(percent)))
+            last_percent = percent
+            if not progress:
+                return
+            packet: dict[str, Any] = {
+                "type": "progress",
+                "stage": stage,
+                "percent": percent,
+                "message": message,
+                "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+            }
+            packet.update(extra)
+            await progress(packet)
+
+        async def catalog_job(
+            domain: str,
+            queries: list[str],
+            aliases: list[str],
+            authority: AuthorityData,
+            *,
+            query_limit: int = 8,
+            timeout: float = 22.0,
+        ) -> tuple[str, list[dict[str, str]], str]:
+            try:
+                result = await asyncio.wait_for(
+                    self.search_catalog_aliases_async(
+                        domain, queries, aliases, authority, query_limit=query_limit
+                    ),
+                    timeout=timeout,
+                )
+                return domain, result, ""
+            except asyncio.TimeoutError:
+                return domain, [], f"timeout {int(timeout)}s"
+            except Exception as error:
+                return domain, [], clean_text(error)
+
+        async def google_job(
+            domain: str,
+            queries: list[str],
+            aliases: list[str],
+            *,
+            query_limit: int = 8,
+            timeout: float = 14.0,
+        ) -> tuple[str, list[dict[str, str]], str]:
+            try:
+                result = await asyncio.wait_for(
+                    self.google_catalog_fallback_async(
+                        domain, queries, aliases, query_limit=query_limit
+                    ),
+                    timeout=timeout,
+                )
+                return domain, result, ""
+            except asyncio.TimeoutError:
+                return domain, [], f"timeout {int(timeout)}s"
+            except Exception as error:
+                return domain, [], clean_text(error)
+
+        await emit("accepted", 1, "Запит прийнято. Починаю визначення тайтлу.")
+
         # Authority resolution and source-page extraction are independent.
         authority_task = asyncio.create_task(self.resolve_authorities(payload))
         source_task = asyncio.create_task(self.seed_source_catalog(payload))
+        await emit("identity", 4, "Визначаю canonical ID, назви та медіа.")
         authority, (source_catalog, source_item) = await asyncio.gather(authority_task, source_task)
 
         romanized = clean_title(authority.original or payload.title)
         native_original = clean_title(authority.native or romanized or payload.title)
-        self.log(f"Назва: input={clean_title(payload.title)!r}; native={native_original!r}; romaji={romanized!r}; english={clean_title(authority.english)!r}")
         english = clean_title(authority.english)
-        # Search every useful identity name, not only one translation.  The list is
-        # bounded so a noisy authority provider cannot explode the request count.
-        # Per-catalog searches for these names are executed concurrently below.
+        self.log(
+            f"Назва: input={clean_title(payload.title)!r}; native={native_original!r}; "
+            f"romaji={romanized!r}; english={english!r}"
+        )
+        await emit(
+            "identity",
+            12,
+            "Тайтл визначено. Готую паралельний пошук каталогів.",
+            anilist_id=authority.anilist_id,
+            mal_id=authority.mal_id,
+            native=native_original,
+            romaji=romanized,
+        )
+
         base_queries = unique_strings([
             romanized, english, native_original, *authority.aliases,
         ], limit=8)
         if not base_queries:
             base_queries = [clean_title(payload.title)]
 
-        # Identity aliases are for verification, not display. Native is preserved as the
-        # stored original title, while Romaji remains available for search.
         identity_aliases = unique_strings([
             native_original, romanized, english, *authority.aliases, payload.title,
         ], limit=30)
@@ -2215,21 +2300,42 @@ class Core:
         catalogs: dict[str, list[dict[str, str]]] = {site: [] for site in CATALOG_SITES}
         if source_catalog and source_item:
             catalogs[source_catalog] = [source_item]
+            await emit(
+                "source",
+                14,
+                f"Поточну сторінку додано як джерело: {source_catalog}.",
+                domain=source_catalog,
+                found=1,
+            )
 
-        # PHASE 1. Every catalog is searched concurrently, and within each catalog
-        # the useful authority names/aliases are searched concurrently as well.
+        # PHASE 1: all catalogs concurrently. Each domain has its own bounded wall timeout,
+        # so one dead site cannot prevent the final JSON from ever being returned.
         phase1_domains = [domain for domain in CATALOG_SITES if domain != source_catalog]
-        phase1_results = await asyncio.gather(*(
-            self.search_catalog_aliases_async(domain, base_queries, identity_aliases, authority)
+        phase1_tasks = [
+            asyncio.create_task(catalog_job(domain, base_queries, identity_aliases, authority))
             for domain in phase1_domains
-        ), return_exceptions=True)
-        for domain, result in zip(phase1_domains, phase1_results):
-            if isinstance(result, Exception):
-                continue
-            catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
+        ]
+        completed = 0
+        total = max(1, len(phase1_tasks))
+        await emit("catalogs_primary", 16, f"Паралельний пошук: 0/{len(phase1_tasks)} каталогів.")
+        for task in asyncio.as_completed(phase1_tasks):
+            domain, result, error = await task
+            completed += 1
+            if result:
+                catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
+            pct = 16 + round((completed / total) * 43)
+            await emit(
+                "catalogs_primary",
+                pct,
+                f"{domain}: {'знайдено ' + str(len(catalogs[domain])) if catalogs[domain] else ('помилка' if error else 'без збігів')} · {completed}/{len(phase1_tasks)}",
+                domain=domain,
+                completed=completed,
+                total=len(phase1_tasks),
+                found=len(catalogs[domain]),
+                error=error,
+            )
         self.log("Фаза 1 завершена: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
 
-        # Learn real localized names from catalogs that proved the identity using original/English/IDs.
         ru_candidates: list[str] = []
         ua_candidates: list[str] = []
         for domain, items in catalogs.items():
@@ -2238,76 +2344,125 @@ class Core:
 
         ru_title = choose_localized_title("RU", ru_candidates, identity_aliases)
         ua_title = choose_localized_title("UA", ua_candidates, identity_aliases)
-        self.log(f"Локальні назви після фази 1: RU={ru_title!r}; UA={ua_title!r}")
+        await emit(
+            "localized_titles",
+            61,
+            "Визначаю реальні українську та російську назви з каталогів.",
+            ukrainian=ua_title,
+            russian=ru_title,
+        )
 
-        # PHASE 2. As soon as a real RU/UA catalog title is known, return to that language's catalogs.
-        # Original/English were already tried in phase 1, so only the new localized query is sent here;
-        # logically the order remains original -> English -> local without repeating network requests.
-        phase2_domains: list[str] = []
-        phase2_jobs: list[Any] = []
+        # PHASE 2: retry with the newly discovered localized title, still concurrent.
+        phase2_specs: list[tuple[str, str]] = []
+        base_keys = {normalize_title(x) for x in base_queries}
         for domain in CATALOG_SITES:
             local = ua_title if domain in UA_SITES else ru_title
-            if not local or normalize_title(local) in {normalize_title(x) for x in base_queries}:
+            if not local or normalize_title(local) in base_keys:
                 continue
-            local_identity = unique_strings([*identity_aliases, ru_title, ua_title], limit=34)
-            phase2_domains.append(domain)
-            phase2_jobs.append(self.search_catalog_aliases_async(
-                domain, [local], local_identity, authority, query_limit=2
-            ))
+            phase2_specs.append((domain, local))
 
-        phase2_results = await asyncio.gather(*phase2_jobs, return_exceptions=True) if phase2_jobs else []
-        for domain, result in zip(phase2_domains, phase2_results):
-            if isinstance(result, Exception):
-                continue
-            catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
+        local_identity = unique_strings([*identity_aliases, ru_title, ua_title], limit=34)
+        phase2_tasks = [
+            asyncio.create_task(
+                catalog_job(domain, [local], local_identity, authority, query_limit=2, timeout=14.0)
+            )
+            for domain, local in phase2_specs
+        ]
+        completed = 0
+        total = max(1, len(phase2_tasks))
+        if phase2_tasks:
+            await emit("catalogs_localized", 63, f"Локалізований прохід: 0/{len(phase2_tasks)} каталогів.")
+        for task in asyncio.as_completed(phase2_tasks):
+            domain, result, error = await task
+            completed += 1
+            if result:
+                catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
+            pct = 63 + round((completed / total) * 12)
+            await emit(
+                "catalogs_localized",
+                pct,
+                f"{domain}: локалізований прохід {completed}/{len(phase2_tasks)}.",
+                domain=domain,
+                completed=completed,
+                total=len(phase2_tasks),
+                found=len(catalogs[domain]),
+                error=error,
+            )
 
-        # Re-evaluate localized titles after the second pass; another catalog may expose a cleaner base title.
         ru_candidates = [item.get("title", "") for d, items in catalogs.items() if d in RU_SITES for item in items]
         ua_candidates = [item.get("title", "") for d, items in catalogs.items() if d in UA_SITES for item in items]
         ru_title = choose_localized_title("RU", ru_candidates, identity_aliases) or ru_title
         ua_title = choose_localized_title("UA", ua_candidates, identity_aliases) or ua_title
-
         all_identity = unique_strings([*identity_aliases, ru_title, ua_title], limit=36)
 
-        # PHASE 3. Google site: is the last resort for still-empty catalogs.
-        # All remaining domains and all useful query variants run concurrently.
-        google_domains: list[str] = []
-        google_jobs: list[Any] = []
+        # PHASE 3: Google fallback only for empty domains. Run domains and aliases concurrently,
+        # but cap each domain so Google throttling cannot stall the whole request.
+        google_specs: list[tuple[str, list[str]]] = []
         for domain in CATALOG_SITES:
             if catalogs[domain]:
                 continue
             local = ua_title if domain in UA_SITES else ru_title
-            google_queries = unique_strings([
+            queries = unique_strings([
                 romanized, english, native_original, payload.title, local, *authority.aliases,
             ], limit=8)
-            google_domains.append(domain)
-            google_jobs.append(self.google_catalog_fallback_async(
-                domain, google_queries, all_identity, query_limit=8
-            ))
+            google_specs.append((domain, queries))
 
-        google_results = await asyncio.gather(*google_jobs, return_exceptions=True) if google_jobs else []
-        for domain, result in zip(google_domains, google_results):
-            if isinstance(result, Exception):
-                continue
-            catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
+        google_tasks = [
+            asyncio.create_task(google_job(domain, queries, all_identity, query_limit=8, timeout=14.0))
+            for domain, queries in google_specs
+        ]
+        completed = 0
+        total = max(1, len(google_tasks))
+        if google_tasks:
+            await emit("catalogs_fallback", 77, f"Fallback-пошук для порожніх каталогів: 0/{len(google_tasks)}.")
+        for task in asyncio.as_completed(google_tasks):
+            domain, result, error = await task
+            completed += 1
+            if result:
+                catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
+            pct = 77 + round((completed / total) * 12)
+            await emit(
+                "catalogs_fallback",
+                pct,
+                f"{domain}: fallback {completed}/{len(google_tasks)}.",
+                domain=domain,
+                completed=completed,
+                total=len(google_tasks),
+                found=len(catalogs[domain]),
+                error=error,
+            )
+
         self.log("Пошук завершено: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
+        await emit(
+            "catalogs_done",
+            90,
+            "Пошук каталогів завершено. Формую фінальні поля.",
+            result_counts={site: len(catalogs.get(site, [])) for site in CATALOG_SITES},
+        )
 
-        # Final text fields are produced after catalog discovery so the real UA catalog title wins over MT.
-        description_task = asyncio.create_task(self.translate_uk(authority.description))
-        if ua_title:
-            title_uk_task = asyncio.create_task(asyncio.sleep(0, result=ua_title))
-        else:
-            title_uk_task = asyncio.create_task(self.translate_uk(romanized or native_original or payload.title))
-        if ru_title:
-            title_ru_task = asyncio.create_task(asyncio.sleep(0, result=ru_title))
-        else:
-            title_ru_task = asyncio.create_task(self.translate_ru(romanized or native_original or payload.title))
+        async def safe_translation(coro: Awaitable[str], fallback: str) -> str:
+            try:
+                return await asyncio.wait_for(coro, timeout=14.0)
+            except Exception:
+                return fallback
 
+        description_task = asyncio.create_task(
+            safe_translation(self.translate_uk(authority.description), clean_text(authority.description))
+        )
+        title_uk_task = asyncio.create_task(
+            asyncio.sleep(0, result=ua_title)
+            if ua_title else safe_translation(self.translate_uk(romanized or native_original or payload.title), clean_title(payload.title))
+        )
+        title_ru_task = asyncio.create_task(
+            asyncio.sleep(0, result=ru_title)
+            if ru_title else safe_translation(self.translate_ru(romanized or native_original or payload.title), romanized or native_original)
+        )
         description_uk, final_uk, final_ru = await asyncio.gather(
             description_task, title_uk_task, title_ru_task
         )
         final_uk = clean_title(final_uk)
         final_ru = clean_title(final_ru)
+        await emit("finalize", 95, "Назви та опис готові. Збираю JSON schema v2.")
 
         output_aliases = unique_strings([
             native_original, romanized, english, final_uk, final_ru, *authority.aliases,
@@ -2349,7 +2504,7 @@ class Core:
                 "source_catalog": source_catalog or "",
                 "search_strategy": {
                     "authority": "fast /api/search: Google site -> direct authority fallback",
-                    "catalogs": "async all-catalog search(all useful aliases) -> async localized pass -> async Google fallback",
+                    "catalogs": "bounded async all-catalog search -> localized async pass -> bounded async Google fallback",
                 },
                 "catalog_search": {
                     "async": True,
@@ -2357,15 +2512,19 @@ class Core:
                     "query_names": base_queries,
                     "result_counts": {site: len(catalogs.get(site, [])) for site in CATALOG_SITES},
                     "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                    "per_domain_timeout_seconds": 22,
+                    "fallback_timeout_seconds": 14,
                 },
                 "generated_at_unix": int(time.time()),
             },
         }
 
         if callback:
+            await emit("delivery", 97, "Відправляю готовий JSON у callback.")
             callback_info = await self.send_callback(result)
             if callback_info is not None:
                 result["delivery"] = callback_info
+        await emit("result_ready", 99, "Повний JSON готовий.")
         return result
 
 
@@ -2380,12 +2539,12 @@ app.add_middleware(
 
 @app.get("/")
 async def root() -> dict[str, Any]:
-    return {"service": "anime-title-core", "version": APP_VERSION, "endpoints": ["/api/search", "/api/process-full", "/api/process"]}
+    return {"service": "anime-title-core", "version": APP_VERSION, "endpoints": ["/api/search", "/api/process-stream", "/api/process-full", "/api/process"]}
 
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": APP_VERSION, "search": "/api/search", "process_full": "/api/process-full", "process": "/api/process"}
+    return {"ok": True, "version": APP_VERSION, "search": "/api/search", "process_stream": "/api/process-stream", "process_full": "/api/process-full", "process": "/api/process", "progress_protocol": "ndjson-v1"}
 
 
 @app.post("/api/search")
@@ -2399,6 +2558,88 @@ async def search_endpoint(payload: SearchPayload, x_api_key: str | None = Header
         return await core.search_authority_pages(payload.title, payload.limit)
     finally:
         await core.close()
+
+
+@app.post("/api/process-stream")
+async def process_stream_endpoint(payload: InputPayload, x_api_key: str | None = Header(default=None)) -> StreamingResponse:
+    """Stream progress packets and the final schema-v2 result as NDJSON.
+
+    Packet examples:
+      {"type":"progress","stage":"catalogs_primary","percent":42,...}
+      {"type":"result","stage":"done","percent":100,"result":{...}}
+      {"type":"error","stage":"error","percent":...,"message":"..."}
+    """
+    expected = clean_text(os.getenv("CORE_API_KEY"))
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid X-API-Key")
+
+    async def stream():
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        state = {"percent": 0, "stage": "accepted", "message": "Запуск…"}
+        finished = asyncio.Event()
+        core = Core()
+
+        async def push(packet: dict[str, Any]) -> None:
+            state.update({
+                "percent": int(packet.get("percent", state["percent"]) or 0),
+                "stage": clean_text(packet.get("stage") or state["stage"]),
+                "message": clean_text(packet.get("message") or state["message"]),
+            })
+            await queue.put(packet)
+
+        async def runner() -> None:
+            try:
+                result = await core.process(payload, callback=False, progress=push)
+                await queue.put({
+                    "type": "result",
+                    "stage": "done",
+                    "percent": 100,
+                    "message": "Готово. Повний JSON сформовано.",
+                    "result": result,
+                })
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await queue.put({
+                    "type": "error",
+                    "stage": "error",
+                    "percent": int(state.get("percent") or 0),
+                    "message": clean_text(error) or error.__class__.__name__,
+                    "error_type": error.__class__.__name__,
+                })
+            finally:
+                finished.set()
+                await core.close()
+
+        task = asyncio.create_task(runner())
+        try:
+            while not finished.is_set() or not queue.empty():
+                try:
+                    packet = await asyncio.wait_for(queue.get(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    packet = {
+                        "type": "heartbeat",
+                        "stage": state["stage"],
+                        "percent": state["percent"],
+                        "message": state["message"],
+                    }
+                yield json.dumps(packet, ensure_ascii=False, separators=(",", ":")) + "\n"
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/process-full")

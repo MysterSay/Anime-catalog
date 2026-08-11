@@ -4,6 +4,7 @@ const DEFAULT_DATA_SOURCE_ID = '3b87f72ac401802a95e4000bc7ababca';
 const ANILIST_ENDPOINT = 'https://graphql.anilist.co';
 const CORE_PROCESS_URL = 'https://anime-catalog-flame.vercel.app/api/process';
 const CORE_PROCESS_FULL_URL = 'https://anime-catalog-flame.vercel.app/api/process-full';
+const CORE_PROCESS_STREAM_URL = 'https://anime-catalog-flame.vercel.app/api/process-stream';
 const CORE_SEARCH_URL = 'https://anime-catalog-flame.vercel.app/api/search';
 
 const TITLE_STATUS_OPTIONS = ['Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто'];
@@ -1534,7 +1535,7 @@ async function handleIngestApi(request, env) {
   checkIngestKey(request, env);
   const payload = await request.json().catch(() => null);
   const result = await ingestCorePayload(env, payload);
-  return json(result, result.existing ? 200 : 201);
+  return json(result, result.existing ? 200 : 201, { 'access-control-allow-origin': '*' });
 }
 
 async function handleCoreSearchApi(request, env) {
@@ -1561,6 +1562,53 @@ async function handleCoreSearchApi(request, env) {
   }
   if (!payload || typeof payload !== 'object') throw new HttpError(502, 'Python core search не повернув валідний JSON.', raw.slice(0, 1200), 'invalid_json', 'python_core_search');
   return json(payload);
+}
+
+async function handleProcessTitleStreamApi(request, env) {
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'POST, OPTIONS',
+    'access-control-allow-headers': 'Content-Type',
+  } });
+  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, { allow: 'POST, OPTIONS', 'access-control-allow-origin': '*' });
+
+  const body = await request.json().catch(() => ({}));
+  const title = plainTitle(body.title || '');
+  const sourceUrl = safeHttpUrl(body.url || '');
+  if (!title || !sourceUrl) return json({ error: 'Потрібні title та url.' }, 400, { 'access-control-allow-origin': '*' });
+
+  const coreUrl = env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL;
+  const coreHeaders = { 'Content-Type': 'application/json', 'Accept': 'application/x-ndjson, application/json' };
+  if (env.CORE_API_KEY) coreHeaders['X-API-Key'] = env.CORE_API_KEY;
+
+  const coreResponse = await fetch(coreUrl, {
+    method: 'POST',
+    headers: coreHeaders,
+    body: JSON.stringify({
+      title,
+      url: sourceUrl,
+      status: plainTitle(body.status || ''),
+      group: plainTitle(body.group || ''),
+    }),
+  });
+
+  if (!coreResponse.ok || !coreResponse.body) {
+    const raw = await coreResponse.text().catch(() => '');
+    let payload = null;
+    try { payload = JSON.parse(raw); } catch {}
+    const detail = payload?.detail || payload?.error || raw.slice(0, 900) || coreResponse.statusText;
+    return json({ error: `Python core stream повернув HTTP ${coreResponse.status}: ${detail}` }, 502, { 'access-control-allow-origin': '*' });
+  }
+
+  return new Response(coreResponse.body, {
+    status: 200,
+    headers: {
+      'content-type': 'application/x-ndjson; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      'access-control-allow-origin': '*',
+      'x-content-type-options': 'nosniff',
+    },
+  });
 }
 
 async function handleProcessTitleApi(request, env) {
@@ -1736,6 +1784,7 @@ export default {
       }
       if (url.pathname === '/api/source-preview') return await handleSourcePreviewApi(request);
       if (url.pathname === '/api/core-search') return await handleCoreSearchApi(request, env);
+      if (url.pathname === '/api/process-title-stream') return await handleProcessTitleStreamApi(request, env);
       if (url.pathname === '/api/process-title') return await handleProcessTitleApi(request, env);
       if (url.pathname === '/api/ingest' || url.pathname === '/api/anime/import') return await handleIngestApi(request, env);
       if (request.method === 'POST' && url.pathname === '/' && (request.headers.get('content-type') || '').includes('application/json')) return await handleIngestApi(request, env);
@@ -1744,7 +1793,7 @@ export default {
       if (url.pathname === '/api/discover') return await handleDiscoverApi(request, env);
       if (url.pathname === '/api/discover/prepare') return await handleDiscoverPrepareApi(request, env);
       if (url.pathname === '/api/catalog-search') return await handleCatalogSearchApi(request, env);
-      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v4.8-async-full-catalog-search-2026-08-11', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true });
+      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v4.9-stream-progress-2026-08-11', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: 'ndjson-v1', coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true });
 
       if (url.pathname === '/api/health') {
         const databaseId = env.NOTION_DATABASE_ID || DEFAULT_DATABASE_ID;

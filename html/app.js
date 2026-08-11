@@ -23,6 +23,10 @@ const discoverSearchInput = document.getElementById('discoverSearchInput');
 const discoverResults = document.getElementById('discoverResults');
 const discoverSetup = document.getElementById('discoverSetup');
 const discoverStatus = document.getElementById('discoverStatus');
+const discoverProgress = document.getElementById('discoverProgress');
+const discoverProgressBar = document.getElementById('discoverProgressBar');
+const discoverProgressPercent = document.getElementById('discoverProgressPercent');
+const discoverProgressText = document.getElementById('discoverProgressText');
 
 const STATUS_ORDER = ['Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто'];
 const FALLBACK_IMAGE = 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 700 1000%22%3E%3Cdefs%3E%3ClinearGradient id=%22g%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22%3E%3Cstop stop-color=%22%23171b27%22/%3E%3Cstop offset=%221%22 stop-color=%22%23282d42%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%22700%22 height=%221000%22 fill=%22url(%23g)%22/%3E%3Ctext x=%22350%22 y=%22520%22 text-anchor=%22middle%22 fill=%22%23798094%22 font-family=%22Arial%22 font-size=%2270%22%3EYORU%3C/text%3E%3C/svg%3E';
@@ -291,6 +295,63 @@ function setDiscoverStatus(text = '', type = '') {
   discoverStatus.className = `discover-status ${type}`.trim();
 }
 
+
+function resetDiscoverProgress() {
+  if (!discoverProgress) return;
+  discoverProgress.classList.add('hidden');
+  if (discoverProgressBar) discoverProgressBar.style.width = '0%';
+  if (discoverProgressPercent) discoverProgressPercent.textContent = '0%';
+  if (discoverProgressText) discoverProgressText.textContent = 'Очікую запуск…';
+}
+
+function updateDiscoverProgress(packet = {}) {
+  if (!discoverProgress) return;
+  const percent = Math.max(0, Math.min(100, Number(packet.percent) || 0));
+  discoverProgress.classList.remove('hidden');
+  if (discoverProgressBar) discoverProgressBar.style.width = `${percent}%`;
+  if (discoverProgressPercent) discoverProgressPercent.textContent = `${Math.round(percent)}%`;
+  if (discoverProgressText) {
+    const domain = packet.domain ? ` · ${packet.domain}` : '';
+    discoverProgressText.textContent = `${packet.message || packet.stage || 'Обробка…'}${domain}`;
+  }
+}
+
+async function readNdjsonStream(response, onPacket) {
+  if (!response.body?.getReader) throw new Error('Браузер не підтримує streaming response.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalResult = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (value) buffer += decoder.decode(value, { stream: true });
+    if (done) buffer += decoder.decode();
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let packet;
+      try { packet = JSON.parse(line); } catch { continue; }
+      onPacket?.(packet);
+      if (packet.type === 'error') throw new Error(packet.message || 'Python core завершився з помилкою.');
+      if (packet.type === 'result' && packet.result) finalResult = packet.result;
+    }
+    if (done) break;
+  }
+
+  if (buffer.trim()) {
+    let packet = null;
+    try { packet = JSON.parse(buffer); } catch {}
+    if (packet) {
+      onPacket?.(packet);
+      if (packet.type === 'error') throw new Error(packet.message || 'Python core завершився з помилкою.');
+      if (packet.type === 'result' && packet.result) finalResult = packet.result;
+    }
+  }
+  return finalResult;
+}
+
 function openDiscoverModal() {
   if (!discoverModal) return;
   discoverModal.classList.remove('hidden');
@@ -306,6 +367,7 @@ function closeDiscoverModal() {
   document.body.classList.remove('modal-open');
   discoverSelected = null;
   if (discoverResults) discoverResults.innerHTML = '';
+  resetDiscoverProgress();
   if (discoverSetup) {
     discoverSetup.innerHTML = '';
     discoverSetup.classList.add('hidden');
@@ -426,36 +488,67 @@ async function processSelectedSource(item, button) {
   discoverResults.querySelectorAll('.source-discover-result').forEach(el => { el.disabled = true; });
   button?.classList.add('processing');
   const sourceTitle = String(item.title || discoverSearchInput.value || '').trim();
-  setDiscoverStatus(`Визначаю назви й асинхронно шукаю посилання по 17 каталогах для «${sourceTitle || 'тайтл'}»…`, 'loading');
+  resetDiscoverProgress();
+  updateDiscoverProgress({ percent: 0, stage: 'queued', message: 'Запускаю повний пошук…' });
+  setDiscoverStatus(`Повний пошук для «${sourceTitle || 'тайтл'}» запущено.`, 'loading');
 
   try {
-    const response = await fetch('/api/process-title', {
+    const response = await fetch('/api/process-title-stream', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
       body: JSON.stringify({
         title: sourceTitle || discoverSearchInput.value.trim(),
         url: item.url,
         status: '',
         group: '',
       }),
+      cache: 'no-store',
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+
+    const coreResult = await readNdjsonStream(response, packet => {
+      if (packet.type === 'progress' || packet.type === 'heartbeat') {
+        updateDiscoverProgress(packet);
+        setDiscoverStatus(packet.message || 'Python core працює…', 'loading');
+      }
+    });
+    if (!coreResult?.title) throw new Error('Python core завершив stream без фінального JSON.');
+
+    updateDiscoverProgress({ percent: 99, stage: 'notion', message: 'JSON готовий. Записую в Notion…' });
+    setDiscoverStatus('Повний JSON отримано. Записую в Notion…', 'loading');
+    const ingestResponse = await fetch('/api/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(coreResult),
+      cache: 'no-store',
+    });
+    const payload = await ingestResponse.json().catch(() => ({}));
+    if (!ingestResponse.ok) throw new Error(payload.error || `Notion ingest HTTP ${ingestResponse.status}`);
     if (!payload.item?.id) throw new Error('Notion не повернув ID тайтлу.');
-    setDiscoverStatus(payload.existing ? 'Повний пошук завершено. Тайтл уже був у Notion — дані оновлено.' : 'Повний асинхронний пошук завершено, JSON записано в Notion.', 'ok');
-    await new Promise(resolve => setTimeout(resolve, 550));
+
+    updateDiscoverProgress({ percent: 100, stage: 'done', message: payload.existing ? 'Дані тайтлу оновлено.' : 'Тайтл додано в Notion.' });
+    setDiscoverStatus(payload.existing ? 'Тайтл уже був у Notion — дані оновлено.' : 'Повний пошук завершено, тайтл додано в Notion.', 'ok');
+    await new Promise(resolve => setTimeout(resolve, 650));
     location.href = `title.html?id=${encodeURIComponent(payload.item.id)}`;
   } catch (error) {
     console.error(error);
     discoverSelected = null;
     discoverResults.querySelectorAll('.source-discover-result').forEach(el => { el.disabled = false; });
     button?.classList.remove('processing');
+    const current = Number(String(discoverProgressPercent?.textContent || '0').replace('%', '')) || 0;
+    updateDiscoverProgress({ percent: current, stage: 'error', message: error.message || 'Помилка.' });
     setDiscoverStatus(error.message || 'Не вдалося обробити тайтл.', 'error');
   }
 }
 
+
 async function executeDiscoverSearch(q) {
   discoverSelected = null;
+  resetDiscoverProgress();
   discoverSetup.classList.add('hidden');
   discoverSetup.innerHTML = '';
   discoverResults.innerHTML = '<div class="discover-loading"><span class="detail-loader"></span><span>Google через Python core: MyAnimeList · AniList · Shikimori…</span></div>';

@@ -119,6 +119,13 @@
         <button class="primary-btn" type="submit">Знайти</button>
       </form>
       <div id="discoverStatus" class="discover-status"></div>
+      <div id="discoverProgress" class="discover-progress hidden" aria-live="polite">
+        <div class="discover-progress-track"><div id="discoverProgressBar" class="discover-progress-bar"></div></div>
+        <div class="discover-progress-meta">
+          <strong id="discoverProgressPercent">0%</strong>
+          <span id="discoverProgressText">Очікую запуск…</span>
+        </div>
+      </div>
       <div id="discoverResults" class="discover-results"></div>
       <div id="discoverSetup" class="discover-setup hidden"></div>
     </section>
@@ -126,6 +133,6 @@
 
   <div id="toast" class="toast" role="status"></div>
 
-  <script src="app.js?v=4.8"></script>
+  <script src="app.js?v=4.9"></script>
 </body>
 </html>

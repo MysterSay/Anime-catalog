@@ -520,3 +520,37 @@ body.modal-open { overflow:hidden; }
 }
 .secondary-btn:hover { border-color:rgba(112,201,255,.28); background:rgba(112,201,255,.07); }
 .google-cx-hint b { color:#d9e7f6; }
+
+/* v4.9 streaming full-search progress */
+.discover-progress {
+  margin: 10px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid rgba(112,201,255,.16);
+  border-radius: 14px;
+  background: rgba(112,201,255,.045);
+}
+.discover-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255,255,255,.075);
+}
+.discover-progress-bar {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #70c9ff, #9b8cff);
+  box-shadow: 0 0 18px rgba(112,201,255,.35);
+  transition: width .35s cubic-bezier(.2,.8,.2,1);
+}
+.discover-progress-meta {
+  margin-top: 9px;
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 10px;
+  align-items: start;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.discover-progress-meta strong { color: #dff4ff; font-size: 12px; }
+.discover-progress-meta span { color: var(--muted); }
