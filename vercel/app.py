@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 import asyncio
 import html as html_lib
 import json
@@ -20,7 +19,9 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.4.0"
+DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -28,6 +29,11 @@ USER_AGENT = (
 )
 
 AUTHORITY_SITES = ["myanimelist.net", "anilist.co", "shikimori.io"]
+AUTHORITY_LABELS = {
+    "myanimelist.net": "MyAnimeList",
+    "anilist.co": "AniList",
+    "shikimori.io": "Shikimori",
+}
 RU_SITES = [
     "jut-su.net",
     "ru.yummyani.me",
@@ -163,6 +169,11 @@ class InputPayload(BaseModel):
     url: str | None = ""
     status: str | None = ""
     group: str | None = ""
+
+
+class SearchPayload(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    limit: int = Field(default=8, ge=1, le=10)
 
 
 @dataclass
@@ -640,18 +651,37 @@ class Core:
         async with self.http_sem:
             return await self.client.request(method, url, **kwargs)
 
-    async def google_site_search(self, domain: str, title: str, limit: int = 12) -> list[dict[str, str]]:
+    async def google_site_search_detailed(
+        self, domain: str, title: str, limit: int = 12
+    ) -> tuple[list[dict[str, str]], str]:
         query = f'site:{domain} "{title}"'
         async with self.google_sem:
             try:
                 response = await self.request(
                     "GET",
                     "https://www.google.com/search",
-                    params={"q": query, "num": str(min(20, limit + 5)), "hl": "uk", "filter": "0"},
-                    headers={"Accept": "text/html,application/xhtml+xml"},
+                    params={
+                        "q": query,
+                        "num": str(min(20, limit + 5)),
+                        "hl": "uk",
+                        "filter": "0",
+                        "gbv": "1",
+                        "pws": "0",
+                    },
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml",
+                        "Cache-Control": "no-cache",
+                    },
                 )
-            except Exception:
-                return []
+            except Exception as error:
+                return [], f"Google request failed: {error}"
+
+        if response.status_code == 429:
+            return [], "Google повернув HTTP 429. Спробуй пошук ще раз через кілька секунд."
+        if response.status_code >= 400:
+            return [], f"Google повернув HTTP {response.status_code}."
+        if re.search(r"unusual traffic|/sorry/|detected unusual traffic", response.text, re.I):
+            return [], "Google тимчасово заблокував автоматичний пошук для IP Vercel."
 
         soup = BeautifulSoup(response.text, "html.parser")
         found: list[dict[str, str]] = []
@@ -680,7 +710,90 @@ class Core:
             found.append({"url": candidate, "title": title_text})
             if len(found) >= limit:
                 break
+        return found, ""
+
+    async def google_site_search(self, domain: str, title: str, limit: int = 12) -> list[dict[str, str]]:
+        found, _ = await self.google_site_search_detailed(domain, title, limit)
         return found
+
+    async def authority_result_preview(
+        self, site: str, item: dict[str, str], query: str
+    ) -> dict[str, str] | None:
+        url = compact_url(item.get("url", ""))
+        if not url or not is_authority_title_url(site, url):
+            return None
+
+        fallback_title = clean_title(item.get("title")) or slug_title(url)
+        soup, final_url = await self.fetch_soup(url)
+        final_url = compact_url(final_url or url)
+        if not is_authority_title_url(site, final_url):
+            final_url = url
+
+        page_title = fallback_title
+        image = ""
+        if soup:
+            signals = soup_title_signals(soup)
+            if signals:
+                page_title = clean_title(signals[0]) or fallback_title
+            cover = extract_cover_from_soup(soup)
+            if cover:
+                image = urljoin(final_url, cover)
+
+        # Keep only plausible title pages. Google may occasionally surface unrelated
+        # pages from the same host even with site: + quotes.
+        score = max(
+            title_relation_score(page_title, query),
+            title_relation_score(fallback_title, query),
+            title_relation_score(slug_title(final_url), query),
+        )
+        return {
+            "url": final_url,
+            "title": page_title or fallback_title or query,
+            "image": image,
+            "image_source": site if image else "",
+            "score": round(score, 4),
+        }
+
+    async def search_authority_pages(self, title: str, limit: int = 8) -> dict[str, Any]:
+        title = clean_title(title)
+        groups: list[dict[str, Any]] = []
+
+        async def one_site(site: str) -> dict[str, Any]:
+            query = f'site:{site} "{title}"'
+            raw, error = await self.google_site_search_detailed(site, title, limit=max(limit + 4, 10))
+            raw = [item for item in raw if is_authority_title_url(site, item.get("url", ""))]
+            previews = await asyncio.gather(*(
+                self.authority_result_preview(site, item, title) for item in raw[: max(limit + 2, limit)]
+            ))
+            items: list[dict[str, str]] = []
+            seen: set[str] = set()
+            for preview in previews:
+                if not preview:
+                    continue
+                url = preview.get("url", "")
+                key = compact_url(url)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                items.append(preview)
+                if len(items) >= limit:
+                    break
+            return {
+                "site": site,
+                "label": AUTHORITY_LABELS.get(site, site),
+                "query": query,
+                "error": error,
+                "items": items,
+            }
+
+        groups = await asyncio.gather(*(one_site(site) for site in AUTHORITY_SITES))
+        return {
+            "ok": True,
+            "query": title,
+            "groups": groups,
+            "total": sum(len(group.get("items") or []) for group in groups),
+            "search_engine": "google",
+        }
 
     async def fetch_soup(self, url: str) -> tuple[BeautifulSoup | None, str]:
         try:
@@ -1903,9 +2016,7 @@ class Core:
         return domain, {"url": final_url, "title": title or clean_title(payload.title)}
 
     async def send_callback(self, result: dict[str, Any]) -> dict[str, Any] | None:
-        url = clean_text(os.getenv("RESULT_WEBHOOK_URL"))
-        if not url:
-            return None
+        url = clean_text(os.getenv("RESULT_WEBHOOK_URL")) or DEFAULT_RESULT_WEBHOOK_URL
         headers = {"Content-Type": "application/json"}
         token = clean_text(os.getenv("RESULT_WEBHOOK_TOKEN"))
         if token:
@@ -1922,16 +2033,19 @@ class Core:
         source_task = asyncio.create_task(self.seed_source_catalog(payload))
         authority, (source_catalog, source_item) = await asyncio.gather(authority_task, source_task)
 
-        original = clean_title(authority.original or payload.title)
-        self.log(f"Назва: input={clean_title(payload.title)!r}; original={original!r}; english={clean_title(authority.english)!r}")
+        romanized = clean_title(authority.original or payload.title)
+        native_original = clean_title(authority.native or romanized or payload.title)
+        self.log(f"Назва: input={clean_title(payload.title)!r}; native={native_original!r}; romaji={romanized!r}; english={clean_title(authority.english)!r}")
         english = clean_title(authority.english)
-        base_queries = unique_strings([original, english], limit=2)
+        # Catalogs are much more likely to index Romaji/English than CJK native script.
+        base_queries = unique_strings([romanized, english, native_original], limit=3)
         if not base_queries:
             base_queries = [clean_title(payload.title)]
 
-        # Identity aliases are for verification, not search order. Keep related authority names cached.
+        # Identity aliases are for verification, not display. Native is preserved as the
+        # stored original title, while Romaji remains available for search.
         identity_aliases = unique_strings([
-            original, english, authority.native, *authority.aliases, payload.title,
+            native_original, romanized, english, *authority.aliases, payload.title,
         ], limit=30)
 
         catalogs: dict[str, list[dict[str, str]]] = {site: [] for site in CATALOG_SITES}
@@ -2000,7 +2114,7 @@ class Core:
             if catalogs[domain]:
                 continue
             local = ua_title if domain in UA_SITES else ru_title
-            google_queries = unique_strings([original, english, local], limit=3)
+            google_queries = unique_strings([romanized, english, native_original, local], limit=4)
             google_tasks[domain] = asyncio.create_task(
                 self.google_catalog_fallback(domain, google_queries, all_identity)
             )
@@ -2017,11 +2131,11 @@ class Core:
         if ua_title:
             title_uk_task = asyncio.create_task(asyncio.sleep(0, result=ua_title))
         else:
-            title_uk_task = asyncio.create_task(self.translate_uk(original or payload.title))
+            title_uk_task = asyncio.create_task(self.translate_uk(romanized or native_original or payload.title))
         if ru_title:
             title_ru_task = asyncio.create_task(asyncio.sleep(0, result=ru_title))
         else:
-            title_ru_task = asyncio.create_task(self.translate_ru(original or payload.title))
+            title_ru_task = asyncio.create_task(self.translate_ru(romanized or native_original or payload.title))
 
         description_uk, final_uk, final_ru = await asyncio.gather(
             description_task, title_uk_task, title_ru_task
@@ -2030,7 +2144,7 @@ class Core:
         final_ru = clean_title(final_ru)
 
         output_aliases = unique_strings([
-            original, english, authority.native, final_uk, final_ru, *authority.aliases,
+            native_original, romanized, english, final_uk, final_ru, *authority.aliases,
         ], limit=40)
 
         result: dict[str, Any] = {
@@ -2042,7 +2156,8 @@ class Core:
                 "group": clean_text(payload.group),
             },
             "title": {
-                "original": original,
+                "original": native_original,
+                "romaji": romanized,
                 "english": english,
                 "ukrainian": final_uk or clean_title(payload.title),
                 "russian": final_ru,
@@ -2068,7 +2183,7 @@ class Core:
                 "source_catalog": source_catalog or "",
                 "search_strategy": {
                     "authority": "direct APIs(input, english) -> strict title-entry Google site fallback",
-                    "catalogs": "native title-page(original, english) -> native title-page(localized) -> Google title-page fallback",
+                    "catalogs": "native title-page(romaji, english, native) -> native title-page(localized) -> Google title-page fallback",
                 },
                 "generated_at_unix": int(time.time()),
             },
@@ -2092,12 +2207,25 @@ app.add_middleware(
 
 @app.get("/")
 async def root() -> dict[str, Any]:
-    return {"service": "anime-title-core", "version": APP_VERSION, "endpoint": "/api/process"}
+    return {"service": "anime-title-core", "version": APP_VERSION, "endpoints": ["/api/search", "/api/process"]}
 
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": APP_VERSION}
+    return {"ok": True, "version": APP_VERSION, "search": "/api/search", "process": "/api/process"}
+
+
+@app.post("/api/search")
+async def search_endpoint(payload: SearchPayload, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    expected = clean_text(os.getenv("CORE_API_KEY"))
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid X-API-Key")
+
+    core = Core()
+    try:
+        return await core.search_authority_pages(payload.title, payload.limit)
+    finally:
+        await core.close()
 
 
 @app.post("/api/process")
