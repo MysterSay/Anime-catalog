@@ -1793,7 +1793,7 @@ export default {
       if (url.pathname === '/api/discover') return await handleDiscoverApi(request, env);
       if (url.pathname === '/api/discover/prepare') return await handleDiscoverPrepareApi(request, env);
       if (url.pathname === '/api/catalog-search') return await handleCatalogSearchApi(request, env);
-      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v4.9-stream-progress-2026-08-11', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: 'ndjson-v1', coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true });
+      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v5.2-unified-custom-dropdowns-2026-08-11', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: 'ndjson-v1', coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true });
 
       if (url.pathname === '/api/health') {
         const databaseId = env.NOTION_DATABASE_ID || DEFAULT_DATABASE_ID;

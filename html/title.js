@@ -17,7 +17,23 @@ let saved = {};
 try { saved = JSON.parse(localStorage.getItem('yoru-state') || '{}'); } catch { saved = {}; }
 const favorite = new Set(Array.isArray(saved.favorite) ? saved.favorite : []);
 const liked = new Set(Array.isArray(saved.liked) ? saved.liked : []);
-saved.linkMarks = saved.linkMarks && typeof saved.linkMarks === 'object' ? saved.linkMarks : {};
+
+// Global site colors. These defaults live in code and apply on every title page.
+const DEFAULT_SOURCE_MARKS = Object.freeze({
+  'Animevost': 'red',
+  'Jut Su': 'green',
+});
+
+// Migrate old per-title marks (pageId::Site) to one global mark per site.
+const previousLinkMarks = saved.linkMarks && typeof saved.linkMarks === 'object' ? saved.linkMarks : {};
+const globalLinkMarks = { ...DEFAULT_SOURCE_MARKS };
+for (const [key, mark] of Object.entries(previousLinkMarks)) {
+  if (mark !== 'red' && mark !== 'green') continue;
+  const separator = key.lastIndexOf('::');
+  const site = separator >= 0 ? key.slice(separator + 2) : key;
+  if (site) globalLinkMarks[site] = mark;
+}
+saved.linkMarks = globalLinkMarks;
 let currentItem = null;
 let apiOptions = { statuses: [], groups: [] };
 let mediaKind = null;
@@ -49,7 +65,8 @@ function statusTheme(status) {
 }
 
 function sourceMarkKey(site) {
-  return currentItem ? `${currentItem.id}::${site}` : site;
+  // Deliberately global: a site's color is the same on every anime title page.
+  return String(site || '').trim();
 }
 
 function getSourceMark(site) {

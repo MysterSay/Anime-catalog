@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=5.0" />
+  <link rel="stylesheet" href="styles.css?v=5.2" />
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -59,40 +59,63 @@
         <kbd>/</kbd>
       </div>
 
-      <div class="filters-row">
-        <div class="select-wrap group-select">
-          <label for="groupFilter">Група</label>
-          <select id="groupFilter"><option value="all">Усі групи</option></select>
+      <div class="filters-row compact-controls-row">
+        <div class="custom-select select-wrap group-select" data-custom-select="groupFilter">
+          <select id="groupFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Усі групи</option></select>
+          <button class="icon-control custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-tooltip="Група: Усі групи">
+            <span class="control-symbol control-symbol-group" aria-hidden="true"></span>
+          </button>
+          <div class="custom-select-menu hidden" role="listbox"></div>
         </div>
-        <div class="select-wrap status-select">
-          <label for="statusFilter">Статус</label>
-          <select id="statusFilter"><option value="all">Усі статуси</option></select>
+
+        <div class="custom-select select-wrap status-select" data-custom-select="statusFilter">
+          <select id="statusFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Усі статуси</option></select>
+          <button class="icon-control custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-tooltip="Статус: Усі статуси">
+            <span class="control-symbol control-symbol-status" aria-hidden="true"></span>
+          </button>
+          <div class="custom-select-menu hidden" role="listbox"></div>
         </div>
-        <div class="select-wrap wide sort-select">
-          <label for="sortSelect">Сортування</label>
-          <select id="sortSelect">
+
+        <div class="custom-select select-wrap sort-select" data-custom-select="sortSelect">
+          <select id="sortSelect" class="custom-native-select" aria-hidden="true" tabindex="-1">
             <option value="added-desc">Спочатку нові</option>
             <option value="added-asc">Спочатку старі</option>
             <option value="title-asc">За алфавітом A–Я</option>
             <option value="title-desc">За алфавітом Я–A</option>
             <option value="status">За статусом</option>
           </select>
+          <button class="icon-control custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-tooltip="Сортування: Спочатку нові">
+            <span class="control-symbol control-symbol-sort" aria-hidden="true"></span>
+          </button>
+          <div class="custom-select-menu hidden" role="listbox"></div>
         </div>
+
         <div class="filter-menu" id="excludeFilterMenu">
-          <button id="excludeFilterBtn" class="filter-toggle" type="button" aria-expanded="false" aria-controls="excludeFilterPanel">
+          <button id="excludeFilterBtn" class="icon-control filter-toggle" type="button" aria-expanded="false" aria-controls="excludeFilterPanel" data-tooltip="Фільтр: нічого не приховується">
             <span class="filter-toggle-icon" aria-hidden="true"></span>
-            <span>Фільтр</span>
             <strong id="excludeFilterCount">0</strong>
           </button>
           <div id="excludeFilterPanel" class="filter-panel hidden">
-            <label class="filter-field">
+            <div class="filter-field">
               <span>Не показувати статус</span>
-              <select id="excludeStatusFilter"><option value="all">Нічого не приховувати</option></select>
-            </label>
-            <label class="filter-field">
+              <div class="custom-select nested-select" data-custom-select="excludeStatusFilter">
+                <select id="excludeStatusFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Нічого не приховувати</option></select>
+                <button class="nested-select-trigger custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="nested-select-value">Нічого не приховувати</span><span class="nested-select-caret">⌄</span>
+                </button>
+                <div class="custom-select-menu hidden" role="listbox"></div>
+              </div>
+            </div>
+            <div class="filter-field">
               <span>Не показувати групу</span>
-              <select id="excludeGroupFilter"><option value="all">Нічого не приховувати</option></select>
-            </label>
+              <div class="custom-select nested-select" data-custom-select="excludeGroupFilter">
+                <select id="excludeGroupFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Нічого не приховувати</option></select>
+                <button class="nested-select-trigger custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="nested-select-value">Нічого не приховувати</span><span class="nested-select-caret">⌄</span>
+                </button>
+                <div class="custom-select-menu hidden" role="listbox"></div>
+              </div>
+            </div>
             <label class="filter-check">
               <input id="hideFavoriteFilter" type="checkbox" />
               <span>Не показувати вибране</span>
@@ -104,11 +127,12 @@
             <button id="clearExcludeFilters" class="ghost-filter-btn" type="button">Очистити фільтр</button>
           </div>
         </div>
+
         <div class="view-switch" role="group" aria-label="Режим відображення">
-          <button id="gridViewBtn" class="view-btn active" title="Галерея" aria-label="Галерея">
+          <button id="gridViewBtn" class="view-btn icon-control active" data-tooltip="Галерея" title="" aria-label="Галерея">
             <svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z" fill="currentColor"/></svg>
           </button>
-          <button id="listViewBtn" class="view-btn" title="Список" aria-label="Список">
+          <button id="listViewBtn" class="view-btn icon-control" data-tooltip="Список" title="" aria-label="Список">
             <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </button>
         </div>
@@ -159,6 +183,6 @@
 
   <div id="toast" class="toast" role="status"></div>
 
-  <script src="app.js?v=5.0"></script>
+  <script src="app.js?v=5.2"></script>
 </body>
 </html>

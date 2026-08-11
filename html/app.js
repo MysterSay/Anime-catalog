@@ -104,14 +104,85 @@ function syncExcludeControls() {
   ].filter(Boolean).length;
   if (excludeFilterCount) excludeFilterCount.textContent = String(count);
   excludeFilterBtn?.classList.toggle('has-active', count > 0);
+  if (excludeFilterBtn) {
+    excludeFilterBtn.dataset.tooltip = count ? `Фільтр: активно ${count}` : 'Фільтр: нічого не приховується';
+    excludeFilterBtn.setAttribute('aria-label', excludeFilterBtn.dataset.tooltip);
+  }
 }
 
 function toggleExcludePanel(force) {
   if (!excludeFilterPanel || !excludeFilterBtn) return;
   const next = typeof force === 'boolean' ? force : excludeFilterPanel.classList.contains('hidden');
+  if (next) closeCustomSelects();
   excludeFilterPanel.classList.toggle('hidden', !next);
   excludeFilterBtn.setAttribute('aria-expanded', String(next));
   excludeFilterMenu?.classList.toggle('open', next);
+}
+
+const CUSTOM_SELECT_LABELS = {
+  groupFilter: 'Група',
+  statusFilter: 'Статус',
+  sortSelect: 'Сортування',
+  excludeStatusFilter: 'Не показувати статус',
+  excludeGroupFilter: 'Не показувати групу',
+};
+
+function closeCustomSelects(except = null) {
+  document.querySelectorAll('.custom-select.open').forEach(wrapper => {
+    if (wrapper === except) return;
+    wrapper.classList.remove('open');
+    wrapper.querySelector('.custom-select-menu')?.classList.add('hidden');
+    wrapper.querySelector('.custom-select-trigger')?.setAttribute('aria-expanded', 'false');
+  });
+}
+
+function syncCustomSelect(wrapper) {
+  if (!wrapper) return;
+  const selectId = wrapper.dataset.customSelect;
+  const select = document.getElementById(selectId);
+  const trigger = wrapper.querySelector('.custom-select-trigger');
+  const menu = wrapper.querySelector('.custom-select-menu');
+  if (!select || !trigger || !menu) return;
+
+  const selected = select.options[select.selectedIndex] || select.options[0];
+  const selectedText = selected?.textContent || '';
+  const nestedValue = trigger.querySelector('.nested-select-value');
+  if (nestedValue) nestedValue.textContent = selectedText;
+
+  if (trigger.classList.contains('icon-control')) {
+    const label = CUSTOM_SELECT_LABELS[selectId] || 'Фільтр';
+    trigger.dataset.tooltip = `${label}: ${selectedText}`;
+    trigger.setAttribute('aria-label', `${label}: ${selectedText}`);
+  }
+
+  menu.innerHTML = [...select.options].map(option => `
+    <button class="custom-select-option ${option.value === select.value ? 'selected' : ''}" type="button" role="option"
+      aria-selected="${option.value === select.value ? 'true' : 'false'}" data-custom-option="${escapeHtml(option.value)}">
+      <span>${escapeHtml(option.textContent)}</span>
+      <i>✓</i>
+    </button>`).join('');
+}
+
+function syncCustomSelects() {
+  document.querySelectorAll('.custom-select[data-custom-select]').forEach(syncCustomSelect);
+}
+
+function openCustomSelect(wrapper) {
+  const menu = wrapper?.querySelector('.custom-select-menu');
+  const trigger = wrapper?.querySelector('.custom-select-trigger');
+  if (!wrapper || !menu || !trigger) return;
+  const willOpen = !wrapper.classList.contains('open');
+  closeCustomSelects(wrapper);
+  if (willOpen) {
+    toggleExcludePanel(wrapper.closest('#excludeFilterPanel') ? true : false);
+    wrapper.classList.add('open');
+    menu.classList.remove('hidden');
+    trigger.setAttribute('aria-expanded', 'true');
+  } else {
+    wrapper.classList.remove('open');
+    menu.classList.add('hidden');
+    trigger.setAttribute('aria-expanded', 'false');
+  }
 }
 
 function populateFilters() {
@@ -143,6 +214,7 @@ function populateFilters() {
   });
 
   syncExcludeControls();
+  syncCustomSelects();
 }
 
 function getFiltered() {
@@ -251,6 +323,7 @@ function render() {
   statusFilter.value = state.status;
   sortSelect.value = state.sort;
   syncExcludeControls();
+  syncCustomSelects();
 
   const ids = new Set(db.map(x => x.id));
   document.getElementById('countAll').textContent = db.length;
@@ -367,6 +440,26 @@ document.addEventListener('keydown', e => {
 });
 
 document.addEventListener('click', e => {
+  const option = e.target.closest('[data-custom-option]');
+  if (option) {
+    const wrapper = option.closest('.custom-select');
+    const select = document.getElementById(wrapper?.dataset.customSelect || '');
+    if (wrapper && select) {
+      select.value = option.dataset.customOption;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      syncCustomSelect(wrapper);
+      closeCustomSelects();
+    }
+    return;
+  }
+
+  const trigger = e.target.closest('.custom-select-trigger');
+  if (trigger) {
+    openCustomSelect(trigger.closest('.custom-select'));
+    return;
+  }
+
+  if (!e.target.closest('.custom-select')) closeCustomSelects();
   if (excludeFilterMenu && !excludeFilterMenu.contains(e.target)) toggleExcludePanel(false);
 });
 
