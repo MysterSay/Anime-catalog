@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#090b12" />
+  <meta name="robots" content="noindex, nofollow, noarchive" />
+  <title>Yoru — Anime Catalog</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=4.5" />
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+  <div class="noise"></div>
+
+  <header class="topbar">
+    <a class="brand" href="index.html" aria-label="На головну">
+      <span class="brand-mark">夜</span>
+      <span class="brand-text">YORU</span>
+    </a>
+
+    <nav class="top-actions">
+      <button class="chip-btn active" data-quick="all">
+        <span>Усі</span><strong id="countAll">0</strong>
+      </button>
+      <button class="chip-btn" data-quick="favorite">
+        <span>Вибране</span><strong id="countFavorite">0</strong>
+      </button>
+      <button class="chip-btn" data-quick="liked">
+        <span>Улюблене</span><strong id="countLiked">0</strong>
+      </button>
+      <button id="openAddTitle" class="chip-btn add-title-chip" type="button">
+        <span>＋ Додати тайтл</span>
+      </button>
+    </nav>
+  </header>
+
+  <main class="page-shell">
+    <section class="hero">
+      <div class="hero-copy reveal">
+        <span class="eyebrow">PERSONAL ANIME LIBRARY</span>
+        <h1>Каталог, який <span>живе</span> разом із твоєю колекцією.</h1>
+        <p>Шукай, сортуй, групуй і відкривай тайтли без зайвих переходів.</p>
+      </div>
+      <div class="hero-stat reveal delay-1">
+        <span>У колекції</span>
+        <strong id="heroTotal">0</strong>
+        <small>тайтлів</small>
+      </div>
+    </section>
+
+    <section class="controls-panel reveal delay-2">
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.3-4.3m2.3-5.2a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="searchInput" type="search" placeholder="Пошук за назвою, групою або статусом…" autocomplete="off" />
+        <kbd>/</kbd>
+      </div>
+
+      <div class="filters-row">
+        <div class="select-wrap">
+          <label for="groupFilter">Група</label>
+          <select id="groupFilter"><option value="all">Усі групи</option></select>
+        </div>
+        <div class="select-wrap">
+          <label for="statusFilter">Статус</label>
+          <select id="statusFilter"><option value="all">Усі статуси</option></select>
+        </div>
+        <div class="select-wrap wide">
+          <label for="sortSelect">Сортування</label>
+          <select id="sortSelect">
+            <option value="added-desc">Спочатку нові</option>
+            <option value="added-asc">Спочатку старі</option>
+            <option value="title-asc">За алфавітом A–Я</option>
+            <option value="title-desc">За алфавітом Я–A</option>
+            <option value="status">За статусом</option>
+          </select>
+        </div>
+        <div class="view-switch" role="group" aria-label="Режим відображення">
+          <button id="gridViewBtn" class="view-btn active" title="Галерея" aria-label="Галерея">
+            <svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z" fill="currentColor"/></svg>
+          </button>
+          <button id="listViewBtn" class="view-btn" title="Список" aria-label="Список">
+            <svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <section class="catalog-head reveal delay-3">
+      <div>
+        <span class="section-kicker">КАТАЛОГ</span>
+        <h2 id="catalogTitle">Усі тайтли</h2>
+      </div>
+      <div class="result-count"><strong id="resultCount">0</strong> результатів</div>
+    </section>
+
+    <section id="catalog" class="catalog-grid" aria-live="polite"></section>
+    <div id="emptyState" class="empty-state hidden">
+      <div class="empty-icon">◇</div>
+      <h3>Нічого не знайдено</h3>
+      <p>Спробуй змінити пошук або фільтри.</p>
+    </div>
+  </main>
+
+  <div id="discoverModal" class="modal-shell hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-discover-close></div>
+    <section class="modal-card discover-card" role="dialog" aria-modal="true" aria-labelledby="discoverTitle">
+      <button class="modal-x" type="button" data-discover-close aria-label="Закрити">×</button>
+      <div class="modal-head">
+        <span class="section-kicker">ANIME → NOTION</span>
+        <h2 id="discoverTitle">Знайти та додати тайтл</h2>
+        <p>Пошук через Google окремо в MyAnimeList, AniList і Shikimori. Обери правильну сторінку — решту обробить Python core.</p>
+      </div>
+      <form id="discoverSearchForm" class="discover-search">
+        <input id="discoverSearchInput" type="search" placeholder="Введи назву аніме…" autocomplete="off" />
+        <button class="primary-btn" type="submit">Знайти</button>
+      </form>
+      <div id="discoverStatus" class="discover-status"></div>
+      <div id="discoverResults" class="discover-results"></div>
+      <div id="discoverSetup" class="discover-setup hidden"></div>
+    </section>
+  </div>
+
+  <div id="googleCseHost" class="google-cse-host" aria-hidden="true"></div>
+  <div id="toast" class="toast" role="status"></div>
+
+  <script src="app.js?v=4.5"></script>
+</body>
+</html>
