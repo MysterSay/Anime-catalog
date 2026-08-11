@@ -19,7 +19,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -754,9 +754,83 @@ class Core:
             "score": round(score, 4),
         }
 
+    async def _direct_authority_fallback(self, title: str, limit: int = 8) -> dict[str, list[dict[str, str]]]:
+        """Build authority-site results without scraping Google.
+
+        Google site: search remains the first strategy. This fallback is only used
+        when Google's HTML contains no usable title-page results (common on cloud
+        hosting IPs). The returned URLs still point to the requested authority
+        sites so the frontend contract does not change.
+        """
+        ani_task = asyncio.create_task(self.anilist_search(title))
+        shiki_task = asyncio.create_task(self.shikimori_authority_search(title))
+        ani_raw, shiki_raw = await asyncio.gather(ani_task, shiki_task)
+
+        out: dict[str, list[dict[str, str]]] = {site: [] for site in AUTHORITY_SITES}
+        seen: dict[str, set[str]] = {site: set() for site in AUTHORITY_SITES}
+
+        def add(site: str, url: str, label: str, image: str = "", score: float = 0.0) -> None:
+            url = compact_url(url)
+            if not url or url in seen[site] or not is_authority_title_url(site, url):
+                return
+            seen[site].add(url)
+            out[site].append({
+                "url": url,
+                "title": clean_title(label) or title,
+                "image": clean_text(image),
+                "image_source": site if image else "",
+                "score": round(float(score or 0.0), 4),
+            })
+
+        for media in ani_raw or []:
+            titles = media.get("title") or {}
+            names = self.media_names(media)
+            label = clean_title(titles.get("romaji") or titles.get("english") or titles.get("native")) or title
+            image = clean_text(((media.get("coverImage") or {}).get("extraLarge") or (media.get("coverImage") or {}).get("large") or (media.get("coverImage") or {}).get("medium")))
+            score = max((title_relation_score(name, title) for name in names), default=0.0)
+            media_id = media.get("id")
+            mal_id = media.get("idMal")
+            if media_id:
+                add("anilist.co", f"https://anilist.co/anime/{media_id}", label, image, score)
+            if mal_id:
+                add("myanimelist.net", f"https://myanimelist.net/anime/{mal_id}", clean_title(titles.get("english") or titles.get("romaji") or label), image, score)
+
+        for item in shiki_raw or []:
+            anime_id = item.get("id")
+            if not anime_id:
+                continue
+            label = clean_title(item.get("name") or item.get("russian") or title)
+            candidate_names = unique_strings([item.get("name"), item.get("russian")], limit=4)
+            score = max((title_relation_score(name, title) for name in candidate_names), default=0.0)
+            image = ""
+            image_obj = item.get("image") or {}
+            if isinstance(image_obj, dict):
+                image_path = image_obj.get("original") or image_obj.get("preview") or image_obj.get("x96") or image_obj.get("x48")
+                if image_path:
+                    image = urljoin("https://shikimori.io", str(image_path))
+            shiki_url = urljoin("https://shikimori.io", item.get("url") or f"/animes/{anime_id}")
+            add("shikimori.io", shiki_url, label, image, score)
+            # Shikimori anime IDs are MAL IDs, so this also gives us a valid MAL URL.
+            add("myanimelist.net", f"https://myanimelist.net/anime/{anime_id}", label, image, score)
+
+        for site in out:
+            out[site].sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+            out[site] = out[site][:limit]
+        return out
+
     async def search_authority_pages(self, title: str, limit: int = 8) -> dict[str, Any]:
         title = clean_title(title)
-        groups: list[dict[str, Any]] = []
+        direct_cache: dict[str, list[dict[str, str]]] | None = None
+        direct_lock = asyncio.Lock()
+
+        async def get_direct() -> dict[str, list[dict[str, str]]]:
+            nonlocal direct_cache
+            if direct_cache is not None:
+                return direct_cache
+            async with direct_lock:
+                if direct_cache is None:
+                    direct_cache = await self._direct_authority_fallback(title, limit)
+            return direct_cache
 
         async def one_site(site: str) -> dict[str, Any]:
             query = f'site:{site} "{title}"'
@@ -778,21 +852,33 @@ class Core:
                 items.append(preview)
                 if len(items) >= limit:
                     break
+
+            source = "google"
+            if not items:
+                direct = await get_direct()
+                items = list(direct.get(site) or [])[:limit]
+                if items:
+                    source = "direct-fallback"
+                    # Zero Google results is not an actionable user error once fallback succeeded.
+                    error = ""
+
             return {
                 "site": site,
                 "label": AUTHORITY_LABELS.get(site, site),
                 "query": query,
                 "error": error,
+                "source": source,
                 "items": items,
             }
 
         groups = await asyncio.gather(*(one_site(site) for site in AUTHORITY_SITES))
+        sources = sorted({group.get("source", "google") for group in groups})
         return {
             "ok": True,
             "query": title,
             "groups": groups,
             "total": sum(len(group.get("items") or []) for group in groups),
-            "search_engine": "google",
+            "search_engine": "+".join(sources),
         }
 
     async def fetch_soup(self, url: str) -> tuple[BeautifulSoup | None, str]:
