@@ -1,1 +1,226 @@
-
+{
+  "schema_version": 2,
+  "input": {
+    "title": "Арифурэта: Сильнейший ремесленник в мире",
+    "url": "https://jut-su.net/42-arifurjeta-silnejshij-remeslennik-v-mire-z1.html",
+    "status": "",
+    "group": ""
+  },
+  "title": {
+    "original": "Arifureta Shokugyou de Sekai Saikyou",
+    "english": "Arifureta: From Commonplace to World's Strongest",
+    "ukrainian": "Звичайна професія — найсильніший у світі",
+    "russian": "Арифурэта",
+    "aliases": [
+      "Arifureta Shokugyou de Sekai Saikyou",
+      "Arifureta: From Commonplace to World's Strongest",
+      "ありふれた職業で世界最強",
+      "Звичайна професія — найсильніший у світі",
+      "Арифурэта",
+      "Арифурэта: Сильнейший ремесленник в мире",
+      "От обычной работы до сильнейшего в мире",
+      "From Common Job Class to the Strongest in the World",
+      "平凡职业造就世界最强",
+      "Arifureta Shokugyou de Sekai Saikyou Recap",
+      "Арифурэта: Сильнейший ремесленник в мире — Рекап",
+      "Arifureta: Omnibus - The Great Orcus Labyrinth",
+      "ありふれた職業で世界最強 総集編 オルクス大迷宮",
+      "Arifureta: From Commonplace to World's Strongest Recap",
+      "Arifureta Shokugyou de Sekai Saikyou - 05.5",
+      "Arifureta Shokugyou de Sekai Saikyou 2nd Season",
+      "Арифурэта: Сильнейший ремесленник в мире 2",
+      "Arifureta: From Commonplace to World's Strongest Season 2",
+      "ありふれた職業で世界最強 2nd Season",
+      "From Common Job Class to the Strongest in the World 2nd Season",
+      "Arifureta Shokugyou de Sekai Saikyou Picture Drama",
+      "Арифурэта: Сильнейший ремесленник в мире ONA",
+      "Arifureta Shokugyou de Sekai Saikyou Season 3",
+      "Арифурэта: Сильнейший ремесленник в мире 3",
+      "Arifureta Shokugyou de Sekai Saikyou: Prologue",
+      "Арифурэта: Сильнейший ремесленник в мире — Пролог",
+      "Arifureta Shokugyou de Sekai Saikyou Specials",
+      "Арифурэта: Сильнейший ремесленник в мире — Дополнительные эпизоды",
+      "Arifureta Shokugyou de Sekai Saikyou: Arifureta Yorimichi de Sekai Saikyou",
+      "Арифурэта: Сильнейший ремесленник в мире 2 — Спецвыпуск",
+      "Arifureta Shokugyou de Sekai Saikyou 2nd Season Picture Drama",
+      "Арифурэта: Сильнейший ремесленник в мире 2 ONA",
+      "Arifureta: From Commonplace to World's Strongest Season 2 Picture Drama",
+      "ありふれた職業で世界最強 ピクチャードラマ",
+      "Arifureta: The World's Strongest Artisan"
+    ]
+  },
+  "description_uk": "Коли клас учнів переміщується в інший світ, щоб стати його рятівниками, Хадзіме Нагумо виявляється найслабшою ланкою. Оскільки його друзі та однокласники отримують сильні класи та вражаючі здібності завдяки наявним навичкам, йому дають слабкий титул Синергіста. Коли квест у підземеллі залишає його відокремленим від групи, Хаджіме повинен відкрити власні таланти або залишити його назавжди гнити в цьому світі. <br><br> (Джерело: Seven Seas Entertainment)",
+  "cover": {
+    "url": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx100668-DvOn5bMOt4cy.jpg",
+    "source": "anilist.co"
+  },
+  "banner": {
+    "url": "https://s4.anilist.co/file/anilistcdn/media/anime/banner/100668-9ZQSB5x5St7c.jpg",
+    "source": "anilist.co"
+  },
+  "authority": {
+    "myanimelist.net": [
+      {
+        "url": "https://myanimelist.net/anime/36882",
+        "title": "Arifureta: From Commonplace to World's Strongest"
+      }
+    ],
+    "anilist.co": [
+      {
+        "url": "https://anilist.co/anime/100668",
+        "title": "Arifureta Shokugyou de Sekai Saikyou"
+      }
+    ],
+    "shikimori.io": [
+      {
+        "url": "https://shikimori.io/animes/36882-arifureta-shokugyou-de-sekai-saikyou",
+        "title": "Arifureta Shokugyou de Sekai Saikyou"
+      },
+      {
+        "url": "https://shikimori.io/animes/40239-arifureta-shokugyou-de-sekai-saikyou-recap",
+        "title": "Arifureta Shokugyou de Sekai Saikyou Recap"
+      },
+      {
+        "url": "https://shikimori.io/animes/40507-arifureta-shokugyou-de-sekai-saikyou-2nd-season",
+        "title": "Arifureta Shokugyou de Sekai Saikyou 2nd Season"
+      },
+      {
+        "url": "https://shikimori.io/animes/49700-arifureta-shokugyou-de-sekai-saikyou-picture-drama",
+        "title": "Arifureta Shokugyou de Sekai Saikyou Picture Drama"
+      },
+      {
+        "url": "https://shikimori.io/animes/52995-arifureta-shokugyou-de-sekai-saikyou-season-3",
+        "title": "Arifureta Shokugyou de Sekai Saikyou Season 3"
+      },
+      {
+        "url": "https://shikimori.io/animes/46971-arifureta-shokugyou-de-sekai-saikyou-prologue",
+        "title": "Arifureta Shokugyou de Sekai Saikyou: Prologue"
+      },
+      {
+        "url": "https://shikimori.io/animes/40083-arifureta-shokugyou-de-sekai-saikyou-specials",
+        "title": "Arifureta Shokugyou de Sekai Saikyou Specials"
+      },
+      {
+        "url": "https://shikimori.io/animes/50916-arifureta-shokugyou-de-sekai-saikyou-arifureta-yorimichi-de-sekai-saikyou",
+        "title": "Arifureta Shokugyou de Sekai Saikyou: Arifureta Yorimichi de Sekai Saikyou"
+      }
+    ]
+  },
+  "catalogs": {
+    "jut-su.net": [
+      {
+        "url": "https://jut-su.net/42-arifurjeta-silnejshij-remeslennik-v-mire-z1.html",
+        "title": "Арифурэта: Сильнейший ремесленник в мире"
+      },
+      {
+        "url": "https://jut-su.net/132-arifurjeta-silnejshij-remeslennik-v-mire-2.html",
+        "title": "Арифурэта: Сильнейший ремесленник в мире 2 сезон"
+      },
+      {
+        "url": "https://jut-su.net/3034-arifurjeta-silnejshij-remeslennik-v-mire-3.html",
+        "title": "Арифурэта: Сильнейший ремесленник в мире 3 сезон"
+      }
+    ],
+    "ru.yummyani.me": [],
+    "crunchyroll.com": [],
+    "shikimori.io": [
+      {
+        "url": "https://shikimori.io/animes/36882-arifureta-shokugyou-de-sekai-saikyou",
+        "title": "Арифурэта: Сильнейший ремесленник в мире"
+      }
+    ],
+    "animevost.org": [
+      {
+        "url": "https://animevost.org/tip/tv/2740-arifureta-shokugyou-de-sekai-saikyou-2nd-season.html",
+        "title": "Арифурэта: Сильнейший ремесленник в мире (второй сезон) / Arifureta Shokugyou de Sekai Saikyou 2nd Season [1-12 из 12] [OVA 1-2 из 2]"
+      },
+      {
+        "url": "https://animevost.org/tip/tv/3326-arifureta-shokugyou-de-sekai-saikyou-season-3.html",
+        "title": "Арифурэта: Сильнейший ремесленник в мире (третий сезон) / Arifureta Shokugyou de Sekai Saikyou Season 3 [1-16 из 16]"
+      }
+    ],
+    "jutsu.tv": [
+      {
+        "url": "https://jutsu.tv/769-arifurjeta-c1.html",
+        "title": "Арифурэта"
+      },
+      {
+        "url": "https://jutsu.tv/1013-arifurjeta-2-sezon.html",
+        "title": "Арифурэта 2 сезон"
+      },
+      {
+        "url": "https://jutsu.tv/1188-arifurjeta-3-sezon.html",
+        "title": "Арифурэта 3 сезон"
+      }
+    ],
+    "jut.su": [],
+    "animego.studio": [
+      {
+        "url": "https://animego.studio/2865-arifurjeta-silnejshij-remeslennik-v-mire.html",
+        "title": "Арифурэта: Сильнейший ремесленник в мире"
+      },
+      {
+        "url": "https://animego.studio/2307-arifurjeta-silnejshij-remeslennik-v-mire-2.html",
+        "title": "Арифурэта: Сильнейший ремесленник в мире 2 сезон"
+      },
+      {
+        "url": "https://animego.studio/1968-arifurjeta-silnejshij-remeslennik-v-mire-2-ova.html",
+        "title": "Арифурэта: Сильнейший ремесленник в мире 2 сезон OVA"
+      },
+      {
+        "url": "https://animego.studio/1651-arifurjeta-silnejshij-remeslennik-v-mire-3.html",
+        "title": "Арифурэта: Сильнейший ремесленник в мире 3 сезон"
+      }
+    ],
+    "anilibria.tv": [],
+    "uaserials.com": [
+      {
+        "url": "https://uaserials.com/6437-zvychayna-profesiya-naysylnishyi-u-sviti.html",
+        "title": "Звичайна професія — найсильніший у світі"
+      }
+    ],
+    "uachan.com": [],
+    "anihub.in.ua": [
+      {
+        "url": "https://anihub.in.ua/anime/zvychayna-profesiya-naysylnishyy-u-sviti-2-11252",
+        "title": "Звичайна професія — найсильніший у світі"
+      }
+    ],
+    "amanogawa.space": [],
+    "animeon.club": [
+      {
+        "url": "https://animeon.club/anime/1431-zvychayna-profesiya-naysylnishyy-u-sviti",
+        "title": "Звичайна професія - найсильніший у світі"
+      }
+    ],
+    "anidesu.net": [],
+    "mikai.me": [
+      {
+        "url": "https://mikai.me/anime/731-zvychaina-profesiia-naisylnishyi-u-sviti-3",
+        "title": "Звичайна професія - найсильніший у світі 3"
+      },
+      {
+        "url": "https://mikai.me/anime/1694-zvychaina-profesiia-naisylnishyi-u-sviti-2",
+        "title": "Звичайна професія - найсильніший у світі 2"
+      },
+      {
+        "url": "https://mikai.me/anime/47-zvychaina-profesiia-naisylnishyi-u-sviti",
+        "title": "Звичайна професія - найсильніший у світі"
+      }
+    ],
+    "anitube.in.ua": []
+  },
+  "status": "",
+  "group": "",
+  "meta": {
+    "core_version": "2.2.0",
+    "anilist_id": 100668,
+    "mal_id": 36882,
+    "source_catalog": "jut-su.net",
+    "search_strategy": {
+      "authority": "direct APIs(input, english) -> strict title-entry Google site fallback",
+      "catalogs": "native title-page(original, english) -> native title-page(localized) -> Google title-page fallback"
+    },
+    "generated_at_unix": 1786430510
+  }
+}
