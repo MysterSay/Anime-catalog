@@ -15,7 +15,7 @@ const SITE_PROPERTIES = [...new Set([...AUTHORITY_SITES, ...CATALOGS])];
 const GOOGLE_SOURCE_SITES = [
   { domain: 'myanimelist.net', label: 'MyAnimeList', path: /^\/anime\/\d+(?:\/|$)/i },
   { domain: 'anilist.co', label: 'AniList', path: /^\/anime\/\d+(?:\/|$)/i },
-  { domain: 'shikimori.io', label: 'Shikimori', path: /^\/animes\/\d+(?:[-\/]|$)/i },
+  { domain: 'shikimori.io', label: 'Shikimori', path: /^\/animes\/\d+(?:[-\\/]|$)/i },
 ];
 const SEARCH_HOST_ALIASES = {
   'anilibria.tv': ['aniliberty.top', 'www.aniliberty.top', 'anilibria.top', 'www.anilibria.top', 'anilibria.tv'],
