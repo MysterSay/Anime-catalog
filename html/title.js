@@ -4,11 +4,20 @@ const id = new URLSearchParams(location.search).get('id');
 const FALLBACK_IMAGE = 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 700 1000%22%3E%3Cdefs%3E%3ClinearGradient id=%22g%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22%3E%3Cstop stop-color=%22%23171b27%22/%3E%3Cstop offset=%221%22 stop-color=%22%23282d42%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%22700%22 height=%221000%22 fill=%22url(%23g)%22/%3E%3Ctext x=%22350%22 y=%22520%22 text-anchor=%22middle%22 fill=%22%23798094%22 font-family=%22Arial%22 font-size=%2270%22%3EYORU%3C/text%3E%3C/svg%3E';
 const ANILIST_PUBLIC_ENDPOINT = 'https://graphql.anilist.co';
 const STATUS_OPTIONS = ['Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто', 'Без статусу'];
+const STATUS_THEME = {
+  'Переглянув': { solid: '#7ee8b5', glow: 'rgba(126,232,181,.34)', border: 'rgba(126,232,181,.55)' },
+  'Буду дивитись': { solid: '#a796ff', glow: 'rgba(167,150,255,.34)', border: 'rgba(167,150,255,.55)' },
+  'Дивлюсь': { solid: '#70c9ff', glow: 'rgba(112,201,255,.34)', border: 'rgba(112,201,255,.55)' },
+  'Відкладено': { solid: '#e7be72', glow: 'rgba(231,190,114,.34)', border: 'rgba(231,190,114,.55)' },
+  'Кинуто': { solid: '#d688a3', glow: 'rgba(214,136,163,.34)', border: 'rgba(214,136,163,.55)' },
+  'Без статусу': { solid: '#d5dceb', glow: 'rgba(213,220,235,.22)', border: 'rgba(213,220,235,.4)' },
+};
 
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem('yoru-state') || '{}'); } catch { saved = {}; }
 const favorite = new Set(Array.isArray(saved.favorite) ? saved.favorite : []);
 const liked = new Set(Array.isArray(saved.liked) ? saved.liked : []);
+saved.linkMarks = saved.linkMarks && typeof saved.linkMarks === 'object' ? saved.linkMarks : {};
 let currentItem = null;
 let apiOptions = { statuses: [], groups: [] };
 let mediaKind = null;
@@ -16,6 +25,7 @@ let mediaKind = null;
 function persistState() {
   saved.favorite = [...favorite];
   saved.liked = [...liked];
+  saved.linkMarks = saved.linkMarks && typeof saved.linkMarks === 'object' ? saved.linkMarks : {};
   localStorage.setItem('yoru-state', JSON.stringify(saved));
 }
 
@@ -32,6 +42,31 @@ function safeHttpUrl(value) {
 
 function statusClass(status) {
   return 'status-' + ({ 'Буду дивитись':'planned', 'Дивлюсь':'watching', 'Переглянув':'completed', 'Відкладено':'paused', 'Кинуто':'dropped' }[status] || 'default');
+}
+
+function statusTheme(status) {
+  return STATUS_THEME[status] || STATUS_THEME['Без статусу'];
+}
+
+function sourceMarkKey(site) {
+  return currentItem ? `${currentItem.id}::${site}` : site;
+}
+
+function getSourceMark(site) {
+  return saved.linkMarks?.[sourceMarkKey(site)] || '';
+}
+
+function setSourceMark(site, mark) {
+  if (!currentItem) return;
+  const key = sourceMarkKey(site);
+  if (!mark) delete saved.linkMarks[key];
+  else saved.linkMarks[key] = mark;
+  persistState();
+}
+
+function sourceMarkIcon(kind) {
+  if (kind === 'red') return `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 9l6 6M15 9l-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.8 12.3l2.2 2.2 4.2-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
 function icon(type, active) {
@@ -96,19 +131,28 @@ function buildDropdown(kind, currentValue, options) {
 
 function buildLinksAccordion(linkGroups) {
   if (!linkGroups.length) return '<div class="source-empty">Посилань поки немає</div>';
-  return linkGroups.map((group, groupIndex) => `
-    <section class="source-group ${groupIndex === 0 ? 'open' : ''}">
-      <button class="source-group-trigger" data-source-toggle aria-expanded="${groupIndex === 0 ? 'true' : 'false'}">
-        <span class="source-group-info"><strong>${escapeHtml(group.site)}</strong><small>${group.items.length} посилань</small></span>
-        <span class="source-group-caret">⌄</span>
-      </button>
+  return linkGroups.map((group, groupIndex) => {
+    const mark = getSourceMark(group.site);
+    return `
+    <section class="source-group ${groupIndex === 0 ? 'open' : ''} ${mark ? `marked-${mark}` : ''}" data-source-site="${escapeHtml(group.site)}">
+      <div class="source-group-head">
+        <button class="source-group-trigger" type="button" data-source-toggle aria-expanded="${groupIndex === 0 ? 'true' : 'false'}">
+          <span class="source-group-info"><strong>${escapeHtml(group.site)}</strong><small>${group.items.length} посилань</small></span>
+          <span class="source-group-caret">⌄</span>
+        </button>
+        <div class="source-group-tools">
+          <button class="source-mark-btn source-mark-red ${mark === 'red' ? 'active' : ''}" type="button" data-source-mark="red" data-source-site="${escapeHtml(group.site)}" aria-label="Позначити червоним">${sourceMarkIcon('red')}</button>
+          <button class="source-mark-btn source-mark-green ${mark === 'green' ? 'active' : ''}" type="button" data-source-mark="green" data-source-site="${escapeHtml(group.site)}" aria-label="Позначити зеленим">${sourceMarkIcon('green')}</button>
+        </div>
+      </div>
       <div class="source-group-body"><div class="source-group-list">
         ${group.items.map((link, index) => `
           <a class="source-btn source-entry" style="--entry-index:${index}" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">
             <span>${escapeHtml(link.name || `Посилання ${index + 1}`)}</span><span class="source-arrow">↗</span>
           </a>`).join('')}
       </div></div>
-    </section>`).join('');
+    </section>`;
+  }).join('');
 }
 
 function renderItem(item) {
@@ -127,6 +171,7 @@ function renderItem(item) {
     !currentItem.hasBanner ? '<button class="media-repair-btn" data-media-kind="banner">＋ Додати банер</button>' : '',
   ].filter(Boolean).join('');
 
+  const theme = statusTheme(currentItem.status || 'Без статусу');
   root.innerHTML = `
     <section class="title-hero">
       <div class="banner-bg"></div>
@@ -142,7 +187,7 @@ function renderItem(item) {
             </div>
             ${missingMedia ? `<div class="media-repair-actions">${missingMedia}</div>` : ''}
           </div>
-          <div class="title-poster-wrap reveal delay-1 ${currentItem.hasPoster ? '' : 'poster-missing'}">
+          <div class="title-poster-wrap reveal delay-1 ${currentItem.hasPoster ? '' : 'poster-missing'}" style="--status-accent:${theme.solid}; --status-accent-glow:${theme.glow}; --status-accent-border:${theme.border}">
             <img class="title-poster" src="${escapeHtml(currentItem.poster || FALLBACK_IMAGE)}" alt="${escapeHtml(currentItem.title)}" />
             ${!currentItem.hasPoster ? '<button class="poster-add-overlay" data-media-kind="poster">＋ Постер</button>' : ''}
           </div>
@@ -396,6 +441,16 @@ root.addEventListener('click', async e => {
     if (!value?.trim()) return;
     try { await patchCurrent({ group: value.trim() }, 'Нову групу додано в Notion'); }
     catch (error) { toastMessage(error.message || 'Не вдалося додати групу'); }
+    return;
+  }
+
+  const markBtn = e.target.closest('[data-source-mark]');
+  if (markBtn) {
+    const site = markBtn.dataset.sourceSite;
+    const mark = markBtn.dataset.sourceMark;
+    const current = getSourceMark(site);
+    setSourceMark(site, current === mark ? '' : mark);
+    renderItem(currentItem);
     return;
   }
 

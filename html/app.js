@@ -9,6 +9,15 @@ const searchInput = document.getElementById('searchInput');
 const groupFilter = document.getElementById('groupFilter');
 const statusFilter = document.getElementById('statusFilter');
 const sortSelect = document.getElementById('sortSelect');
+const excludeGroupFilter = document.getElementById('excludeGroupFilter');
+const excludeStatusFilter = document.getElementById('excludeStatusFilter');
+const hideFavoriteFilter = document.getElementById('hideFavoriteFilter');
+const hideLikedFilter = document.getElementById('hideLikedFilter');
+const excludeFilterMenu = document.getElementById('excludeFilterMenu');
+const excludeFilterBtn = document.getElementById('excludeFilterBtn');
+const excludeFilterPanel = document.getElementById('excludeFilterPanel');
+const excludeFilterCount = document.getElementById('excludeFilterCount');
+const clearExcludeFilters = document.getElementById('clearExcludeFilters');
 const gridViewBtn = document.getElementById('gridViewBtn');
 const listViewBtn = document.getElementById('listViewBtn');
 const resultCount = document.getElementById('resultCount');
@@ -30,10 +39,17 @@ const discoverProgressText = document.getElementById('discoverProgressText');
 
 const STATUS_ORDER = ['Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто'];
 const FALLBACK_IMAGE = 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 700 1000%22%3E%3Cdefs%3E%3ClinearGradient id=%22g%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22%3E%3Cstop stop-color=%22%23171b27%22/%3E%3Cstop offset=%221%22 stop-color=%22%23282d42%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%22700%22 height=%221000%22 fill=%22url(%23g)%22/%3E%3Ctext x=%22350%22 y=%22520%22 text-anchor=%22middle%22 fill=%22%23798094%22 font-family=%22Arial%22 font-size=%2270%22%3EYORU%3C/text%3E%3C/svg%3E';
+const STATUS_THEME = {
+  'Переглянув': { solid: '#7ee8b5', glow: 'rgba(126,232,181,.34)', border: 'rgba(126,232,181,.55)' },
+  'Буду дивитись': { solid: '#a796ff', glow: 'rgba(167,150,255,.34)', border: 'rgba(167,150,255,.55)' },
+  'Дивлюсь': { solid: '#70c9ff', glow: 'rgba(112,201,255,.34)', border: 'rgba(112,201,255,.55)' },
+  'Відкладено': { solid: '#e7be72', glow: 'rgba(231,190,114,.34)', border: 'rgba(231,190,114,.55)' },
+  'Кинуто': { solid: '#d688a3', glow: 'rgba(214,136,163,.34)', border: 'rgba(214,136,163,.55)' },
+  'Без статусу': { solid: '#d5dceb', glow: 'rgba(213,220,235,.22)', border: 'rgba(213,220,235,.4)' },
+};
 
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem('yoru-state') || '{}'); } catch { saved = {}; }
-
 
 const state = {
   view: saved.view || 'grid',
@@ -42,6 +58,10 @@ const state = {
   group: 'all',
   status: 'all',
   sort: 'added-desc',
+  excludeGroup: saved.excludeGroup || 'all',
+  excludeStatus: saved.excludeStatus || 'all',
+  hideFavorite: Boolean(saved.hideFavorite),
+  hideLiked: Boolean(saved.hideLiked),
   favorite: new Set(Array.isArray(saved.favorite) ? saved.favorite : []),
   liked: new Set(Array.isArray(saved.liked) ? saved.liked : []),
 };
@@ -50,6 +70,10 @@ function saveState() {
   saved.view = state.view;
   saved.favorite = [...state.favorite];
   saved.liked = [...state.liked];
+  saved.excludeGroup = state.excludeGroup;
+  saved.excludeStatus = state.excludeStatus;
+  saved.hideFavorite = state.hideFavorite;
+  saved.hideLiked = state.hideLiked;
   saved.customGroups = Array.isArray(saved.customGroups) ? saved.customGroups : [];
   localStorage.setItem('yoru-state', JSON.stringify(saved));
 }
@@ -63,13 +87,45 @@ function normalize(value) {
   return String(value || '').toLocaleLowerCase('uk-UA').normalize('NFKD');
 }
 
+function statusTheme(status) {
+  return STATUS_THEME[status] || STATUS_THEME['Без статусу'];
+}
+
+function syncExcludeControls() {
+  if (excludeGroupFilter) excludeGroupFilter.value = state.excludeGroup;
+  if (excludeStatusFilter) excludeStatusFilter.value = state.excludeStatus;
+  if (hideFavoriteFilter) hideFavoriteFilter.checked = state.hideFavorite;
+  if (hideLikedFilter) hideLikedFilter.checked = state.hideLiked;
+  const count = [
+    state.excludeGroup !== 'all',
+    state.excludeStatus !== 'all',
+    state.hideFavorite,
+    state.hideLiked,
+  ].filter(Boolean).length;
+  if (excludeFilterCount) excludeFilterCount.textContent = String(count);
+  excludeFilterBtn?.classList.toggle('has-active', count > 0);
+}
+
+function toggleExcludePanel(force) {
+  if (!excludeFilterPanel || !excludeFilterBtn) return;
+  const next = typeof force === 'boolean' ? force : excludeFilterPanel.classList.contains('hidden');
+  excludeFilterPanel.classList.toggle('hidden', !next);
+  excludeFilterBtn.setAttribute('aria-expanded', String(next));
+  excludeFilterMenu?.classList.toggle('open', next);
+}
+
 function populateFilters() {
   groupFilter.innerHTML = '<option value="all">Усі групи</option>';
   statusFilter.innerHTML = '<option value="all">Усі статуси</option>';
+  if (excludeGroupFilter) excludeGroupFilter.innerHTML = '<option value="all">Нічого не приховувати</option>';
+  if (excludeStatusFilter) excludeStatusFilter.innerHTML = '<option value="all">Нічого не приховувати</option>';
 
-  [...new Set(db.map(x => x.group).filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b, 'uk'))
-    .forEach(group => groupFilter.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`));
+  const groups = [...new Set(db.map(x => x.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+  groups.forEach(group => {
+    const option = `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`;
+    groupFilter.insertAdjacentHTML('beforeend', option);
+    excludeGroupFilter?.insertAdjacentHTML('beforeend', option);
+  });
 
   const statuses = [...new Set(db.map(x => x.status).filter(Boolean))];
   statuses.sort((a, b) => {
@@ -80,7 +136,13 @@ function populateFilters() {
     if (bi === -1) return -1;
     return ai - bi;
   });
-  statuses.forEach(status => statusFilter.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(status)}">${escapeHtml(status)}</option>`));
+  statuses.forEach(status => {
+    const option = `<option value="${escapeHtml(status)}">${escapeHtml(status)}</option>`;
+    statusFilter.insertAdjacentHTML('beforeend', option);
+    excludeStatusFilter?.insertAdjacentHTML('beforeend', option);
+  });
+
+  syncExcludeControls();
 }
 
 function getFiltered() {
@@ -92,7 +154,11 @@ function getFiltered() {
     const matchesQuick = state.quick === 'all' ||
       (state.quick === 'favorite' && state.favorite.has(item.id)) ||
       (state.quick === 'liked' && state.liked.has(item.id));
-    return matchesSearch && matchesGroup && matchesStatus && matchesQuick;
+    const excludedGroup = state.excludeGroup !== 'all' && item.group === state.excludeGroup;
+    const excludedStatus = state.excludeStatus !== 'all' && item.status === state.excludeStatus;
+    const excludedFavorite = state.hideFavorite && state.favorite.has(item.id);
+    const excludedLiked = state.hideLiked && state.liked.has(item.id);
+    return matchesSearch && matchesGroup && matchesStatus && matchesQuick && !excludedGroup && !excludedStatus && !excludedFavorite && !excludedLiked;
   });
 
   items.sort((a, b) => {
@@ -136,8 +202,9 @@ function iconHeart(active, filled) {
 function cardTemplate(item, index) {
   const favorite = state.favorite.has(item.id);
   const liked = state.liked.has(item.id);
+  const theme = statusTheme(item.status || 'Без статусу');
   return `
-    <article class="anime-card" style="--delay:${Math.min(index * 35, 280)}ms" data-id="${escapeHtml(item.id)}">
+    <article class="anime-card" style="--delay:${Math.min(index * 35, 280)}ms; --status-accent:${theme.solid}; --status-accent-glow:${theme.glow}; --status-accent-border:${theme.border}" data-id="${escapeHtml(item.id)}">
       <a class="card-link" href="title.html?id=${encodeURIComponent(item.id)}" aria-label="Відкрити ${escapeHtml(item.title)}"></a>
       <div class="poster-wrap">
         <img class="poster" src="${escapeHtml(item.poster || FALLBACK_IMAGE)}" alt="${escapeHtml(item.title)}" loading="lazy" />
@@ -180,6 +247,10 @@ function render() {
 
   resultCount.textContent = items.length;
   heroTotal.textContent = db.length;
+  groupFilter.value = state.group;
+  statusFilter.value = state.status;
+  sortSelect.value = state.sort;
+  syncExcludeControls();
 
   const ids = new Set(db.map(x => x.id));
   document.getElementById('countAll').textContent = db.length;
@@ -258,6 +329,19 @@ searchInput.addEventListener('input', () => { state.search = searchInput.value.t
 groupFilter.addEventListener('change', () => { state.group = groupFilter.value; render(); });
 statusFilter.addEventListener('change', () => { state.status = statusFilter.value; render(); });
 sortSelect.addEventListener('change', () => { state.sort = sortSelect.value; render(); });
+excludeGroupFilter?.addEventListener('change', () => { state.excludeGroup = excludeGroupFilter.value; saveState(); render(); });
+excludeStatusFilter?.addEventListener('change', () => { state.excludeStatus = excludeStatusFilter.value; saveState(); render(); });
+hideFavoriteFilter?.addEventListener('change', () => { state.hideFavorite = hideFavoriteFilter.checked; saveState(); render(); });
+hideLikedFilter?.addEventListener('change', () => { state.hideLiked = hideLikedFilter.checked; saveState(); render(); });
+clearExcludeFilters?.addEventListener('click', () => {
+  state.excludeGroup = 'all';
+  state.excludeStatus = 'all';
+  state.hideFavorite = false;
+  state.hideLiked = false;
+  saveState();
+  render();
+});
+excludeFilterBtn?.addEventListener('click', () => toggleExcludePanel());
 gridViewBtn.addEventListener('click', () => { state.view = 'grid'; saveState(); render(); });
 listViewBtn.addEventListener('click', () => { state.view = 'list'; saveState(); render(); });
 
@@ -279,8 +363,12 @@ document.addEventListener('keydown', e => {
     searchInput.blur();
     render();
   }
+  if (e.key === 'Escape') toggleExcludePanel(false);
 });
 
+document.addEventListener('click', e => {
+  if (excludeFilterMenu && !excludeFilterMenu.contains(e.target)) toggleExcludePanel(false);
+});
 
 const SOURCE_LABELS = {
   'myanimelist.net': 'MyAnimeList',

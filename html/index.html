@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=4.8" />
+  <link rel="stylesheet" href="styles.css?v=5.0" />
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -60,15 +60,15 @@
       </div>
 
       <div class="filters-row">
-        <div class="select-wrap">
+        <div class="select-wrap group-select">
           <label for="groupFilter">Група</label>
           <select id="groupFilter"><option value="all">Усі групи</option></select>
         </div>
-        <div class="select-wrap">
+        <div class="select-wrap status-select">
           <label for="statusFilter">Статус</label>
           <select id="statusFilter"><option value="all">Усі статуси</option></select>
         </div>
-        <div class="select-wrap wide">
+        <div class="select-wrap wide sort-select">
           <label for="sortSelect">Сортування</label>
           <select id="sortSelect">
             <option value="added-desc">Спочатку нові</option>
@@ -78,12 +78,38 @@
             <option value="status">За статусом</option>
           </select>
         </div>
+        <div class="filter-menu" id="excludeFilterMenu">
+          <button id="excludeFilterBtn" class="filter-toggle" type="button" aria-expanded="false" aria-controls="excludeFilterPanel">
+            <span class="filter-toggle-icon" aria-hidden="true"></span>
+            <span>Фільтр</span>
+            <strong id="excludeFilterCount">0</strong>
+          </button>
+          <div id="excludeFilterPanel" class="filter-panel hidden">
+            <label class="filter-field">
+              <span>Не показувати статус</span>
+              <select id="excludeStatusFilter"><option value="all">Нічого не приховувати</option></select>
+            </label>
+            <label class="filter-field">
+              <span>Не показувати групу</span>
+              <select id="excludeGroupFilter"><option value="all">Нічого не приховувати</option></select>
+            </label>
+            <label class="filter-check">
+              <input id="hideFavoriteFilter" type="checkbox" />
+              <span>Не показувати вибране</span>
+            </label>
+            <label class="filter-check">
+              <input id="hideLikedFilter" type="checkbox" />
+              <span>Не показувати улюблене</span>
+            </label>
+            <button id="clearExcludeFilters" class="ghost-filter-btn" type="button">Очистити фільтр</button>
+          </div>
+        </div>
         <div class="view-switch" role="group" aria-label="Режим відображення">
           <button id="gridViewBtn" class="view-btn active" title="Галерея" aria-label="Галерея">
             <svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z" fill="currentColor"/></svg>
           </button>
           <button id="listViewBtn" class="view-btn" title="Список" aria-label="Список">
-            <svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </button>
         </div>
       </div>
@@ -133,6 +159,6 @@
 
   <div id="toast" class="toast" role="status"></div>
 
-  <script src="app.js?v=4.9"></script>
+  <script src="app.js?v=5.0"></script>
 </body>
 </html>
