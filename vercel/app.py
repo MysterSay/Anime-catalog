@@ -19,7 +19,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.4.2"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -816,6 +816,24 @@ class Core:
         for site in out:
             out[site].sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
             out[site] = out[site][:limit]
+
+        # A MyAnimeList fallback entry must use metadata from the MAL page itself.
+        # Do not label an AniList/Shikimori image as a MAL image.
+        async def hydrate_mal(item: dict[str, str]) -> dict[str, str]:
+            candidate = {**item, "image": "", "image_source": ""}
+            try:
+                preview = await self.authority_result_preview("myanimelist.net", candidate, title)
+            except Exception:
+                preview = None
+            if preview:
+                # Keep the ranking score computed by the direct fallback.
+                preview["score"] = item.get("score", preview.get("score", 0.0))
+                return preview
+            return candidate
+
+        if out["myanimelist.net"]:
+            out["myanimelist.net"] = list(await asyncio.gather(*(hydrate_mal(item) for item in out["myanimelist.net"])))
+
         return out
 
     async def search_authority_pages(self, title: str, limit: int = 8) -> dict[str, Any]:
