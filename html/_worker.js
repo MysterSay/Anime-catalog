@@ -3,6 +3,7 @@ const DEFAULT_DATABASE_ID = '3b87f72ac401804aab37db6332771629';
 const DEFAULT_DATA_SOURCE_ID = '3b87f72ac401802a95e4000bc7ababca';
 const ANILIST_ENDPOINT = 'https://graphql.anilist.co';
 const CORE_PROCESS_URL = 'https://anime-catalog-flame.vercel.app/api/process';
+const CORE_PROCESS_FULL_URL = 'https://anime-catalog-flame.vercel.app/api/process-full';
 const CORE_SEARCH_URL = 'https://anime-catalog-flame.vercel.app/api/search';
 
 const TITLE_STATUS_OPTIONS = ['Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто'];
@@ -1568,7 +1569,7 @@ async function handleProcessTitleApi(request, env) {
   const title = plainTitle(body.title || '');
   const sourceUrl = safeHttpUrl(body.url || '');
   if (!title || !sourceUrl) return json({ error: 'Потрібні title та url.' }, 400);
-  const coreUrl = env.CORE_PROCESS_URL || CORE_PROCESS_URL;
+  const coreUrl = env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL;
   const coreHeaders = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
   if (env.CORE_API_KEY) coreHeaders['X-API-Key'] = env.CORE_API_KEY;
   const coreResponse = await fetch(coreUrl, {
@@ -1743,7 +1744,7 @@ export default {
       if (url.pathname === '/api/discover') return await handleDiscoverApi(request, env);
       if (url.pathname === '/api/discover/prepare') return await handleDiscoverPrepareApi(request, env);
       if (url.pathname === '/api/catalog-search') return await handleCatalogSearchApi(request, env);
-      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v4.6-python-google-search-2026-08-11', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true });
+      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v4.8-async-full-catalog-search-2026-08-11', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true });
 
       if (url.pathname === '/api/health') {
         const databaseId = env.NOTION_DATABASE_ID || DEFAULT_DATABASE_ID;

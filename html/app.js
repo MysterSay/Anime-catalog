@@ -284,6 +284,120 @@ const SOURCE_LABELS = {
   'shikimori.io': 'Shikimori',
 };
 
+
+function setDiscoverStatus(text = '', type = '') {
+  if (!discoverStatus) return;
+  discoverStatus.textContent = text;
+  discoverStatus.className = `discover-status ${type}`.trim();
+}
+
+function openDiscoverModal() {
+  if (!discoverModal) return;
+  discoverModal.classList.remove('hidden');
+  discoverModal.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('modal-open');
+  requestAnimationFrame(() => discoverSearchInput?.focus());
+}
+
+function closeDiscoverModal() {
+  if (!discoverModal) return;
+  discoverModal.classList.add('hidden');
+  discoverModal.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('modal-open');
+  discoverSelected = null;
+  if (discoverResults) discoverResults.innerHTML = '';
+  if (discoverSetup) {
+    discoverSetup.innerHTML = '';
+    discoverSetup.classList.add('hidden');
+  }
+  setDiscoverStatus('');
+}
+
+function sourceResultTile(item, site, index) {
+  const title = item?.title || item?.pageTitle || item?.url || 'Без назви';
+  return `
+    <button class="discover-result source-discover-result" type="button"
+      data-source-site="${escapeHtml(site)}"
+      data-source-index="${index}">
+      <img src="${escapeHtml(item?.image || FALLBACK_IMAGE)}" alt="${escapeHtml(title)}" loading="lazy" />
+      <span class="discover-result-copy">
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(SOURCE_LABELS[site] || site)} · ${escapeHtml(item?.url || '')}</small>
+      </span>
+      <span class="discover-result-arrow">→</span>
+    </button>`;
+}
+
+function renderGoogleSourceGroups(groups) {
+  if (!discoverResults) return;
+  if (discoverSetup) {
+    discoverSetup.classList.add('hidden');
+    discoverSetup.innerHTML = '';
+  }
+
+  const safeGroups = Array.isArray(groups) ? groups : [];
+  const total = safeGroups.reduce((sum, group) => sum + (Array.isArray(group?.items) ? group.items.length : 0), 0);
+
+  if (!safeGroups.length) {
+    discoverResults.innerHTML = '<div class="discover-empty">Python core не повернув груп результатів.</div>';
+    setDiscoverStatus('Пошук завершено без результатів.', '');
+    return;
+  }
+
+  discoverResults.innerHTML = `
+    <div class="google-source-groups">
+      ${safeGroups.map((group, groupIndex) => {
+        const items = Array.isArray(group?.items) ? group.items : [];
+        const site = group?.site || '';
+        const previousHaveResults = safeGroups.slice(0, groupIndex).some(prev => Array.isArray(prev?.items) && prev.items.length);
+        const open = groupIndex === 0 || (!previousHaveResults && items.length > 0);
+        return `
+          <section class="google-source-group ${open ? 'open' : ''}" data-google-group="${escapeHtml(site)}">
+            <button class="google-source-trigger" type="button" data-google-toggle aria-expanded="${open ? 'true' : 'false'}">
+              <span>
+                <strong>${escapeHtml(group?.label || SOURCE_LABELS[site] || site)}</strong>
+                <small>${escapeHtml(group?.query || '')}</small>
+              </span>
+              <span class="google-source-meta">
+                <b>${items.length}</b>
+                <i>⌄</i>
+              </span>
+            </button>
+            <div class="google-source-body">
+              <div class="google-source-list">
+                ${group?.error ? `<div class="source-search-error">${escapeHtml(group.error)}</div>` : ''}
+                ${items.length ? items.map((item, index) => sourceResultTile(item, site, index)).join('') : '<div class="source-search-empty">Збігів не знайдено.</div>'}
+              </div>
+            </div>
+          </section>`;
+      }).join('')}
+    </div>`;
+
+  discoverResults.querySelectorAll('[data-google-toggle]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const group = btn.closest('.google-source-group');
+      if (!group) return;
+      const next = !group.classList.contains('open');
+      group.classList.toggle('open', next);
+      btn.setAttribute('aria-expanded', String(next));
+    });
+  });
+
+  discoverResults.querySelectorAll('.source-discover-result').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const group = safeGroups.find(entry => entry?.site === btn.dataset.sourceSite);
+      const item = group?.items?.[Number(btn.dataset.sourceIndex)];
+      if (!item?.url) return;
+      await processSelectedSource(item, btn);
+    });
+  });
+
+  setDiscoverStatus(
+    total ? `Знайдено сторінок: ${total}. Обери правильний тайтл.` : 'Python core не знайшов сторінок тайтлів на цих трьох сайтах.',
+    total ? 'ok' : ''
+  );
+}
+
 const AUTHORITY_SEARCH_SITES = [
   { domain: 'myanimelist.net', label: 'MyAnimeList', path: /^\/anime\/\d+(?:\/|$)/i },
   { domain: 'anilist.co', label: 'AniList', path: /^\/anime\/\d+(?:\/|$)/i },
@@ -312,7 +426,7 @@ async function processSelectedSource(item, button) {
   discoverResults.querySelectorAll('.source-discover-result').forEach(el => { el.disabled = true; });
   button?.classList.add('processing');
   const sourceTitle = String(item.title || discoverSearchInput.value || '').trim();
-  setDiscoverStatus(`Відправляю «${sourceTitle || 'тайтл'}» у Python core…`, 'loading');
+  setDiscoverStatus(`Визначаю назви й асинхронно шукаю посилання по 17 каталогах для «${sourceTitle || 'тайтл'}»…`, 'loading');
 
   try {
     const response = await fetch('/api/process-title', {
@@ -328,7 +442,7 @@ async function processSelectedSource(item, button) {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     if (!payload.item?.id) throw new Error('Notion не повернув ID тайтлу.');
-    setDiscoverStatus(payload.existing ? 'Тайтл уже був у Notion — дані оновлено.' : 'Python core повернув JSON, тайтл записано в Notion.', 'ok');
+    setDiscoverStatus(payload.existing ? 'Повний пошук завершено. Тайтл уже був у Notion — дані оновлено.' : 'Повний асинхронний пошук завершено, JSON записано в Notion.', 'ok');
     await new Promise(resolve => setTimeout(resolve, 550));
     location.href = `title.html?id=${encodeURIComponent(payload.item.id)}`;
   } catch (error) {

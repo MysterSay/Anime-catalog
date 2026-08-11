@@ -1,1 +1,1 @@
-yoru-v4.6-python-google-search-2026-08-11
+yoru-v4.8-async-full-catalog-search-2026-08-11
