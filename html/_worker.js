@@ -3,6 +3,7 @@ const DEFAULT_DATABASE_ID = '3b87f72ac401804aab37db6332771629';
 const DEFAULT_DATA_SOURCE_ID = '3b87f72ac401802a95e4000bc7ababca';
 const ANILIST_ENDPOINT = 'https://graphql.anilist.co';
 const CORE_PROCESS_URL = 'https://anime-catalog-flame.vercel.app/api/process';
+const CORE_SEARCH_URL = 'https://anime-catalog-flame.vercel.app/api/search';
 
 const TITLE_STATUS_OPTIONS = ['Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто'];
 const CATALOG_GROUPS = {
@@ -15,7 +16,7 @@ const SITE_PROPERTIES = [...new Set([...AUTHORITY_SITES, ...CATALOGS])];
 const GOOGLE_SOURCE_SITES = [
   { domain: 'myanimelist.net', label: 'MyAnimeList', path: /^\/anime\/\d+(?:\/|$)/i },
   { domain: 'anilist.co', label: 'AniList', path: /^\/anime\/\d+(?:\/|$)/i },
-  { domain: 'shikimori.io', label: 'Shikimori', path: /^\/animes\/\d+(?:[-\\/]|$)/i },
+  { domain: 'shikimori.io', label: 'Shikimori', path: /^\/animes\/\d+(?:[-\/]|$)/i },
 ];
 const SEARCH_HOST_ALIASES = {
   'anilibria.tv': ['aniliberty.top', 'www.aniliberty.top', 'anilibria.top', 'www.anilibria.top', 'anilibria.tv'],
@@ -1535,6 +1536,32 @@ async function handleIngestApi(request, env) {
   return json(result, result.existing ? 200 : 201);
 }
 
+async function handleCoreSearchApi(request, env) {
+  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, { allow: 'POST' });
+  const body = await request.json().catch(() => ({}));
+  const title = plainTitle(body.title || '');
+  const limit = Math.min(10, Math.max(1, Number(body.limit) || 8));
+  if (!title) return json({ error: 'Потрібна назва тайтлу.' }, 400);
+
+  const coreUrl = env.CORE_SEARCH_URL || CORE_SEARCH_URL;
+  const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+  if (env.CORE_API_KEY) headers['X-API-Key'] = env.CORE_API_KEY;
+  const response = await fetch(coreUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ title, limit }),
+  });
+  const raw = await response.text();
+  let payload = null;
+  try { payload = JSON.parse(raw); } catch {}
+  if (!response.ok) {
+    const detail = payload?.detail || payload?.error || raw.slice(0, 800) || response.statusText;
+    throw new HttpError(502, `Python core search повернув HTTP ${response.status}: ${detail}`, raw.slice(0, 1200), String(response.status), 'python_core_search');
+  }
+  if (!payload || typeof payload !== 'object') throw new HttpError(502, 'Python core search не повернув валідний JSON.', raw.slice(0, 1200), 'invalid_json', 'python_core_search');
+  return json(payload);
+}
+
 async function handleProcessTitleApi(request, env) {
   if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, { allow: 'POST' });
   const body = await request.json().catch(() => ({}));
@@ -1542,9 +1569,11 @@ async function handleProcessTitleApi(request, env) {
   const sourceUrl = safeHttpUrl(body.url || '');
   if (!title || !sourceUrl) return json({ error: 'Потрібні title та url.' }, 400);
   const coreUrl = env.CORE_PROCESS_URL || CORE_PROCESS_URL;
+  const coreHeaders = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+  if (env.CORE_API_KEY) coreHeaders['X-API-Key'] = env.CORE_API_KEY;
   const coreResponse = await fetch(coreUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    headers: coreHeaders,
     body: JSON.stringify({ title, url: sourceUrl, status: plainTitle(body.status || ''), group: plainTitle(body.group || '') }),
   });
   const raw = await coreResponse.text();
@@ -1704,18 +1733,17 @@ export default {
           'access-control-max-age': '86400',
         } });
       }
-      if (url.pathname === '/api/google-config') return await handleGoogleConfigApi(request, env);
       if (url.pathname === '/api/source-preview') return await handleSourcePreviewApi(request);
-      if (url.pathname === '/api/source-search') return json({ error: 'Legacy server-side Google scraping is disabled. Use the browser Google Programmable Search Element.' }, 410);
+      if (url.pathname === '/api/core-search') return await handleCoreSearchApi(request, env);
       if (url.pathname === '/api/process-title') return await handleProcessTitleApi(request, env);
-      if (url.pathname === '/api/ingest') return await handleIngestApi(request, env);
+      if (url.pathname === '/api/ingest' || url.pathname === '/api/anime/import') return await handleIngestApi(request, env);
       if (request.method === 'POST' && url.pathname === '/' && (request.headers.get('content-type') || '').includes('application/json')) return await handleIngestApi(request, env);
       if (url.pathname === '/api/anime') return await handleAnimeApi(request, env);
       if (url.pathname === '/api/options') return await handleOptionsApi(request, env);
       if (url.pathname === '/api/discover') return await handleDiscoverApi(request, env);
       if (url.pathname === '/api/discover/prepare') return await handleDiscoverPrepareApi(request, env);
       if (url.pathname === '/api/catalog-search') return await handleCatalogSearchApi(request, env);
-      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v4.5-google-cse-browser-2026-08-11', addTitle: true, googleSourceSearch: true, googleSearchMode: 'programmable-search-element', googleCxConfigured: Boolean(String(env.GOOGLE_CX || '').trim()), sourceSites: AUTHORITY_SITES, pythonCore: env.CORE_PROCESS_URL || CORE_PROCESS_URL, coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true });
+      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v4.6-python-google-search-2026-08-11', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true });
 
       if (url.pathname === '/api/health') {
         const databaseId = env.NOTION_DATABASE_ID || DEFAULT_DATABASE_ID;
