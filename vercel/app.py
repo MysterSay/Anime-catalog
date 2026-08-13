@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.7.1"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -615,6 +615,27 @@ def source_page_title_variants(domain: str, soup: BeautifulSoup) -> list[str]:
         *_near_h1_title_variants(soup),
         *soup_title_signals_base(soup),
     ], limit=50)
+
+
+def trusted_source_title_variants(domain: str, soup: BeautifulSoup) -> list[str]:
+    """Small high-confidence query set harvested from the currently opened page.
+
+    Do not use the whole JSON-LD/metadata alias soup as search queries: some sites
+    expose genres, franchise labels and recommendation names there.  The full set
+    is still useful for verification, but only explicit original/Romaji fields,
+    the small H1 neighborhood and the primary title are allowed to drive searches.
+    """
+    primary = page_primary_title(soup)
+    values = [
+        *site_specific_title_variants(domain, soup),
+        *explicit_title_variants(soup),
+        *_near_h1_title_variants(soup),
+        primary,
+    ]
+    return [
+        x for x in unique_strings(values, limit=14)
+        if is_probable_title(x) and not is_catalog_noise_title(x)
+    ]
 
 
 def soup_title_signals_base(soup: BeautifulSoup) -> list[str]:
@@ -1666,7 +1687,7 @@ class Core:
         causing those pages to be falsely accepted. Body containment is intentionally
         forbidden here.
         """
-        sem = asyncio.Semaphore(12)
+        sem = asyncio.Semaphore(8)
 
         async def verify(item: dict[str, str]) -> dict[str, str] | None:
             raw_url = compact_url(item.get("url", ""))
@@ -1719,7 +1740,7 @@ class Core:
                 "_aliases": unique_strings(page_signals, limit=40),
             }
 
-        results = await asyncio.gather(*(verify(item) for item in candidates[:42]))
+        results = await asyncio.gather(*(verify(item) for item in candidates[:18]))
         unique: dict[str, dict[str, str]] = {}
         for item in results:
             if item:
@@ -2008,7 +2029,7 @@ class Core:
                     f"https://{host}/catalog?search={q}",
                     f"https://{host}/anime?search={q}",
                 ])
-            urls = list(dict.fromkeys(urls + generic))[:12]
+            urls = list(dict.fromkeys(urls + generic))[:6]
 
             async def fetch_route(url: str) -> list[dict[str, str]]:
                 try:
@@ -2020,7 +2041,7 @@ class Core:
                         verified = await self.verify_candidates(domain, strict, identity_aliases)
                         if verified:
                             return verified
-                    loose = self.parse_loose_catalog_candidates(response.text, str(response.url), domain, 45)
+                    loose = self.parse_loose_catalog_candidates(response.text, str(response.url), domain, 18)
                     return await self.verify_candidates(domain, loose, identity_aliases) if loose else []
                 except Exception:
                     return []
@@ -2046,7 +2067,7 @@ class Core:
                             verified = await self.verify_candidates(domain, strict, identity_aliases)
                             if verified:
                                 return verified
-                        loose = self.parse_loose_catalog_candidates(response.text, str(response.url), domain, 45)
+                        loose = self.parse_loose_catalog_candidates(response.text, str(response.url), domain, 18)
                         return await self.verify_candidates(domain, loose, identity_aliases) if loose else []
                     except Exception:
                         return []
@@ -2135,7 +2156,7 @@ class Core:
         Inside a catalog, each useful alias is also searched concurrently; Core.request()
         keeps total network concurrency bounded by self.http_sem.
         """
-        names = unique_strings(queries, limit=query_limit)
+        names = unique_strings(queries, limit=min(query_limit, 4))
         if not names:
             return []
 
@@ -2250,14 +2271,14 @@ class Core:
             return None, None, []
         soup, final_url = await self.fetch_soup(payload.url)
         final_url = compact_url(final_url or payload.url)
-        source_aliases = source_page_title_variants(domain, soup) if soup else []
+        full_source_aliases = source_page_title_variants(domain, soup) if soup else []
+        trusted_aliases = trusted_source_title_variants(domain, soup) if soup else []
         if not is_catalog_title_url(domain, final_url):
-            return domain, None, source_aliases
+            return domain, None, unique_strings([payload.title, *trusted_aliases], limit=16)
 
-        # The browser already supplied the visible localized title. Keep it as the
-        # catalog label, but harvest the page's explicit original/Romaji field as
-        # identity aliases. Those aliases are used before authority resolution and
-        # before the first all-catalog pass.
+        # Keep search-driving aliases intentionally small and high-confidence.
+        # The full metadata alias set stays attached to the verified source item so
+        # it can help later verification without triggering dozens of searches.
         title = clean_title(payload.title)
         if soup:
             primary = page_primary_title(soup)
@@ -2265,8 +2286,9 @@ class Core:
                 same_script = title_script(primary) == title_script(title)
                 if not title or normalize_title(primary) == normalize_title(title) or (same_script and titles_related(primary, title, 0.62)):
                     title = primary
-        source_aliases = unique_strings([title, payload.title, *source_aliases], limit=50)
-        return domain, {"url": final_url, "title": title or clean_title(payload.title), "_aliases": source_aliases}, source_aliases
+        source_aliases = unique_strings([title, payload.title, *trusted_aliases], limit=16)
+        item_aliases = unique_strings([*source_aliases, *full_source_aliases], limit=40)
+        return domain, {"url": final_url, "title": title or clean_title(payload.title), "_aliases": item_aliases}, source_aliases
 
     async def send_callback(self, result: dict[str, Any]) -> dict[str, Any] | None:
         url = clean_text(os.getenv("RESULT_WEBHOOK_URL")) or DEFAULT_RESULT_WEBHOOK_URL
@@ -2295,6 +2317,13 @@ class Core:
         """
         started_at = time.perf_counter()
         last_percent = 0
+        soft_deadline_seconds = 235.0
+
+        def elapsed_seconds() -> float:
+            return time.perf_counter() - started_at
+
+        def within_budget(reserve: float = 18.0) -> bool:
+            return elapsed_seconds() < max(1.0, soft_deadline_seconds - reserve)
 
         async def emit(stage: str, percent: int, message: str, **extra: Any) -> None:
             nonlocal last_percent
@@ -2318,8 +2347,8 @@ class Core:
             aliases: list[str],
             authority: AuthorityData,
             *,
-            query_limit: int = 8,
-            timeout: float = 22.0,
+            query_limit: int = 4,
+            timeout: float = 20.0,
         ) -> tuple[str, list[dict[str, str]], str]:
             try:
                 result = await asyncio.wait_for(
@@ -2339,8 +2368,8 @@ class Core:
             queries: list[str],
             aliases: list[str],
             *,
-            query_limit: int = 8,
-            timeout: float = 14.0,
+            query_limit: int = 4,
+            timeout: float = 12.0,
         ) -> tuple[str, list[dict[str, str]], str]:
             try:
                 result = await asyncio.wait_for(
@@ -2403,15 +2432,19 @@ class Core:
             source_aliases=source_aliases[:12],
         )
 
+        source_originals = [
+            name for name in source_aliases
+            if title_script(name) in {"latin", "cjk"} and normalize_title(name) != normalize_title(payload.title)
+        ]
         base_queries = unique_strings([
-            romanized, english, native_original, *source_aliases, *authority.aliases,
-        ], limit=14)
+            *source_originals[:3], romanized, native_original, english, payload.title,
+        ], limit=6)
         if not base_queries:
             base_queries = [clean_title(payload.title)]
 
         identity_aliases = unique_strings([
             native_original, romanized, english, *source_aliases, *authority.aliases, payload.title,
-        ], limit=60)
+        ], limit=50)
 
         catalogs: dict[str, list[dict[str, Any]]] = {site: [] for site in CATALOG_SITES}
         if source_catalog and source_item:
@@ -2443,7 +2476,7 @@ class Core:
             await emit(
                 "catalogs_primary",
                 pct,
-                f"{domain}: {'знайдено ' + str(len(catalogs[domain])) if catalogs[domain] else ('помилка' if error else 'без збігів')} · {completed}/{len(phase1_tasks)}",
+                f"{domain}: {'знайдено ' + str(len(catalogs[domain])) if catalogs[domain] else (('помилка (' + error + ')') if error else 'без збігів')} · {completed}/{len(phase1_tasks)}",
                 domain=domain,
                 completed=completed,
                 total=len(phase1_tasks),
@@ -2471,12 +2504,18 @@ class Core:
                 if is_probable_title(value) and not is_catalog_noise_title(value)
             ]
 
-        queried_alias_keys = {normalize_title(x) for x in base_queries if normalize_title(x)}
+        queried_alias_keys = {
+            normalize_title(x) for x in unique_strings([*base_queries, *source_aliases, *authority.aliases], limit=100)
+            if normalize_title(x)
+        }
         alias_replay_rounds = 0
 
         async def replay_new_aliases(stage: str, pct_start: int, pct_end: int, max_rounds: int = 3) -> None:
             nonlocal identity_aliases, alias_replay_rounds
             for _ in range(max_rounds):
+                if not within_budget(55.0):
+                    await emit(stage, pct_end, "Пропускаю додатковий replay: наближаюсь до ліміту часу Vercel.")
+                    return
                 empty_domains = [domain for domain in CATALOG_SITES if not catalogs[domain]]
                 if not empty_domains:
                     return
@@ -2487,7 +2526,7 @@ class Core:
                     if normalize_title(name) and normalize_title(name) not in queried_alias_keys
                 ]
                 # Prefer concise useful names; a page can expose many season/family aliases.
-                new_names = unique_strings(new_names, limit=12)
+                new_names = unique_strings(new_names, limit=4)
                 if not new_names:
                     return
                 alias_replay_rounds += 1
@@ -2508,8 +2547,8 @@ class Core:
                             new_names,
                             identity_aliases,
                             authority,
-                            query_limit=min(6, len(new_names)),
-                            timeout=16.0,
+                            query_limit=min(3, len(new_names)),
+                            timeout=14.0,
                         )
                     )
                     for domain in empty_domains
@@ -2525,7 +2564,7 @@ class Core:
                     await emit(
                         stage,
                         pct,
-                        f"{domain}: повторний пошук новими назвами {completed_round}/{len(tasks)}.",
+                        f"{domain}: повторний пошук новими назвами {completed_round}/{len(tasks)}" + (f" · {error}" if error else "") + ".",
                         domain=domain,
                         completed=completed_round,
                         total=len(tasks),
@@ -2537,7 +2576,7 @@ class Core:
         # This is the missing behavior from older cores: as soon as any verified
         # catalog reveals another original/localized title, revisit catalogs that
         # previously returned zero. Repeat until no new names appear (bounded).
-        await replay_new_aliases("catalogs_alias_replay", 52, 64, max_rounds=3)
+        await replay_new_aliases("catalogs_alias_replay", 52, 62, max_rounds=2)
 
         ru_candidates: list[str] = []
         ua_candidates: list[str] = []
@@ -2562,14 +2601,14 @@ class Core:
             if catalogs[domain]:
                 continue
             local = ua_title if domain in UA_SITES else ru_title
-            if not local or normalize_title(local) in queried_alias_keys:
+            if not local:
                 continue
             phase2_specs.append((domain, local))
 
         local_identity = unique_strings([*identity_aliases, *current_identity, ru_title, ua_title], limit=100)
         phase2_tasks = [
             asyncio.create_task(
-                catalog_job(domain, [local], local_identity, authority, query_limit=2, timeout=14.0)
+                catalog_job(domain, [local], local_identity, authority, query_limit=1, timeout=12.0)
             )
             for domain, local in phase2_specs
         ]
@@ -2586,7 +2625,7 @@ class Core:
             await emit(
                 "catalogs_localized",
                 pct,
-                f"{domain}: локалізований прохід {completed}/{len(phase2_tasks)}.",
+                f"{domain}: локалізований прохід {completed}/{len(phase2_tasks)}" + (f" · {error}" if error else "") + ".",
                 domain=domain,
                 completed=completed,
                 total=len(phase2_tasks),
@@ -2598,7 +2637,7 @@ class Core:
 
         # A localized hit can itself reveal a Romaji/original field. Replay once
         # more so that this late alias can unlock catalogs processed earlier.
-        await replay_new_aliases("catalogs_alias_replay", 73, 76, max_rounds=2)
+        await replay_new_aliases("catalogs_alias_replay", 73, 76, max_rounds=1)
 
         ru_candidates = [item.get("title", "") for d, items in catalogs.items() if d in RU_SITES for item in items]
         ua_candidates = [item.get("title", "") for d, items in catalogs.items() if d in UA_SITES for item in items]
@@ -2617,11 +2656,11 @@ class Core:
             queries = unique_strings([
                 romanized, english, native_original, payload.title, local,
                 *source_aliases, *final_identity_aliases, *authority.aliases,
-            ], limit=14)
+            ], limit=6)
             google_specs.append((domain, queries))
 
         google_tasks = [
-            asyncio.create_task(google_job(domain, queries, all_identity, query_limit=8, timeout=14.0))
+            asyncio.create_task(google_job(domain, queries, all_identity, query_limit=4, timeout=12.0))
             for domain, queries in google_specs
         ]
         completed = 0
@@ -2637,7 +2676,7 @@ class Core:
             await emit(
                 "catalogs_fallback",
                 pct,
-                f"{domain}: fallback {completed}/{len(google_tasks)}.",
+                f"{domain}: fallback {completed}/{len(google_tasks)}" + (f" · {error}" if error else "") + ".",
                 domain=domain,
                 completed=completed,
                 total=len(google_tasks),
@@ -2655,7 +2694,7 @@ class Core:
 
         async def safe_translation(coro: Awaitable[str], fallback: str) -> str:
             try:
-                return await asyncio.wait_for(coro, timeout=14.0)
+                return await asyncio.wait_for(coro, timeout=8.0)
             except Exception:
                 return fallback
 
@@ -2744,8 +2783,14 @@ class Core:
             },
         }
 
+        # Validate serialization before the streaming endpoint receives the value.
+        # This turns a malformed field into an explicit progress/error packet instead
+        # of silently ending a streamed HTTP 200 response after 95%.
+        await emit("serialize", 97, "Перевіряю та серіалізую фінальний JSON.")
+        json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
         if callback:
-            await emit("delivery", 97, "Відправляю готовий JSON у callback.")
+            await emit("delivery", 98, "Відправляю готовий JSON у callback.")
             callback_info = await self.send_callback(result)
             if callback_info is not None:
                 result["delivery"] = callback_info
@@ -2799,10 +2844,16 @@ async def process_stream_endpoint(payload: InputPayload, x_api_key: str | None =
         raise HTTPException(status_code=401, detail="Invalid X-API-Key")
 
     async def stream():
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        # Queue already-serialized NDJSON lines.  Serializing before enqueueing means
+        # a bad field produces a visible `error` packet instead of a streamed HTTP 200
+        # that simply stops around 95%.
+        queue: asyncio.Queue[str] = asyncio.Queue()
         state = {"percent": 0, "stage": "accepted", "message": "Запуск…"}
         finished = asyncio.Event()
         core = Core()
+
+        def encode(packet: dict[str, Any]) -> str:
+            return json.dumps(packet, ensure_ascii=False, separators=(",", ":")) + "\n"
 
         async def push(packet: dict[str, Any]) -> None:
             state.update({
@@ -2810,45 +2861,59 @@ async def process_stream_endpoint(payload: InputPayload, x_api_key: str | None =
                 "stage": clean_text(packet.get("stage") or state["stage"]),
                 "message": clean_text(packet.get("message") or state["message"]),
             })
-            await queue.put(packet)
+            await queue.put(encode(packet))
 
         async def runner() -> None:
             try:
                 result = await core.process(payload, callback=False, progress=push)
-                await queue.put({
+                # Build the final line here, before cleanup. This was the weak point in
+                # 2.7.0: clients could receive 95% and then wait for stream cleanup.
+                await queue.put(encode({
                     "type": "result",
                     "stage": "done",
                     "percent": 100,
                     "message": "Готово. Повний JSON сформовано.",
                     "result": result,
-                })
+                }))
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                await queue.put({
-                    "type": "error",
-                    "stage": "error",
-                    "percent": int(state.get("percent") or 0),
-                    "message": clean_text(error) or error.__class__.__name__,
-                    "error_type": error.__class__.__name__,
-                })
+                try:
+                    await queue.put(encode({
+                        "type": "error",
+                        "stage": "error",
+                        "percent": int(state.get("percent") or 0),
+                        "message": clean_text(error) or error.__class__.__name__,
+                        "error_type": error.__class__.__name__,
+                    }))
+                except Exception:
+                    await queue.put('{"type":"error","stage":"error","percent":0,"message":"final serialization failed"}\n')
             finally:
+                # Let the HTTP stream finish immediately after its final packet. Client
+                # delivery must not wait for httpx cleanup of many cancelled requests.
                 finished.set()
-                await core.close()
+                try:
+                    await asyncio.wait_for(core.close(), timeout=2.0)
+                except Exception:
+                    pass
 
         task = asyncio.create_task(runner())
         try:
             while not finished.is_set() or not queue.empty():
                 try:
-                    packet = await asyncio.wait_for(queue.get(), timeout=5.0)
+                    line = await asyncio.wait_for(queue.get(), timeout=5.0)
                 except asyncio.TimeoutError:
-                    packet = {
+                    line = encode({
                         "type": "heartbeat",
                         "stage": state["stage"],
                         "percent": state["percent"],
                         "message": state["message"],
-                    }
-                yield json.dumps(packet, ensure_ascii=False, separators=(",", ":")) + "\n"
+                    })
+                yield line
+                # A result/error line is terminal; don't keep the client waiting for
+                # any remaining cleanup work.
+                if '"type":"result"' in line or '"type":"error"' in line:
+                    break
         finally:
             if not task.done():
                 task.cancel()
