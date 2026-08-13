@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.9.0"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -57,6 +57,14 @@ UA_SITES = [
     "anitube.in.ua",
 ]
 CATALOG_SITES = RU_SITES + UA_SITES
+
+# DataLife Engine-style catalogs use POST search forms.  Hitting generic GET
+# routes first is both slower and, on sites such as jut-su.net, can prevent the
+# real search request from ever running before the outer timeout.
+DLE_SEARCH_SITES = {
+    "jut-su.net", "animevost.org", "jutsu.tv", "animego.studio",
+    "anidesu.net", "anitube.in.ua", "uachan.com",
+}
 
 HOST_ALIASES: dict[str, list[str]] = {
     "anilibria.tv": ["aniliberty.top", "www.aniliberty.top", "anilibria.top", "www.anilibria.top", "anilibria.tv"],
@@ -1516,18 +1524,9 @@ class Core:
                             data.cover = urljoin("https://shikimori.io", image_url)
                             data.cover_source = "shikimori.io"
 
-        # Keep only related family variants discovered by authority searches. Never cache a lone unrelated hit.
-        if chosen:
-            for entry in candidates[1:]:
-                family_names = entry.get("names") or []
-                if any(titles_related(a, b, 0.72) for a in family_names for b in chosen_names):
-                    data.aliases.extend(family_names)
-                    if entry["kind"] == "shikimori":
-                        item = entry["item"]
-                        sid = item.get("id")
-                        if sid:
-                            url = urljoin("https://shikimori.io", item.get("url") or f"/animes/{sid}")
-                            data.links["shikimori.io"].append({"url": compact_url(url), "title": clean_title(item.get("name"))})
+        # Do not merge neighbouring franchise/season search hits into aliases.
+        # They are useful for discovery UIs, but they are NOT names of the selected
+        # title and previously caused searches for sequels/arcs/spin-offs.
 
         # Preserve an explicitly supplied authority title URL only when its path is an anime entry.
         if payload.url:
@@ -1996,16 +1995,42 @@ class Core:
         return list(found.values())[:30]
 
     async def search_dle_post(self, domain: str, queries: list[str], identity_aliases: list[str]) -> list[dict[str, str]]:
+        """Use the native DataLife Engine search form for one ordered query at a time.
+
+        jut-su.net visibly returns the correct title through this form even when
+        generic /search?q= routes do not exist.  Each request has a short internal
+        timeout so a dead endpoint cannot consume the whole catalog budget.
+        """
         hosts = logical_hosts(domain)
         for query in queries:
             data = {
-                "do": "search", "subaction": "search", "search_start": "1",
-                "full_search": "0", "result_from": "1", "story": query,
+                "do": "search",
+                "subaction": "search",
+                "search_start": "1",
+                "full_search": "0",
+                "result_from": "1",
+                "story": query,
             }
             for host in hosts[:2]:
-                for endpoint in (f"https://{host}/index.php?do=search", f"https://{host}/index.php"):
+                endpoints = [
+                    f"https://{host}/index.php?do=search",
+                    f"https://{host}/index.php",
+                ]
+                for endpoint in endpoints:
                     try:
-                        response = await self.request("POST", endpoint, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+                        response = await asyncio.wait_for(
+                            self.request(
+                                "POST",
+                                endpoint,
+                                data=data,
+                                headers={
+                                    "Content-Type": "application/x-www-form-urlencoded",
+                                    "Accept": "text/html,application/xhtml+xml",
+                                    "Referer": f"https://{host}/",
+                                },
+                            ),
+                            timeout=4.5,
+                        )
                         if response.status_code >= 400:
                             continue
                         parsed = self.parse_catalog_results(response.text, str(response.url), domain, identity_aliases)
@@ -2013,28 +2038,41 @@ class Core:
                             verified = await self.verify_candidates(domain, parsed, identity_aliases)
                             if verified:
                                 return verified
-                        loose = self.parse_loose_catalog_candidates(response.text, str(response.url), domain, 50)
-                        verified = await self.verify_candidates(domain, loose, identity_aliases)
-                        if verified:
-                            return verified
-                    except Exception:
+                        # Search cards often wrap poster/title in separate anchors.
+                        # Loose URL collection is safe because every candidate is
+                        # then verified on its own title page against H1/original.
+                        loose = self.parse_loose_catalog_candidates(response.text, str(response.url), domain, 30)
+                        if loose:
+                            verified = await self.verify_candidates(domain, loose, identity_aliases)
+                            if verified:
+                                return verified
+                    except asyncio.TimeoutError:
+                        self.log(f"DLE search timeout: {domain} {endpoint} query={query!r}")
+                        continue
+                    except Exception as error:
+                        self.log(f"DLE search error: {domain} {endpoint}: {error}")
                         continue
         return []
 
-    async def generic_site_search(self, domain: str, queries: list[str], identity_aliases: list[str]) -> list[dict[str, str]]:
+    async def generic_site_search(self, domain: str, queries: list[str], identity_aliases: list[str], *, compact: bool = False) -> list[dict[str, str]]:
         for query in queries:
             q = quote_plus(query)
             q_path = quote(query, safe="")
             urls = [route.format(q=q, q_path=q_path) for route in SEARCH_ROUTES.get(domain, [])]
             generic: list[str] = []
-            for host in logical_hosts(domain)[:2]:
-                generic.extend([
-                    f"https://{host}/search?q={q}",
-                    f"https://{host}/?s={q}",
-                    f"https://{host}/catalog?search={q}",
-                    f"https://{host}/anime?search={q}",
-                ])
-            urls = list(dict.fromkeys(urls + generic))[:6]
+            # Prefer known site routes.  Generic probes are only a small safety net;
+            # six parallel guesses per query were the main source of unnecessary
+            # traffic and timeouts in 2.8.x.
+            if not urls or not compact:
+                for host in logical_hosts(domain)[:1 if compact else 2]:
+                    generic.extend([
+                        f"https://{host}/search?q={q}",
+                        f"https://{host}/?s={q}",
+                        f"https://{host}/catalog?search={q}",
+                        f"https://{host}/anime?search={q}",
+                    ])
+            max_routes = 2 if compact else 6
+            urls = list(dict.fromkeys(urls + generic))[:max_routes]
 
             async def fetch_route(url: str) -> list[dict[str, str]]:
                 try:
@@ -2137,12 +2175,15 @@ class Core:
             result = await self.search_aniliberty_direct(queries, identity_aliases)
             if not result:
                 result = await self.generic_site_search(domain, queries, identity_aliases)
-        elif domain in {"anitube.in.ua", "uachan.com"}:
+        elif domain in DLE_SEARCH_SITES:
+            # DLE catalogs (including jut-su.net) must use their real POST search
+            # first.  The old generic GET fan-out often consumed the whole outer
+            # timeout before the site's actual search form was submitted.
             result = await self.search_dle_post(domain, queries, identity_aliases)
             if not result:
-                result = await self.generic_site_search(domain, queries, identity_aliases)
+                result = await self.generic_site_search(domain, queries, identity_aliases, compact=True)
         else:
-            result = await self.generic_site_search(domain, queries, identity_aliases)
+            result = await self.generic_site_search(domain, queries, identity_aliases, compact=True)
 
         return self.merge_catalog_items([], result)
 
@@ -2354,42 +2395,67 @@ class Core:
             aliases: list[str],
             authority: AuthorityData,
             *,
-            query_limit: int = 4,
-            timeout: float = 20.0,
-        ) -> tuple[str, list[dict[str, str]], str]:
+            query_limit: int = 7,
+            per_query_timeout: float = 6.0,
+            domain_timeout: float = 18.0,
+        ) -> tuple[str, list[dict[str, str]], str, list[str]]:
+            """Search one catalog in strict query priority order.
+
+            Names are NEVER launched concurrently inside one catalog.  We try the
+            exact/original title first, then English, then the catalog language,
+            then remaining aliases.  As soon as a verified result exists we stop.
+            A network timeout means the site itself is unavailable for direct
+            search, so we stop retrying that same endpoint with more names and let
+            the later web-index fallback handle it.
+            """
+            ordered = unique_strings(queries, limit=query_limit)
+            tried: list[str] = []
+
+            async def run() -> tuple[list[dict[str, str]], str]:
+                for query in ordered:
+                    tried.append(query)
+                    try:
+                        result = await asyncio.wait_for(
+                            self.search_catalog_native(domain, [query], aliases, authority),
+                            timeout=per_query_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        return [], f"timeout {int(per_query_timeout)}s"
+                    except Exception as error:
+                        return [], clean_text(error)
+                    if result:
+                        return result, ""
+                return [], ""
+
             try:
-                result = await asyncio.wait_for(
-                    self.search_catalog_aliases_async(
-                        domain, queries, aliases, authority, query_limit=query_limit
-                    ),
-                    timeout=timeout,
-                )
-                return domain, result, ""
+                result, error = await asyncio.wait_for(run(), timeout=domain_timeout)
+                return domain, result, error, tried
             except asyncio.TimeoutError:
-                return domain, [], f"timeout {int(timeout)}s"
+                return domain, [], f"timeout {int(domain_timeout)}s", tried
             except Exception as error:
-                return domain, [], clean_text(error)
+                return domain, [], clean_text(error), tried
 
         async def google_job(
             domain: str,
             queries: list[str],
             aliases: list[str],
             *,
-            query_limit: int = 4,
+            query_limit: int = 7,
             timeout: float = 12.0,
-        ) -> tuple[str, list[dict[str, str]], str]:
+        ) -> tuple[str, list[dict[str, str]], str, list[str]]:
+            ordered = unique_strings(queries, limit=query_limit)
             try:
+                # google_catalog_fallback itself is sequential and stops on the
+                # first verified query, preserving the same priority order.
                 result = await asyncio.wait_for(
-                    self.google_catalog_fallback_async(
-                        domain, queries, aliases, query_limit=query_limit
-                    ),
+                    self.google_catalog_fallback(domain, ordered, aliases),
                     timeout=timeout,
                 )
-                return domain, result, ""
+                return domain, result, "", ordered
             except asyncio.TimeoutError:
-                return domain, [], f"timeout {int(timeout)}s"
+                return domain, [], f"timeout {int(timeout)}s", ordered
             except Exception as error:
-                return domain, [], clean_text(error)
+                return domain, [], clean_text(error), ordered
 
         await emit("accepted", 1, "Запит прийнято. Починаю визначення тайтлу.")
 
@@ -2439,233 +2505,242 @@ class Core:
             source_aliases=source_aliases[:12],
         )
 
+        # The title directly exposed by the source page (AniHub: H1 + the
+        # adjacent p.text-sm.text-gray-400.mb-1) is the highest-confidence search
+        # key.  This is the "original" requested by the workflow, even when it is
+        # Romaji rather than native CJK script.
         source_originals = [
             name for name in source_aliases
-            if title_script(name) in {"latin", "cjk"} and normalize_title(name) != normalize_title(payload.title)
+            if normalize_title(name) != normalize_title(payload.title)
+            and title_script(name) in {"latin", "cjk"}
         ]
-        # Search-driving names are deliberately small and ordered by confidence.
-        # Exact Romaji/original from the source page wins; local H1 is deferred to
-        # the localized pass instead of multiplying every native search request.
-        primary_queries = unique_strings([
-            *source_originals[:1], romanized, english, native_original,
-        ], limit=3)
-        if not primary_queries:
-            primary_queries = [clean_title(payload.title)]
-        base_queries = primary_queries
+        source_original = clean_title(source_originals[0] if source_originals else "")
+        search_original = source_original or romanized or native_original or clean_title(payload.title)
 
-        identity_aliases = unique_strings([
-            native_original, romanized, english, *source_aliases, *authority.aliases, payload.title,
-        ], limit=30)
+        # Determine localized names BEFORE catalog search.  They are third in the
+        # per-domain priority chain, never used ahead of original/English.
+        canonical_names = unique_strings([search_original, romanized, english, native_original], limit=8)
+        ua_title = ""
+        ru_title = ""
+        if source_catalog in UA_SITES and re.search(r"[А-Яа-яІіЇїЄєҐґ]", payload.title or ""):
+            ua_title = clean_title(payload.title)
+        if source_catalog in RU_SITES and re.search(r"[А-Яа-яЁё]", payload.title or ""):
+            ru_title = clean_title(payload.title)
+
+        # Authority aliases belong to the selected media only (family/sequel hits
+        # are deliberately excluded above).  Shikimori usually supplies the RU
+        # title here, so prefer it over machine translation.
+        if not ru_title:
+            ru_title = choose_localized_title("RU", authority.aliases, canonical_names)
+        if not ua_title:
+            ua_title = choose_localized_title("UA", [], canonical_names)
+
+        async def quick_translate(coro: Awaitable[str]) -> str:
+            try:
+                return clean_title(await asyncio.wait_for(coro, timeout=6.0))
+            except Exception:
+                return ""
+
+        translation_base = english or romanized or search_original or native_original or clean_title(payload.title)
+        missing_jobs: list[tuple[str, asyncio.Task[str]]] = []
+        if not ua_title and translation_base:
+            missing_jobs.append(("ua", asyncio.create_task(quick_translate(self.translate_uk(translation_base)))))
+        if not ru_title and translation_base:
+            missing_jobs.append(("ru", asyncio.create_task(quick_translate(self.translate_ru(translation_base)))))
+        for lang, task in missing_jobs:
+            value = await task
+            if lang == "ua" and value:
+                ua_title = value
+            elif lang == "ru" and value:
+                ru_title = value
+
+        await emit(
+            "localized_titles", 14,
+            "Порядок пошуку підготовлено: Original → English → мова каталогу → інші назви.",
+            original=search_original, english=english, ukrainian=ua_title, russian=ru_title,
+        )
+
+        # Only exact-media aliases are allowed to drive searches.  The old family
+        # enrichment added sequel/arc names such as Faceless Arc and 2nd Season,
+        # which both polluted Notion aliases and multiplied catalog requests.
+        trusted_identity_aliases = unique_strings([
+            search_original, romanized, english, native_original,
+            ua_title, ru_title, *source_aliases, *authority.aliases, payload.title,
+        ], limit=40)
+        identity_aliases = [
+            value for value in trusted_identity_aliases
+            if is_probable_title(value) and not is_catalog_noise_title(value)
+        ]
+
+        def catalog_query_plan(domain: str, extra: Iterable[str] = ()) -> list[str]:
+            local = ua_title if domain in UA_SITES else ru_title
+            # Required strict order:
+            # 1) original from source page; 2) English; 3) site language;
+            # 4) remaining exact names (native CJK, alternate romanization, etc.).
+            remaining = [
+                romanized, native_original, payload.title,
+                *source_aliases, *authority.aliases, *extra,
+            ]
+            return unique_strings([
+                search_original,
+                english,
+                local,
+                *remaining,
+            ], limit=7)
 
         catalogs: dict[str, list[dict[str, Any]]] = {site: [] for site in CATALOG_SITES}
         timed_out_domains: set[str] = set()
-        native_attempted_domains: set[str] = set()
+        tried_by_domain: dict[str, list[str]] = {site: [] for site in CATALOG_SITES}
         if source_catalog and source_item:
             catalogs[source_catalog] = [source_item]
             await emit(
                 "source",
-                14,
+                15,
                 f"Поточну сторінку додано як джерело: {source_catalog}.",
                 domain=source_catalog,
                 found=1,
             )
 
-        # PHASE 1: one compact exact/original search per catalog.  Each catalog may
-        # try at most 2 strong names internally.  A timeout is remembered and that
-        # domain is NOT retried by native search in later phases.
+        # PHASE 1 — all catalogs run concurrently, but each catalog checks its
+        # title variants SEQUENTIALLY in the strict order above.
         phase1_domains = [domain for domain in CATALOG_SITES if domain != source_catalog]
         phase1_tasks = [
             asyncio.create_task(
-                catalog_job(domain, primary_queries, identity_aliases, authority, query_limit=2, timeout=9.0)
+                catalog_job(
+                    domain,
+                    catalog_query_plan(domain),
+                    identity_aliases,
+                    authority,
+                    query_limit=7,
+                    per_query_timeout=6.0,
+                    domain_timeout=18.0,
+                )
             )
             for domain in phase1_domains
         ]
         completed = 0
         total = max(1, len(phase1_tasks))
-        await emit("catalogs_primary", 16, f"Точний пошук оригінальною назвою: 0/{len(phase1_tasks)} каталогів.")
+        await emit("catalogs_primary", 16, f"Послідовний пошук по каталогах: 0/{len(phase1_tasks)}.")
         for task in asyncio.as_completed(phase1_tasks):
-            domain, result, error = await task
-            native_attempted_domains.add(domain)
+            domain, result, error, tried = await task
+            tried_by_domain[domain] = tried
             completed += 1
             if error.startswith("timeout"):
                 timed_out_domains.add(domain)
             if result:
                 catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
-            pct = 16 + round((completed / total) * 34)
+            pct = 16 + round((completed / total) * 46)
+            tried_label = " → ".join(tried[:4])
+            state = f"знайдено {len(catalogs[domain])}" if catalogs[domain] else (f"{error} → fallback" if error else "без збігів")
             await emit(
                 "catalogs_primary",
                 pct,
-                f"{domain}: {'знайдено ' + str(len(catalogs[domain])) if catalogs[domain] else (('timeout → fallback' if domain in timed_out_domains else 'без збігів'))} · {completed}/{len(phase1_tasks)}",
+                f"{domain}: {state} · {completed}/{len(phase1_tasks)}.",
                 domain=domain,
                 completed=completed,
                 total=len(phase1_tasks),
                 found=len(catalogs[domain]),
                 error=error,
+                tried=tried,
+                order=tried_label,
             )
-        self.log("Точний прохід завершено: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
 
         def collect_verified_aliases() -> list[str]:
-            values: list[str] = [native_original, romanized, english, *source_aliases, *authority.aliases]
+            values: list[str] = [*identity_aliases]
             for items in catalogs.values():
                 for item in items:
                     values.append(item.get("title", ""))
                     aliases = item.get("_aliases") if isinstance(item, dict) else None
                     if isinstance(aliases, list):
                         values.extend(aliases[:6])
-            values.append(payload.title)
             return [
                 value for value in unique_strings(values, limit=60)
                 if is_probable_title(value) and not is_catalog_noise_title(value)
             ]
 
-        queried_alias_keys = {normalize_title(x) for x in primary_queries if normalize_title(x)}
-        alias_replay_rounds = 0
-
-        # A single targeted replay is allowed only for domains that answered
-        # normally. Timed-out domains go straight to fallback, preventing the old
-        # 20s -> 14s -> 12s retry cascade.
+        # PHASE 2 — one tiny replay only when a VERIFIED catalog page reveals a
+        # genuinely new exact title.  Domains that timed out are not hammered again.
         discovered = collect_verified_aliases()
-        identity_aliases = unique_strings([*identity_aliases, *discovered], limit=60)
-        new_names = [
-            name for name in discovered
-            if normalize_title(name) and normalize_title(name) not in queried_alias_keys
-            and title_script(name) in {"latin", "cjk"}
-        ]
-        new_names = unique_strings(new_names, limit=2)
+        initial_keys = {normalize_title(v) for v in identity_aliases if normalize_title(v)}
+        new_names = unique_strings([
+            v for v in discovered
+            if normalize_title(v) and normalize_title(v) not in initial_keys
+        ], limit=2)
+        alias_replay_rounds = 0
         replay_domains = [
-            domain for domain in CATALOG_SITES
-            if not catalogs[domain] and domain not in timed_out_domains and domain != source_catalog
+            d for d in CATALOG_SITES
+            if d != source_catalog and not catalogs[d] and d not in timed_out_domains
         ]
-        if new_names and replay_domains and within_budget(45.0):
+        if new_names and replay_domains and within_budget(35.0):
             alias_replay_rounds = 1
-            for name in new_names:
-                queried_alias_keys.add(normalize_title(name))
             await emit(
-                "catalogs_alias_replay", 52,
-                f"Знайдено нову точну назву. Один повтор для {len(replay_domains)} каталогів без timeout.",
+                "catalogs_alias_replay", 64,
+                f"Нову точну назву знайдено на перевіреній сторінці. Короткий повтор: {len(replay_domains)} каталогів.",
                 aliases=new_names,
-                remaining=len(replay_domains),
             )
-            replay_tasks = [
-                asyncio.create_task(
-                    catalog_job(domain, new_names, identity_aliases, authority, query_limit=1, timeout=7.0)
-                )
-                for domain in replay_domains
-            ]
+            replay_tasks = []
+            for domain in replay_domains:
+                already = {normalize_title(x) for x in tried_by_domain.get(domain, [])}
+                pending = [x for x in new_names if normalize_title(x) not in already]
+                if pending:
+                    replay_tasks.append(asyncio.create_task(
+                        catalog_job(domain, pending, unique_strings([*identity_aliases, *new_names], limit=50), authority,
+                                    query_limit=2, per_query_timeout=5.0, domain_timeout=9.0)
+                    ))
             completed = 0
             total = max(1, len(replay_tasks))
             for task in asyncio.as_completed(replay_tasks):
-                domain, result, error = await task
+                domain, result, error, tried = await task
+                tried_by_domain[domain] = unique_strings([*tried_by_domain.get(domain, []), *tried], limit=10)
                 completed += 1
                 if error.startswith("timeout"):
                     timed_out_domains.add(domain)
                 if result:
                     catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
-                pct = 52 + round((completed / total) * 6)
+                pct = 64 + round((completed / total) * 5)
                 await emit(
                     "catalogs_alias_replay", pct,
-                    f"{domain}: точний повтор {completed}/{len(replay_tasks)}" + (f" · {error}" if error else "") + ".",
-                    domain=domain, completed=completed, total=len(replay_tasks),
-                    found=len(catalogs[domain]), error=error,
+                    f"{domain}: повтор {completed}/{len(replay_tasks)}" + (f" · {error}" if error else "") + ".",
+                    domain=domain, found=len(catalogs[domain]), error=error, tried=tried,
                 )
 
-        ru_candidates: list[str] = []
-        ua_candidates: list[str] = []
-        for domain, items in catalogs.items():
-            target = ua_candidates if domain in UA_SITES else ru_candidates
-            target.extend(item.get("title", "") for item in items)
-
-        current_identity = collect_verified_aliases()
-        ru_title = choose_localized_title("RU", ru_candidates, current_identity)
-        ua_title = choose_localized_title("UA", ua_candidates, current_identity)
-        # The opened UA/RU catalog H1 is already a verified localized title and is
-        # better than machine translation when no second catalog supplied one yet.
-        if source_catalog in UA_SITES and re.search(r"[А-Яа-яІіЇїЄєҐґ]", payload.title or ""):
-            ua_title = ua_title or clean_title(payload.title)
-        if source_catalog in RU_SITES and re.search(r"[А-Яа-яЁё]", payload.title or ""):
-            ru_title = ru_title or clean_title(payload.title)
-        await emit(
-            "localized_titles", 61,
-            "Локалізовані назви визначено. Перевіряю лише каталоги, що відповіли без timeout.",
-            ukrainian=ua_title, russian=ru_title,
-        )
-
-        # One localized pass, only for domains that did not timeout and only if the
-        # localized name differs from names already queried.
-        phase2_specs: list[tuple[str, str]] = []
-        for domain in CATALOG_SITES:
-            if catalogs[domain] or domain in timed_out_domains or domain == source_catalog:
-                continue
-            local = ua_title if domain in UA_SITES else ru_title
-            if not local or normalize_title(local) in queried_alias_keys:
-                continue
-            phase2_specs.append((domain, local))
-
-        local_identity = unique_strings([*identity_aliases, *current_identity, ru_title, ua_title], limit=60)
-        phase2_tasks = [
-            asyncio.create_task(catalog_job(domain, [local], local_identity, authority, query_limit=1, timeout=7.0))
-            for domain, local in phase2_specs
-        ]
-        completed = 0
-        total = max(1, len(phase2_tasks))
-        if phase2_tasks:
-            await emit("catalogs_localized", 63, f"Один локалізований прохід: 0/{len(phase2_tasks)} каталогів.")
-        for task in asyncio.as_completed(phase2_tasks):
-            domain, result, error = await task
-            completed += 1
-            if error.startswith("timeout"):
-                timed_out_domains.add(domain)
-            if result:
-                catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
-            pct = 63 + round((completed / total) * 8)
-            await emit(
-                "catalogs_localized", pct,
-                f"{domain}: локалізований пошук {completed}/{len(phase2_tasks)}" + (f" · {error}" if error else "") + ".",
-                domain=domain, completed=completed, total=len(phase2_tasks),
-                found=len(catalogs[domain]), error=error,
-            )
-        for _, local in phase2_specs:
-            queried_alias_keys.add(normalize_title(local))
-
-        ru_candidates = [item.get("title", "") for d, items in catalogs.items() if d in RU_SITES for item in items]
-        ua_candidates = [item.get("title", "") for d, items in catalogs.items() if d in UA_SITES for item in items]
+        # PHASE 3 — web-index fallback only for catalogs still empty.  It uses the
+        # SAME strict per-domain order and stops on the first verified result.
         final_identity_aliases = collect_verified_aliases()
-        ru_title = choose_localized_title("RU", ru_candidates, final_identity_aliases) or ru_title
-        ua_title = choose_localized_title("UA", ua_candidates, final_identity_aliases) or ua_title
-        all_identity = unique_strings([*identity_aliases, *final_identity_aliases, ru_title, ua_title], limit=70)
-
-        # Final fallback: one/two strongest names per remaining domain. Timed-out
-        # native domains arrive here immediately instead of being retried twice.
-        google_specs: list[tuple[str, list[str]]] = []
-        for domain in CATALOG_SITES:
-            if catalogs[domain]:
-                continue
-            local = ua_title if domain in UA_SITES else ru_title
-            queries = unique_strings([romanized, english, local, native_original], limit=2)
-            if not queries:
-                queries = primary_queries[:1]
-            google_specs.append((domain, queries))
-
-        google_tasks = [
-            asyncio.create_task(google_job(domain, queries, all_identity, query_limit=2, timeout=8.0))
-            for domain, queries in google_specs
+        all_identity = unique_strings([*identity_aliases, *final_identity_aliases], limit=70)
+        fallback_specs = [
+            (domain, catalog_query_plan(domain, final_identity_aliases))
+            for domain in CATALOG_SITES if not catalogs[domain]
+        ]
+        fallback_tasks = [
+            asyncio.create_task(google_job(domain, queries, all_identity, query_limit=7, timeout=12.0))
+            for domain, queries in fallback_specs
         ]
         completed = 0
-        total = max(1, len(google_tasks))
-        if google_tasks:
-            await emit("catalogs_fallback", 74, f"Короткий fallback для порожніх каталогів: 0/{len(google_tasks)}.")
-        for task in asyncio.as_completed(google_tasks):
-            domain, result, error = await task
+        total = max(1, len(fallback_tasks))
+        if fallback_tasks:
+            await emit("catalogs_fallback", 72, f"Fallback лише для порожніх каталогів: 0/{len(fallback_tasks)}.")
+        for task in asyncio.as_completed(fallback_tasks):
+            domain, result, error, tried = await task
             completed += 1
             if result:
                 catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
-            pct = 74 + round((completed / total) * 15)
+            pct = 72 + round((completed / total) * 17)
             await emit(
                 "catalogs_fallback", pct,
-                f"{domain}: fallback {completed}/{len(google_tasks)}" + (f" · {error}" if error else "") + ".",
-                domain=domain, completed=completed, total=len(google_tasks),
-                found=len(catalogs[domain]), error=error,
+                f"{domain}: fallback {completed}/{len(fallback_tasks)}" + (f" · {error}" if error else "") + ".",
+                domain=domain, completed=completed, total=len(fallback_tasks),
+                found=len(catalogs[domain]), error=error, tried=tried,
             )
+
+        # Localized fields for output are already known before search; verified
+        # catalog titles may refine them, but never affect the query priority retroactively.
+        ru_candidates = [item.get("title", "") for d, items in catalogs.items() if d in RU_SITES for item in items]
+        ua_candidates = [item.get("title", "") for d, items in catalogs.items() if d in UA_SITES for item in items]
+        refined_identity = collect_verified_aliases()
+        ru_title = choose_localized_title("RU", ru_candidates, refined_identity) or ru_title
+        ua_title = choose_localized_title("UA", ua_candidates, refined_identity) or ua_title
+        final_identity_aliases = refined_identity
 
         self.log("Пошук завершено: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
         await emit(
@@ -2751,19 +2826,21 @@ class Core:
                 "source_catalog": source_catalog or "",
                 "search_strategy": {
                     "authority": "fast /api/search: Google site -> direct authority fallback",
-                    "catalogs": "strict source original/Romaji -> one compact native pass -> optional one exact alias replay -> one localized pass -> short fallback",
+                    "catalogs": "per catalog: source Original/Romaji -> English -> UA/RU title -> remaining exact aliases; optional one verified-alias replay; ordered fallback",
                 },
                 "catalog_search": {
                     "async": True,
                     "domains": len(CATALOG_SITES),
-                    "query_names": base_queries,
+                    "query_names": unique_strings([search_original, english, ua_title, ru_title, native_original], limit=8),
+                    "query_order": "original -> english -> catalog_language -> other_exact_aliases",
                     "source_aliases": source_aliases,
                     "discovered_aliases": final_identity_aliases,
                     "alias_replay_rounds": alias_replay_rounds,
                     "result_counts": {site: len(catalogs.get(site, [])) for site in CATALOG_SITES},
                     "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
-                    "per_domain_timeout_seconds": 9,
-                    "fallback_timeout_seconds": 8,
+                    "per_query_timeout_seconds": 6,
+                    "per_domain_timeout_seconds": 18,
+                    "fallback_timeout_seconds": 12,
                     "timed_out_domains": sorted(timed_out_domains),
                 },
                 "generated_at_unix": int(time.time()),
