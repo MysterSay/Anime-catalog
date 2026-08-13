@@ -48,6 +48,9 @@ const STATUS_THEME = {
   'Без статусу': { solid: '#d5dceb', glow: 'rgba(213,220,235,.22)', border: 'rgba(213,220,235,.4)' },
 };
 
+const mergeFirstId = new URLSearchParams(location.search).get('merge') || '';
+const mergeMode = Boolean(mergeFirstId);
+
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem('yoru-state') || '{}'); } catch { saved = {}; }
 
@@ -219,6 +222,7 @@ function populateFilters() {
 
 function getFiltered() {
   const items = db.filter(item => {
+    if (mergeMode && item.id === mergeFirstId) return false;
     const haystack = normalize([item.title, item.group, item.status].join(' '));
     const matchesSearch = !state.search || haystack.includes(normalize(state.search));
     const matchesGroup = state.group === 'all' || item.group === state.group;
@@ -275,9 +279,12 @@ function cardTemplate(item, index) {
   const favorite = state.favorite.has(item.id);
   const liked = state.liked.has(item.id);
   const theme = statusTheme(item.status || 'Без статусу');
+  const href = mergeMode
+    ? `merge.html?right=${encodeURIComponent(mergeFirstId)}&left=${encodeURIComponent(item.id)}`
+    : `title.html?id=${encodeURIComponent(item.id)}`;
   return `
-    <article class="anime-card" style="--delay:${Math.min(index * 35, 280)}ms; --status-accent:${theme.solid}; --status-accent-glow:${theme.glow}; --status-accent-border:${theme.border}" data-id="${escapeHtml(item.id)}">
-      <a class="card-link" href="title.html?id=${encodeURIComponent(item.id)}" aria-label="Відкрити ${escapeHtml(item.title)}"></a>
+    <article class="anime-card ${mergeMode ? 'merge-candidate-card' : ''}" style="--delay:${Math.min(index * 35, 280)}ms; --status-accent:${theme.solid}; --status-accent-glow:${theme.glow}; --status-accent-border:${theme.border}" data-id="${escapeHtml(item.id)}">
+      <a class="card-link" href="${href}" aria-label="${mergeMode ? 'Обрати для об’єднання' : 'Відкрити'} ${escapeHtml(item.title)}"></a>
       <div class="poster-wrap">
         <img class="poster" src="${escapeHtml(item.poster || FALLBACK_IMAGE)}" alt="${escapeHtml(item.title)}" loading="lazy" />
         <div class="poster-shade"></div>
@@ -296,6 +303,27 @@ function cardTemplate(item, index) {
         <p>${escapeHtml(item.description || 'Опис поки відсутній.')}</p>
       </div>
     </article>`;
+}
+
+
+function renderMergeDock() {
+  document.getElementById('mergeSelectionDock')?.remove();
+  document.body.classList.toggle('merge-pick-mode', mergeMode);
+  if (!mergeMode) return;
+  const first = db.find(item => item.id === mergeFirstId);
+  if (!first) return;
+  const theme = statusTheme(first.status || 'Без статусу');
+  document.body.insertAdjacentHTML('beforeend', `
+    <aside id="mergeSelectionDock" class="merge-selection-dock" style="--status-accent:${theme.solid}; --status-accent-glow:${theme.glow}; --status-accent-border:${theme.border}">
+      <a class="merge-selection-back" href="title.html?id=${encodeURIComponent(first.id)}" aria-label="Скасувати об’єднання">×</a>
+      <span class="merge-selection-kicker">ПЕРШИЙ ТАЙТЛ</span>
+      <div class="merge-selection-card">
+        <img src="${escapeHtml(first.poster || FALLBACK_IMAGE)}" alt="${escapeHtml(first.title)}" />
+        <div><strong>${escapeHtml(first.title)}</strong><small>${escapeHtml(first.status || 'Без статусу')} · ${escapeHtml(first.group || 'Без групи')}</small></div>
+      </div>
+      <p>Обери другий тайтл у каталозі. Пошук, сортування та фільтри працюють як звичайно.</p>
+    </aside>`);
+  catalogTitle.textContent = 'Обери тайтл для об’єднання';
 }
 
 function render() {
@@ -324,12 +352,13 @@ function render() {
   sortSelect.value = state.sort;
   syncExcludeControls();
   syncCustomSelects();
+  renderMergeDock();
 
   const ids = new Set(db.map(x => x.id));
   document.getElementById('countAll').textContent = db.length;
   document.getElementById('countFavorite').textContent = [...state.favorite].filter(id => ids.has(id)).length;
   document.getElementById('countLiked').textContent = [...state.liked].filter(id => ids.has(id)).length;
-  catalogTitle.textContent = state.quick === 'favorite' ? 'Вибране' : state.quick === 'liked' ? 'Улюблене' : 'Усі тайтли';
+  catalogTitle.textContent = mergeMode ? 'Обери тайтл для об’єднання' : (state.quick === 'favorite' ? 'Вибране' : state.quick === 'liked' ? 'Улюблене' : 'Усі тайтли');
   gridViewBtn.classList.toggle('active', state.view === 'grid');
   listViewBtn.classList.toggle('active', state.view === 'list');
 

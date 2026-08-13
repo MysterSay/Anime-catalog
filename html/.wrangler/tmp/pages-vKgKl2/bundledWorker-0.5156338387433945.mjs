@@ -56,14 +56,14 @@ var HttpError = class extends Error {
   }
 };
 function json(data, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(data, null, 2), {
+  return new Response(JSON.stringify(data), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
       "x-content-type-options": "nosniff",
       "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET, POST, PATCH, OPTIONS",
+      "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
       "access-control-allow-headers": "Content-Type, X-Ingest-Key",
       ...extraHeaders
     }
@@ -269,6 +269,32 @@ function getMappedEntries(page) {
   };
 }
 __name(getMappedEntries, "getMappedEntries");
+function mapPageSummary(page) {
+  const props = page?.properties || {};
+  const entries = Object.entries(props);
+  const titleProp = props[NOTION_PROPERTIES.title] || entries.find(([, prop]) => prop?.type === "title")?.[1];
+  const posterProp = props[NOTION_PROPERTIES.coverImage] || null;
+  const descriptionProp = props[NOTION_PROPERTIES.description] || null;
+  const statusProp = props[NOTION_PROPERTIES.status] || null;
+  const groupProp = props[NOTION_PROPERTIES.group] || null;
+  const addedProp = props[NOTION_PROPERTIES.addedAt] || null;
+  const favoriteProp = props["\u0412\u0438\u0431\u0440\u0430\u043D\u0435"] || props["Favorite"] || props["Bookmark"] || null;
+  const likedProp = props["\u0423\u043B\u044E\u0431\u043B\u0435\u043D\u0435"] || props["Liked"] || props["Loved"] || props["Love"] || null;
+  const posterRaw = fileUrl(posterProp);
+  const fallbackPoster = iconUrl(page) || coverUrl(page);
+  return {
+    id: page.id,
+    title: textValue(titleProp) || "\u0411\u0435\u0437 \u043D\u0430\u0437\u0432\u0438",
+    poster: posterRaw || fallbackPoster,
+    status: textValue(statusProp) || "\u0411\u0435\u0437 \u0441\u0442\u0430\u0442\u0443\u0441\u0443",
+    group: textValue(groupProp) || "\u0411\u0435\u0437 \u0433\u0440\u0443\u043F\u0438",
+    addedAt: textValue(addedProp) || page.created_time || page.last_edited_time || "",
+    favorite: boolValue(favoriteProp),
+    liked: boolValue(likedProp),
+    description: textValue(descriptionProp)
+  };
+}
+__name(mapPageSummary, "mapPageSummary");
 function mapPage(page) {
   const m = getMappedEntries(page);
   const excludedNames = new Set([
@@ -463,6 +489,145 @@ function siteLinksRichText(items) {
   return { rich_text: out };
 }
 __name(siteLinksRichText, "siteLinksRichText");
+function titlePropertyValue(value) {
+  const text = String(value || "").trim();
+  return { title: text ? [{ type: "text", text: { content: text.slice(0, 1900) } }] : [] };
+}
+__name(titlePropertyValue, "titlePropertyValue");
+function booleanPropertyValue(prop, value) {
+  const enabled = Boolean(value);
+  if (!prop || prop.type === "checkbox") return { checkbox: enabled };
+  if (prop.type === "select") return enabled ? { select: { name: "\u0422\u0430\u043A" } } : { select: null };
+  if (prop.type === "status") return enabled ? { status: { name: "\u0422\u0430\u043A" } } : { status: null };
+  if (prop.type === "rich_text") return richTextValue(enabled ? "true" : "false");
+  return null;
+}
+__name(booleanPropertyValue, "booleanPropertyValue");
+function fileUploadPageValue(fileUploadId, filename) {
+  return {
+    files: [{
+      type: "file_upload",
+      name: String(filename || "upload").slice(0, 900),
+      file_upload: { id: fileUploadId }
+    }]
+  };
+}
+__name(fileUploadPageValue, "fileUploadPageValue");
+async function notionMultipartFetch(env, path, formData) {
+  if (!env.NOTION_TOKEN) throw new HttpError(500, "\u0423 Cloudflare \u043D\u0435 \u0437\u0430\u0434\u0430\u043D\u043E \u0441\u0435\u043A\u0440\u0435\u0442 NOTION_TOKEN.", "", "", "cloudflare_secret");
+  const response = await fetch(`https://api.notion.com/v1${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.NOTION_TOKEN}`,
+      "Notion-Version": NOTION_VERSION
+    },
+    body: formData
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+    }
+    throw new HttpError(response.status, `Notion File Upload \u043F\u043E\u0432\u0435\u0440\u043D\u0443\u0432 ${response.status}: ${parsed?.message || body || response.statusText}`, body.slice(0, 1200), parsed?.code || "", "notion_file_upload");
+  }
+  return response.json();
+}
+__name(notionMultipartFetch, "notionMultipartFetch");
+async function uploadSmallFileToNotion(env, file) {
+  if (!(file instanceof File)) throw new HttpError(400, "\u0424\u0430\u0439\u043B \u043D\u0435 \u043F\u0435\u0440\u0435\u0434\u0430\u043D\u043E.", "", "", "file_upload");
+  if (!file.size) throw new HttpError(400, "\u0424\u0430\u0439\u043B \u043F\u043E\u0440\u043E\u0436\u043D\u0456\u0439.", "", "", "file_upload");
+  if (file.size > 20 * 1024 * 1024) throw new HttpError(413, "\u0424\u0430\u0439\u043B \u0437\u0430\u0432\u0435\u043B\u0438\u043A\u0438\u0439. \u0414\u043B\u044F \u043F\u0440\u044F\u043C\u043E\u0433\u043E \u0437\u0430\u0432\u0430\u043D\u0442\u0430\u0436\u0435\u043D\u043D\u044F \u0434\u043E\u0437\u0432\u043E\u043B\u0435\u043D\u043E \u0434\u043E 20 MB.", "", "", "file_upload");
+  const created = await notionFetch(env, "/file_uploads", {
+    method: "POST",
+    body: JSON.stringify({
+      mode: "single_part",
+      filename: String(file.name || "image").slice(0, 900),
+      content_type: file.type || "application/octet-stream"
+    })
+  });
+  if (!created?.id) throw new HttpError(502, "Notion \u043D\u0435 \u043F\u043E\u0432\u0435\u0440\u043D\u0443\u0432 ID File Upload.", "", "", "file_upload_create");
+  const form = new FormData();
+  form.append("file", file, file.name || "image");
+  const uploaded = await notionMultipartFetch(env, `/file_uploads/${created.id}/send`, form);
+  if (!uploaded?.id) throw new HttpError(502, "Notion \u043D\u0435 \u043F\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0432 \u0437\u0430\u0432\u0430\u043D\u0442\u0430\u0436\u0435\u043D\u043D\u044F \u0444\u0430\u0439\u043B\u0443.", "", "", "file_upload_send");
+  return uploaded;
+}
+__name(uploadSmallFileToNotion, "uploadSmallFileToNotion");
+function splitAliases(value) {
+  return String(value || "").split(/[\n|•]+/).map((x) => cleanTitle(x)).filter(Boolean);
+}
+__name(splitAliases, "splitAliases");
+function aliasMatches(query, aliasesText) {
+  const wanted = exactCoreTitleKey(query);
+  if (!wanted) return false;
+  return splitAliases(aliasesText).some((alias) => exactCoreTitleKey(alias) === wanted);
+}
+__name(aliasMatches, "aliasMatches");
+async function queryPagesByAlias(env, source, query) {
+  const aliasesProp = Object.entries(source?.properties || {}).find(([name, prop]) => normalizeName(name) === normalizeName(NOTION_PROPERTIES.aliases) && prop?.type === "rich_text");
+  if (!aliasesProp) return [];
+  const result = await notionFetch(env, `/data_sources/${source.id}/query`, {
+    method: "POST",
+    body: JSON.stringify({
+      page_size: 25,
+      filter: {
+        property: aliasesProp[1].id || aliasesProp[0],
+        rich_text: { contains: String(query || "").trim().slice(0, 200) }
+      }
+    })
+  });
+  return (result?.results || []).filter((page) => page?.object === "page");
+}
+__name(queryPagesByAlias, "queryPagesByAlias");
+async function handleExtensionContextApi(request, env) {
+  if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { allow: "GET" });
+  const url = new URL(request.url);
+  const q = cleanTitle(url.searchParams.get("title") || url.searchParams.get("q") || "");
+  const resolved = await resolveDatabaseSources(env);
+  const options = schemaOptionsFromSources(resolved.sources);
+  if (!q) return json({ ok: true, exists: false, query: "", item: null, options });
+  const candidates = [];
+  for (const source of resolved.sources) {
+    const pages = await queryPagesByAlias(env, source, q);
+    for (const page of pages) candidates.push(page);
+  }
+  let matched = candidates.find((page) => aliasMatches(q, textValue(getMappedEntries(page).aliasesEntry?.[1]))) || null;
+  if (!matched && candidates.length === 1) matched = candidates[0];
+  return json({
+    ok: true,
+    exists: Boolean(matched),
+    query: q,
+    item: matched ? mapPage(matched) : null,
+    options
+  });
+}
+__name(handleExtensionContextApi, "handleExtensionContextApi");
+async function handleAnimeUploadApi(request, env) {
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+  const url = new URL(request.url);
+  const requestedId = url.searchParams.get("id");
+  const kind = url.searchParams.get("kind");
+  if (!requestedId) return json({ error: "\u041D\u0435 \u043F\u0435\u0440\u0435\u0434\u0430\u043D\u043E id \u0442\u0430\u0439\u0442\u043B\u0443." }, 400);
+  if (!["poster", "banner"].includes(kind)) return json({ error: "kind \u043C\u0430\u0454 \u0431\u0443\u0442\u0438 poster \u0430\u0431\u043E banner." }, 400);
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File)) return json({ error: "\u0423 multipart/form-data \u043D\u0435\u043C\u0430\u0454 \u043F\u043E\u043B\u044F file." }, 400);
+  const page = await notionFetch(env, `/pages/${requestedId}`);
+  const mapped = getMappedEntries(page);
+  const sourceId = page?.parent?.data_source_id;
+  let source = sourceId ? await notionFetch(env, `/data_sources/${sourceId}`) : await getWriteSource(env);
+  source = await ensureWritableSchema(env, source);
+  const uploaded = await uploadSmallFileToNotion(env, file);
+  const mappedEntry = kind === "poster" ? mapped.posterEntry : mapped.bannerEntry;
+  const standardName = kind === "poster" ? NOTION_PROPERTIES.coverImage : NOTION_PROPERTIES.banner;
+  const targetName = mappedEntry?.[1]?.type === "files" ? mappedEntry[0] : standardName;
+  const properties = { [targetName]: fileUploadPageValue(uploaded.id, file.name) };
+  const updated = await notionFetch(env, `/pages/${requestedId}`, { method: "PATCH", body: JSON.stringify({ properties }) });
+  return json({ ok: true, kind, fileUploadId: uploaded.id, item: mapPage(updated), options: schemaOptionsFromSources([source]) });
+}
+__name(handleAnimeUploadApi, "handleAnimeUploadApi");
 async function ensureWritableSchema(env, source) {
   let current = source;
   const additions = {};
@@ -1066,19 +1231,144 @@ function findExistingMapped(items, media, ukTitle = "") {
   return items.find((item) => [item.title, item.originalTitle, item.russianTitle, item.key].some((value) => aliases.has(exactTitleKey(value)))) || null;
 }
 __name(findExistingMapped, "findExistingMapped");
+function mergeChoice(body, key) {
+  return body?.choices?.[key] === "left" ? "left" : "right";
+}
+__name(mergeChoice, "mergeChoice");
+function mergeSideItem(side, leftItem, rightItem) {
+  return side === "left" ? leftItem : rightItem;
+}
+__name(mergeSideItem, "mergeSideItem");
+function hasUsefulText(value) {
+  return Boolean(String(value || "").trim());
+}
+__name(hasUsefulText, "hasUsefulText");
+function chooseAvailable(side, leftValue, rightValue) {
+  const preferred = side === "left" ? leftValue : rightValue;
+  const fallback = side === "left" ? rightValue : leftValue;
+  return hasUsefulText(preferred) ? preferred : fallback;
+}
+__name(chooseAvailable, "chooseAvailable");
+function canonicalSitePropertyForUrl(rawUrl) {
+  const url = safeHttpUrl(rawUrl);
+  if (!url) return "";
+  let host = "";
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+  for (const domain of SITE_PROPERTIES) {
+    if (host === domain || host.endsWith(`.${domain}`)) return domain;
+    const aliases = SEARCH_HOST_ALIASES[domain] || [];
+    if (aliases.some((alias) => host === String(alias).toLowerCase().replace(/^www\./, ""))) return domain;
+  }
+  return "";
+}
+__name(canonicalSitePropertyForUrl, "canonicalSitePropertyForUrl");
+function mergedSiteLinks(leftItem, rightItem) {
+  const result = Object.fromEntries(SITE_PROPERTIES.map((domain) => [domain, []]));
+  const seen = /* @__PURE__ */ new Set();
+  for (const item of [...rightItem?.links || [], ...leftItem?.links || []]) {
+    const url = safeHttpUrl(item?.url || "");
+    if (!url) continue;
+    const domain = canonicalSitePropertyForUrl(url);
+    if (!domain) continue;
+    const key = url.replace(/#.*$/, "").replace(/\/$/, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result[domain].push({ title: plainTitle(item?.name || "") || domain, url });
+  }
+  return result;
+}
+__name(mergedSiteLinks, "mergedSiteLinks");
+async function handleMergeAnimeApi(request, env) {
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+  const body = await request.json().catch(() => ({}));
+  const rightId = String(body.rightId || body.targetId || "").trim();
+  const leftId = String(body.leftId || body.sourceId || "").trim();
+  if (!rightId || !leftId) return json({ error: "\u041F\u043E\u0442\u0440\u0456\u0431\u043D\u0456 rightId \u0456 leftId." }, 400);
+  if (compactId(rightId) === compactId(leftId)) return json({ error: "\u041D\u0435 \u043C\u043E\u0436\u043D\u0430 \u043E\u0431\u2019\u0454\u0434\u043D\u0430\u0442\u0438 \u0442\u0430\u0439\u0442\u043B \u0456\u0437 \u0441\u0430\u043C\u0438\u043C \u0441\u043E\u0431\u043E\u044E." }, 400);
+  const [rightPage, leftPage] = await Promise.all([
+    notionFetch(env, `/pages/${rightId}`),
+    notionFetch(env, `/pages/${leftId}`)
+  ]);
+  const rightItem = mapPage(rightPage);
+  const leftItem = mapPage(leftPage);
+  const rightMapped = getMappedEntries(rightPage);
+  const titleSide = mergeChoice(body, "title");
+  const posterSide = mergeChoice(body, "poster");
+  const marksSide = mergeChoice(body, "marks");
+  const bannerSide = mergeChoice(body, "banner");
+  const descriptionSide = mergeChoice(body, "description");
+  const titleItem = mergeSideItem(titleSide, leftItem, rightItem);
+  const markItem = mergeSideItem(marksSide, leftItem, rightItem);
+  const sourceId = rightPage?.parent?.data_source_id;
+  let source = sourceId ? await notionFetch(env, `/data_sources/${sourceId}`) : await getWriteSource(env);
+  source = await ensureWritableSchema(env, source);
+  if (markItem.group && markItem.group !== "\u0411\u0435\u0437 \u0433\u0440\u0443\u043F\u0438") source = await ensureGroupOption(env, source, markItem.group);
+  const titlePropName = rightMapped.titleEntry?.[0] || Object.entries(source.properties || {}).find(([, prop]) => prop?.type === "title")?.[0] || NOTION_PROPERTIES.title;
+  const mergedPoster = chooseAvailable(posterSide, leftItem.hasPoster ? leftItem.poster : "", rightItem.hasPoster ? rightItem.poster : "");
+  const mergedBanner = chooseAvailable(bannerSide, leftItem.hasBanner ? leftItem.banner : "", rightItem.hasBanner ? rightItem.banner : "");
+  const mergedDescription = chooseAvailable(descriptionSide, leftItem.description, rightItem.description);
+  const mergedTitle = chooseAvailable(titleSide, leftItem.title, rightItem.title) || rightItem.title || leftItem.title || "\u0411\u0435\u0437 \u043D\u0430\u0437\u0432\u0438";
+  const mergedOriginal = chooseAvailable(titleSide, leftItem.originalTitle, rightItem.originalTitle);
+  const mergedEnglish = chooseAvailable(titleSide, leftItem.englishTitle, rightItem.englishTitle);
+  const mergedRussian = chooseAvailable(titleSide, leftItem.russianTitle, rightItem.russianTitle);
+  const mergedAliases = chooseAvailable(titleSide, leftItem.aliases, rightItem.aliases);
+  const mergedLinks = mergedSiteLinks(leftItem, rightItem);
+  const properties = {
+    [titlePropName]: { title: [{ type: "text", text: { content: String(mergedTitle).slice(0, 1900) } }] },
+    [NOTION_PROPERTIES.description]: richTextChunksValue(mergedDescription),
+    [NOTION_PROPERTIES.originalTitle]: richTextChunksValue(mergedOriginal),
+    [NOTION_PROPERTIES.englishTitle]: richTextChunksValue(mergedEnglish),
+    [NOTION_PROPERTIES.russianTitle]: richTextChunksValue(mergedRussian),
+    [NOTION_PROPERTIES.aliases]: richTextChunksValue(mergedAliases),
+    [NOTION_PROPERTIES.key]: richTextValue(exactCoreTitleKey(mergedOriginal || mergedTitle)),
+    [NOTION_PROPERTIES.status]: markItem.status && markItem.status !== "\u0411\u0435\u0437 \u0441\u0442\u0430\u0442\u0443\u0441\u0443" ? { status: { name: markItem.status } } : { status: null },
+    [NOTION_PROPERTIES.group]: markItem.group && markItem.group !== "\u0411\u0435\u0437 \u0433\u0440\u0443\u043F\u0438" ? { select: { name: markItem.group } } : { select: null }
+  };
+  if (mergedPoster) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(mergedPoster, "merged-cover");
+  if (mergedBanner) properties[NOTION_PROPERTIES.banner] = notionFilesValue(mergedBanner, "merged-banner");
+  const selectedTitlePage = titleSide === "left" ? leftPage : rightPage;
+  const selectedSourceUrl = safeHttpUrl(textValue(selectedTitlePage?.properties?.[NOTION_PROPERTIES.sourceUrl]) || "");
+  if (selectedSourceUrl) properties[NOTION_PROPERTIES.sourceUrl] = { url: selectedSourceUrl };
+  for (const domain of SITE_PROPERTIES) {
+    if (mergedLinks[domain]?.length) properties[domain] = siteLinksRichText(mergedLinks[domain]);
+  }
+  const updated = await notionFetch(env, `/pages/${rightId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ properties })
+  });
+  await notionFetch(env, `/pages/${leftId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ in_trash: true })
+  });
+  return json({
+    ok: true,
+    item: mapPage(updated),
+    keptId: rightId,
+    removedId: leftId,
+    choices: { title: titleSide, poster: posterSide, marks: marksSide, banner: bannerSide, description: descriptionSide },
+    mergedLinks: Object.fromEntries(Object.entries(mergedLinks).map(([domain, items]) => [domain, items.length]))
+  });
+}
+__name(handleMergeAnimeApi, "handleMergeAnimeApi");
 async function handleAnimeApi(request, env) {
   const url = new URL(request.url);
   const requestedId = url.searchParams.get("id");
   if (request.method === "GET") {
-    const queried = await queryDatabasePages(env);
-    const items = queried.pages.map(mapPage);
-    const options = schemaOptionsFromSources(queried.sources);
     if (requestedId) {
-      const norm = compactId(requestedId);
-      const item = items.find((entry) => compactId(entry.id) === norm);
-      if (!item) return json({ error: "\u0422\u0430\u0439\u0442\u043B \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E." }, 404);
-      return json({ item, count: 1, options });
+      const [page, resolved] = await Promise.all([
+        notionFetch(env, `/pages/${requestedId}`),
+        resolveDatabaseSources(env)
+      ]);
+      if (!page?.id) return json({ error: "\u0422\u0430\u0439\u0442\u043B \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E." }, 404);
+      return json({ item: mapPage(page), count: 1, options: schemaOptionsFromSources(resolved.sources) });
     }
+    const queried = await queryDatabasePages(env);
+    const items = queried.pages.map(mapPageSummary);
+    const options = schemaOptionsFromSources(queried.sources);
     return json({ items, count: items.length, databaseId: queried.databaseId, sources: queried.sourceStats, options });
   }
   if (request.method === "PATCH") {
@@ -1090,6 +1380,30 @@ async function handleAnimeApi(request, env) {
     source = await ensureWritableSchema(env, source);
     const body = await request.json().catch(() => ({}));
     const properties = {};
+    if (Object.prototype.hasOwnProperty.call(body, "title")) {
+      const titleName = mapped.titleEntry?.[0] || Object.entries(source.properties || {}).find(([, prop]) => prop?.type === "title")?.[0] || NOTION_PROPERTIES.title;
+      properties[titleName] = titlePropertyValue(body.title || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "description")) {
+      const name = mapped.descriptionEntry?.[0] || NOTION_PROPERTIES.description;
+      properties[name] = richTextChunksValue(body.description || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "originalTitle")) {
+      const name = mapped.originalEntry?.[0] || NOTION_PROPERTIES.originalTitle;
+      properties[name] = richTextChunksValue(body.originalTitle || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "englishTitle")) {
+      const name = mapped.englishEntry?.[0] || NOTION_PROPERTIES.englishTitle;
+      properties[name] = richTextChunksValue(body.englishTitle || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "russianTitle")) {
+      const name = mapped.russianEntry?.[0] || NOTION_PROPERTIES.russianTitle;
+      properties[name] = richTextChunksValue(body.russianTitle || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "aliases")) {
+      const name = mapped.aliasesEntry?.[0] || NOTION_PROPERTIES.aliases;
+      properties[name] = richTextChunksValue(body.aliases || "");
+    }
     if (Object.prototype.hasOwnProperty.call(body, "status")) {
       const statusName = String(body.status || "").trim();
       const name = mapped.statusEntry?.[0] || NOTION_PROPERTIES.status;
@@ -1101,23 +1415,62 @@ async function handleAnimeApi(request, env) {
       const name = mapped.groupEntry?.[0] || NOTION_PROPERTIES.group;
       properties[name] = groupName && groupName !== "\u0411\u0435\u0437 \u0433\u0440\u0443\u043F\u0438" ? { select: { name: groupName } } : { select: null };
     }
+    if (Object.prototype.hasOwnProperty.call(body, "favorite")) {
+      const entry = mapped.favoriteEntry;
+      if (entry) {
+        const value = booleanPropertyValue(entry[1], body.favorite);
+        if (value) properties[entry[0]] = value;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "liked")) {
+      const entry = mapped.likedEntry;
+      if (entry) {
+        const value = booleanPropertyValue(entry[1], body.liked);
+        if (value) properties[entry[0]] = value;
+      }
+    }
     if (Object.prototype.hasOwnProperty.call(body, "posterUrl")) {
-      const posterUrl = safeHttpUrl(body.posterUrl || "");
-      if (!posterUrl) return json({ error: "\u041D\u0435\u043A\u043E\u0440\u0435\u043A\u0442\u043D\u0438\u0439 URL \u043F\u043E\u0441\u0442\u0435\u0440\u0430." }, 400);
-      const name = mapped.posterEntry?.[0] || NOTION_PROPERTIES.coverImage;
-      properties[name] = notionFilesValue(posterUrl, "manual-cover");
+      const rawPoster = String(body.posterUrl || "").trim();
+      const name = mapped.posterEntry?.[1]?.type === "files" ? mapped.posterEntry[0] : NOTION_PROPERTIES.coverImage;
+      if (!rawPoster) properties[name] = { files: [] };
+      else {
+        const posterUrl = safeHttpUrl(rawPoster);
+        if (!posterUrl) return json({ error: "\u041D\u0435\u043A\u043E\u0440\u0435\u043A\u0442\u043D\u0438\u0439 URL \u043F\u043E\u0441\u0442\u0435\u0440\u0430." }, 400);
+        properties[name] = notionFilesValue(posterUrl, "manual-cover");
+      }
     }
     if (Object.prototype.hasOwnProperty.call(body, "bannerUrl")) {
-      const bannerUrl = safeHttpUrl(body.bannerUrl || "");
-      if (!bannerUrl) return json({ error: "\u041D\u0435\u043A\u043E\u0440\u0435\u043A\u0442\u043D\u0438\u0439 URL \u0431\u0430\u043D\u0435\u0440\u0430." }, 400);
-      const name = mapped.bannerEntry?.[0] || NOTION_PROPERTIES.banner;
-      properties[name] = notionFilesValue(bannerUrl, "manual-banner");
+      const rawBanner = String(body.bannerUrl || "").trim();
+      const name = mapped.bannerEntry?.[1]?.type === "files" ? mapped.bannerEntry[0] : NOTION_PROPERTIES.banner;
+      if (!rawBanner) properties[name] = { files: [] };
+      else {
+        const bannerUrl = safeHttpUrl(rawBanner);
+        if (!bannerUrl) return json({ error: "\u041D\u0435\u043A\u043E\u0440\u0435\u043A\u0442\u043D\u0438\u0439 URL \u0431\u0430\u043D\u0435\u0440\u0430." }, 400);
+        properties[name] = notionFilesValue(bannerUrl, "manual-banner");
+      }
     }
+    if (body.siteLinks && typeof body.siteLinks === "object") {
+      for (const domain of SITE_PROPERTIES) {
+        const rawItems = Array.isArray(body.siteLinks[domain]) ? body.siteLinks[domain] : [];
+        const items = rawItems.map((item, index) => ({
+          url: safeHttpUrl(item?.url || ""),
+          title: plainTitle(item?.title || item?.name || "") || `\u041F\u043E\u0441\u0438\u043B\u0430\u043D\u043D\u044F ${index + 1}`
+        })).filter((item) => item.url);
+        properties[domain] = siteLinksRichText(items);
+      }
+    }
+    const keyBase = Object.prototype.hasOwnProperty.call(body, "originalTitle") ? body.originalTitle : Object.prototype.hasOwnProperty.call(body, "title") ? body.title : "";
+    if (keyBase) properties[NOTION_PROPERTIES.key] = richTextValue(exactCoreTitleKey(keyBase));
     if (!Object.keys(properties).length) return json({ error: "\u041D\u0435\u043C\u0430\u0454 \u0437\u043C\u0456\u043D \u0434\u043B\u044F \u0437\u0431\u0435\u0440\u0435\u0436\u0435\u043D\u043D\u044F." }, 400);
     const updated = await notionFetch(env, `/pages/${requestedId}`, { method: "PATCH", body: JSON.stringify({ properties }) });
     return json({ ok: true, item: mapPage(updated), options: schemaOptionsFromSources([source]) });
   }
-  return json({ error: "Method not allowed" }, 405, { allow: "GET, PATCH" });
+  if (request.method === "DELETE") {
+    if (!requestedId) return json({ error: "\u041D\u0435 \u043F\u0435\u0440\u0435\u0434\u0430\u043D\u043E id \u0442\u0430\u0439\u0442\u043B\u0443." }, 400);
+    const trashed = await notionFetch(env, `/pages/${requestedId}`, { method: "PATCH", body: JSON.stringify({ in_trash: true }) });
+    return json({ ok: true, id: requestedId, inTrash: Boolean(trashed?.in_trash) });
+  }
+  return json({ error: "Method not allowed" }, 405, { allow: "GET, PATCH, DELETE" });
 }
 __name(handleAnimeApi, "handleAnimeApi");
 async function handleOptionsApi(request, env) {
@@ -1658,7 +2011,7 @@ var worker_default = {
       if (request.method === "OPTIONS" && url.pathname.startsWith("/api/")) {
         return new Response(null, { status: 204, headers: {
           "access-control-allow-origin": "*",
-          "access-control-allow-methods": "GET, POST, PATCH, OPTIONS",
+          "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
           "access-control-allow-headers": "Content-Type, X-Ingest-Key",
           "access-control-max-age": "86400"
         } });
@@ -1669,12 +2022,15 @@ var worker_default = {
       if (url.pathname === "/api/process-title") return await handleProcessTitleApi(request, env);
       if (url.pathname === "/api/ingest" || url.pathname === "/api/anime/import") return await handleIngestApi(request, env);
       if (request.method === "POST" && url.pathname === "/" && (request.headers.get("content-type") || "").includes("application/json")) return await handleIngestApi(request, env);
+      if (url.pathname === "/api/anime/merge") return await handleMergeAnimeApi(request, env);
+      if (url.pathname === "/api/anime/upload") return await handleAnimeUploadApi(request, env);
+      if (url.pathname === "/api/extension/context") return await handleExtensionContextApi(request, env);
       if (url.pathname === "/api/anime") return await handleAnimeApi(request, env);
       if (url.pathname === "/api/options") return await handleOptionsApi(request, env);
       if (url.pathname === "/api/discover") return await handleDiscoverApi(request, env);
       if (url.pathname === "/api/discover/prepare") return await handleDiscoverPrepareApi(request, env);
       if (url.pathname === "/api/catalog-search") return await handleCatalogSearchApi(request, env);
-      if (url.pathname === "/api/version") return json({ ok: true, version: "yoru-v4.9-stream-progress-2026-08-11", addTitle: true, googleSourceSearch: true, googleSearchMode: "vercel-python-core", sourceSites: AUTHORITY_SITES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: "ndjson-v1", coreJsonIngest: true, ingestEndpoint: "/api/ingest", mediaRepair: true });
+      if (url.pathname === "/api/version") return json({ ok: true, version: "yoru-v5.5-editor-extension-2026-08-13", addTitle: true, googleSourceSearch: true, googleSearchMode: "vercel-python-core", sourceSites: AUTHORITY_SITES, catalogs: SITE_PROPERTIES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: "ndjson-v1", coreJsonIngest: true, ingestEndpoint: "/api/ingest", mediaRepair: true, mergeTitles: true, mergeEndpoint: "/api/anime/merge", deleteTitles: true, editTitles: true, uploadEndpoint: "/api/anime/upload", extensionContext: "/api/extension/context" });
       if (url.pathname === "/api/health") {
         const databaseId = env.NOTION_DATABASE_ID || DEFAULT_DATABASE_ID;
         if (!env.NOTION_TOKEN) return json({ ok: false, notion: false, tokenConfigured: false, databaseId, step: "cloudflare_secret", error: "\u0423 Cloudflare \u043D\u0435 \u0437\u0430\u0434\u0430\u043D\u043E NOTION_TOKEN." }, 500);
@@ -1698,4 +2054,4 @@ var worker_default = {
 export {
   worker_default as default
 };
-//# sourceMappingURL=bundledWorker-0.9833861651798463.mjs.map
+//# sourceMappingURL=bundledWorker-0.5156338387433945.mjs.map

@@ -53,14 +53,14 @@ class HttpError extends Error {
 }
 
 function json(data, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(data, null, 2), {
+  return new Response(JSON.stringify(data), {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'access-control-allow-origin': '*',
-      'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
+      'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
       'access-control-allow-headers': 'Content-Type, X-Ingest-Key',
       ...extraHeaders,
     },
@@ -270,13 +270,39 @@ function getMappedEntries(page) {
     originalEntry: findProperty(entries, ['Оригінальна назва', 'Original title', 'Original name', 'Romaji'], ['rich_text', 'title']),
     englishEntry: findProperty(entries, ['Англійська назва', 'English title', 'English'], ['rich_text', 'title']),
     russianEntry: findProperty(entries, ['Російська назва', 'Russian title', 'Russian'], ['rich_text', 'title']),
-    aliasesEntry: findProperty(entries, ['Аліаси', 'Aliases', 'Synonyms'], ['rich_text', 'title']),
+    aliasesEntry: findProperty(entries, ['Аліаси', 'Aliases', 'Synonyms'], ['rich_text', 'title', 'multi_select', 'select']),
     keyEntry: findProperty(entries, ['Ключ', 'Key'], ['rich_text', 'title']),
     statusEntry: findProperty(entries, ['Статус', 'Status'], ['status', 'select', 'rich_text']),
     groupEntry: findProperty(entries, ['Група', 'Group', 'Категорія', 'Category'], ['select', 'multi_select', 'rich_text', 'status']),
     addedEntry: findProperty(entries, ['Дата додавання', 'Added At', 'Added', 'Додано', 'Created', 'Created time'], ['date', 'created_time', 'last_edited_time']),
     favoriteEntry: findProperty(entries, ['Вибране', 'Favorite', 'Bookmark'], ['checkbox', 'select', 'status', 'rich_text']),
     likedEntry: findProperty(entries, ['Улюблене', 'Liked', 'Loved', 'Love'], ['checkbox', 'select', 'status', 'rich_text']),
+  };
+}
+
+function mapPageSummary(page) {
+  const props = page?.properties || {};
+  const entries = Object.entries(props);
+  const titleProp = props[NOTION_PROPERTIES.title] || entries.find(([, prop]) => prop?.type === 'title')?.[1];
+  const posterProp = props[NOTION_PROPERTIES.coverImage] || null;
+  const descriptionProp = props[NOTION_PROPERTIES.description] || null;
+  const statusProp = props[NOTION_PROPERTIES.status] || null;
+  const groupProp = props[NOTION_PROPERTIES.group] || null;
+  const addedProp = props[NOTION_PROPERTIES.addedAt] || null;
+  const favoriteProp = props['Вибране'] || props['Favorite'] || props['Bookmark'] || null;
+  const likedProp = props['Улюблене'] || props['Liked'] || props['Loved'] || props['Love'] || null;
+  const posterRaw = fileUrl(posterProp);
+  const fallbackPoster = iconUrl(page) || coverUrl(page);
+  return {
+    id: page.id,
+    title: textValue(titleProp) || 'Без назви',
+    poster: posterRaw || fallbackPoster,
+    status: textValue(statusProp) || 'Без статусу',
+    group: textValue(groupProp) || 'Без групи',
+    addedAt: textValue(addedProp) || page.created_time || page.last_edited_time || '',
+    favorite: boolValue(favoriteProp),
+    liked: boolValue(likedProp),
+    description: textValue(descriptionProp),
   };
 }
 
@@ -396,11 +422,14 @@ function schemaOptionsFromSources(sources) {
   const groups = new Set();
   for (const source of sources || []) {
     for (const [name, prop] of Object.entries(source?.properties || {})) {
-      if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.status) && prop?.type === 'status') {
-        for (const option of prop.status?.options || []) if (option?.name) statuses.add(option.name);
+      if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.status)) {
+        if (prop?.type === 'status') for (const option of prop.status?.options || []) if (option?.name) statuses.add(option.name);
+        if (prop?.type === 'select') for (const option of prop.select?.options || []) if (option?.name) statuses.add(option.name);
       }
-      if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.group) && prop?.type === 'select') {
-        for (const option of prop.select?.options || []) if (option?.name) groups.add(option.name);
+      if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.group)) {
+        if (prop?.type === 'select') for (const option of prop.select?.options || []) if (option?.name) groups.add(option.name);
+        if (prop?.type === 'multi_select') for (const option of prop.multi_select?.options || []) if (option?.name) groups.add(option.name);
+        if (prop?.type === 'status') for (const option of prop.status?.options || []) if (option?.name) groups.add(option.name);
       }
     }
   }
@@ -462,6 +491,289 @@ function siteLinksRichText(items) {
     if (index < unique.length - 1) out.push({ type: 'text', text: { content: '\n' } });
   });
   return { rich_text: out };
+}
+
+
+function titlePropertyValue(value) {
+  const text = String(value || '').trim();
+  return { title: text ? [{ type: 'text', text: { content: text.slice(0, 1900) } }] : [] };
+}
+
+function booleanPropertyValue(prop, value) {
+  const enabled = Boolean(value);
+  if (!prop || prop.type === 'checkbox') return { checkbox: enabled };
+  if (prop.type === 'select') return enabled ? { select: { name: 'Так' } } : { select: null };
+  if (prop.type === 'status') return enabled ? { status: { name: 'Так' } } : { status: null };
+  if (prop.type === 'rich_text') return richTextValue(enabled ? 'true' : 'false');
+  return null;
+}
+
+function fileUploadPageValue(fileUploadId, filename) {
+  return {
+    files: [{
+      type: 'file_upload',
+      name: String(filename || 'upload').slice(0, 900),
+      file_upload: { id: fileUploadId },
+    }],
+  };
+}
+
+async function notionMultipartFetch(env, path, formData) {
+  if (!env.NOTION_TOKEN) throw new HttpError(500, 'У Cloudflare не задано секрет NOTION_TOKEN.', '', '', 'cloudflare_secret');
+  const response = await fetch(`https://api.notion.com/v1${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.NOTION_TOKEN}`,
+      'Notion-Version': NOTION_VERSION,
+    },
+    body: formData,
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    let parsed = null;
+    try { parsed = JSON.parse(body); } catch {}
+    throw new HttpError(response.status, `Notion File Upload повернув ${response.status}: ${parsed?.message || body || response.statusText}`, body.slice(0, 1200), parsed?.code || '', 'notion_file_upload');
+  }
+  return response.json();
+}
+
+async function uploadSmallFileToNotion(env, file) {
+  if (!(file instanceof File)) throw new HttpError(400, 'Файл не передано.', '', '', 'file_upload');
+  if (!file.size) throw new HttpError(400, 'Файл порожній.', '', '', 'file_upload');
+  if (file.size > 20 * 1024 * 1024) throw new HttpError(413, 'Файл завеликий. Для прямого завантаження дозволено до 20 MB.', '', '', 'file_upload');
+  const created = await notionFetch(env, '/file_uploads', {
+    method: 'POST',
+    body: JSON.stringify({
+      mode: 'single_part',
+      filename: String(file.name || 'image').slice(0, 900),
+      content_type: file.type || 'application/octet-stream',
+    }),
+  });
+  if (!created?.id) throw new HttpError(502, 'Notion не повернув ID File Upload.', '', '', 'file_upload_create');
+  const form = new FormData();
+  form.append('file', file, file.name || 'image');
+  const uploaded = await notionMultipartFetch(env, `/file_uploads/${created.id}/send`, form);
+  if (!uploaded?.id) throw new HttpError(502, 'Notion не підтвердив завантаження файлу.', '', '', 'file_upload_send');
+  return uploaded;
+}
+
+function splitAliases(value) {
+  return String(value || '')
+    .split(/[\n|•;]+|\s+\/\s+/)
+    .map(x => cleanTitle(x))
+    .filter(Boolean);
+}
+
+function aliasTokenSet(value) {
+  return new Set(exactCoreTitleKey(value).split(' ').filter(Boolean));
+}
+
+function aliasMatchScore(query, aliasesText) {
+  const wanted = exactCoreTitleKey(query);
+  if (!wanted) return 0;
+  const wantedTokens = aliasTokenSet(query);
+  let best = 0;
+  for (const alias of splitAliases(aliasesText)) {
+    const key = exactCoreTitleKey(alias);
+    if (!key) continue;
+    if (key === wanted) return 100;
+    const minLen = Math.min(key.length, wanted.length);
+    if (minLen >= 12 && (key.includes(wanted) || wanted.includes(key))) {
+      best = Math.max(best, 88 - Math.min(18, Math.abs(key.length - wanted.length) / 4));
+    }
+    const tokens = aliasTokenSet(alias);
+    if (tokens.size && wantedTokens.size) {
+      let overlap = 0;
+      for (const token of wantedTokens) if (tokens.has(token)) overlap++;
+      const union = new Set([...wantedTokens, ...tokens]).size || 1;
+      const jaccard = overlap / union;
+      const coverage = overlap / Math.min(wantedTokens.size, tokens.size);
+      if (overlap >= 3 && coverage >= .72) best = Math.max(best, 68 + Math.round(jaccard * 18));
+    }
+  }
+  return best;
+}
+
+function aliasMatches(query, aliasesText) {
+  return aliasMatchScore(query, aliasesText) >= 72;
+}
+
+function aliasSearchVariants(query) {
+  const q = cleanTitle(query);
+  const out = [q];
+  const withoutBrackets = cleanTitle(q.replace(/[\[(].*?[\])]/g, ' '));
+  if (withoutBrackets.length >= 8) out.push(withoutBrackets);
+  for (const sep of [':', '—', '–']) {
+    const part = cleanTitle(q.split(sep)[0]);
+    if (part.length >= 10) out.push(part);
+  }
+  const words = q.split(/\s+/).filter(Boolean);
+  if (words.length > 5) out.push(words.slice(0, 5).join(' '));
+  if (words.length > 7) out.push(words.slice(0, 7).join(' '));
+  return [...new Set(out.map(cleanTitle).filter(x => x.length >= 4))].slice(0, 6);
+}
+
+function aliasesPropertyEntry(source) {
+  return Object.entries(source?.properties || {}).find(([name, prop]) =>
+    normalizeName(name) === normalizeName(NOTION_PROPERTIES.aliases) &&
+    ['rich_text', 'title', 'multi_select', 'select'].includes(prop?.type)
+  ) || null;
+}
+
+async function queryPagesByAlias(env, source, query) {
+  const aliasesProp = aliasesPropertyEntry(source);
+  if (!aliasesProp) return [];
+  const [propName, prop] = aliasesProp;
+  const property = prop.id || propName;
+  const variants = aliasSearchVariants(query);
+  const filters = [];
+
+  if (prop.type === 'rich_text' || prop.type === 'title') {
+    for (const value of variants) filters.push({ property, [prop.type]: { contains: value.slice(0, 180) } });
+  } else if (prop.type === 'multi_select') {
+    const options = prop.multi_select?.options || [];
+    const wanted = exactCoreTitleKey(query);
+    const matches = options
+      .map(option => ({ option, score: aliasMatchScore(query, option?.name || '') }))
+      .filter(x => x.score >= 72)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+    if (!matches.length && wanted) {
+      const exact = options.find(option => exactCoreTitleKey(option?.name || '') === wanted);
+      if (exact) matches.push({ option: exact, score: 100 });
+    }
+    for (const { option } of matches) filters.push({ property, multi_select: { contains: option.name } });
+  } else if (prop.type === 'select') {
+    const options = prop.select?.options || [];
+    const matches = options
+      .map(option => ({ option, score: aliasMatchScore(query, option?.name || '') }))
+      .filter(x => x.score >= 72)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+    for (const { option } of matches) filters.push({ property, select: { equals: option.name } });
+  }
+
+  if (!filters.length) return [];
+  const pages = [];
+  const seen = new Set();
+  for (const filter of filters.slice(0, 6)) {
+    const result = await notionFetch(env, `/data_sources/${source.id}/query`, {
+      method: 'POST',
+      body: JSON.stringify({ page_size: 25, filter }),
+    });
+    for (const page of result?.results || []) {
+      if (page?.object !== 'page' || seen.has(page.id)) continue;
+      seen.add(page.id);
+      pages.push(page);
+    }
+  }
+  return pages;
+}
+
+async function collectGroupValuesFromPages(env, sources, existingGroups = []) {
+  const groups = new Set(existingGroups || []);
+  if (groups.size >= 2) return [...groups].sort((a, b) => a.localeCompare(b, 'uk'));
+  for (const source of sources || []) {
+    const groupEntry = Object.entries(source?.properties || {}).find(([name]) => normalizeName(name) === normalizeName(NOTION_PROPERTIES.group));
+    if (!groupEntry) continue;
+    let cursor = null;
+    let scanned = 0;
+    do {
+      const body = { page_size: 100 };
+      if (cursor) body.start_cursor = cursor;
+      const result = await notionFetch(env, `/data_sources/${source.id}/query`, { method: 'POST', body: JSON.stringify(body) });
+      for (const page of result?.results || []) {
+        const mapped = getMappedEntries(page);
+        const value = textValue(mapped.groupEntry?.[1]);
+        for (const group of String(value || '').split(',').map(x => x.trim()).filter(Boolean)) groups.add(group);
+      }
+      scanned += (result?.results || []).length;
+      cursor = result?.has_more && scanned < 300 ? result.next_cursor : null;
+    } while (cursor);
+  }
+  return [...groups].sort((a, b) => a.localeCompare(b, 'uk'));
+}
+
+async function handleExtensionContextApi(request, env) {
+  if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405, { allow: 'GET' });
+  const url = new URL(request.url);
+  const primary = cleanTitle(url.searchParams.get('title') || url.searchParams.get('q') || '');
+  let extraTitles = [];
+  try {
+    const parsed = JSON.parse(url.searchParams.get('titles') || '[]');
+    if (Array.isArray(parsed)) extraTitles = parsed.map(cleanTitle).filter(Boolean);
+  } catch {}
+  const queries = [...new Set([primary, ...extraTitles].map(cleanTitle).filter(Boolean))].slice(0, 5);
+  const q = queries[0] || '';
+  const resolved = await resolveDatabaseSources(env);
+  const options = schemaOptionsFromSources(resolved.sources);
+  options.groups = await collectGroupValuesFromPages(env, resolved.sources, options.groups);
+  if (!q) return json({ ok: true, exists: false, query: '', queries: [], item: null, options });
+
+  const candidates = [];
+  const seen = new Set();
+  for (const source of resolved.sources) {
+    for (const query of queries) {
+      const pages = await queryPagesByAlias(env, source, query);
+      for (const page of pages) {
+        if (!page?.id || seen.has(page.id)) continue;
+        seen.add(page.id);
+        candidates.push(page);
+      }
+    }
+  }
+
+  const ranked = candidates
+    .map(page => {
+      const aliases = textValue(getMappedEntries(page).aliasesEntry?.[1]);
+      const scores = queries.map(query => ({ query, score: aliasMatchScore(query, aliases) }));
+      scores.sort((a, b) => b.score - a.score);
+      return { page, aliases, query: scores[0]?.query || q, score: scores[0]?.score || 0 };
+    })
+    .sort((a, b) => b.score - a.score);
+  const best = ranked.find(x => x.score >= 72) || null;
+  const matched = best?.page || null;
+
+  return json({
+    ok: true,
+    exists: Boolean(matched),
+    query: q,
+    queries,
+    matchedBy: best?.query || '',
+    item: matched ? mapPage(matched) : null,
+    options,
+    debug: {
+      variants: queries.flatMap(aliasSearchVariants).filter((value, index, array) => array.indexOf(value) === index).slice(0, 20),
+      candidates: ranked.slice(0, 5).map(x => ({ id: x.page?.id, score: x.score, matchedBy: x.query, aliases: x.aliases.slice(0, 240) })),
+    },
+  });
+}
+
+async function handleAnimeUploadApi(request, env) {
+  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, { allow: 'POST' });
+  const url = new URL(request.url);
+  const requestedId = url.searchParams.get('id');
+  const kind = url.searchParams.get('kind');
+  if (!requestedId) return json({ error: 'Не передано id тайтлу.' }, 400);
+  if (!['poster', 'banner'].includes(kind)) return json({ error: 'kind має бути poster або banner.' }, 400);
+
+  const form = await request.formData();
+  const file = form.get('file');
+  if (!(file instanceof File)) return json({ error: 'У multipart/form-data немає поля file.' }, 400);
+
+  const page = await notionFetch(env, `/pages/${requestedId}`);
+  const mapped = getMappedEntries(page);
+  const sourceId = page?.parent?.data_source_id;
+  let source = sourceId ? await notionFetch(env, `/data_sources/${sourceId}`) : await getWriteSource(env);
+  source = await ensureWritableSchema(env, source);
+  const uploaded = await uploadSmallFileToNotion(env, file);
+
+  const mappedEntry = kind === 'poster' ? mapped.posterEntry : mapped.bannerEntry;
+  const standardName = kind === 'poster' ? NOTION_PROPERTIES.coverImage : NOTION_PROPERTIES.banner;
+  const targetName = mappedEntry?.[1]?.type === 'files' ? mappedEntry[0] : standardName;
+  const properties = { [targetName]: fileUploadPageValue(uploaded.id, file.name) };
+  const updated = await notionFetch(env, `/pages/${requestedId}`, { method: 'PATCH', body: JSON.stringify({ properties }) });
+  return json({ ok: true, kind, fileUploadId: uploaded.id, item: mapPage(updated), options: schemaOptionsFromSources([source]) });
 }
 
 async function ensureWritableSchema(env, source) {
@@ -1069,20 +1381,150 @@ function findExistingMapped(items, media, ukTitle = '') {
   return items.find(item => [item.title, item.originalTitle, item.russianTitle, item.key].some(value => aliases.has(exactTitleKey(value)))) || null;
 }
 
+
+function mergeChoice(body, key) {
+  return body?.choices?.[key] === 'left' ? 'left' : 'right';
+}
+
+function mergeSideItem(side, leftItem, rightItem) {
+  return side === 'left' ? leftItem : rightItem;
+}
+
+function hasUsefulText(value) {
+  return Boolean(String(value || '').trim());
+}
+
+function chooseAvailable(side, leftValue, rightValue) {
+  const preferred = side === 'left' ? leftValue : rightValue;
+  const fallback = side === 'left' ? rightValue : leftValue;
+  return hasUsefulText(preferred) ? preferred : fallback;
+}
+
+function canonicalSitePropertyForUrl(rawUrl) {
+  const url = safeHttpUrl(rawUrl);
+  if (!url) return '';
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
+  for (const domain of SITE_PROPERTIES) {
+    if (host === domain || host.endsWith(`.${domain}`)) return domain;
+    const aliases = SEARCH_HOST_ALIASES[domain] || [];
+    if (aliases.some(alias => host === String(alias).toLowerCase().replace(/^www\./, ''))) return domain;
+  }
+  return '';
+}
+
+function mergedSiteLinks(leftItem, rightItem) {
+  const result = Object.fromEntries(SITE_PROPERTIES.map(domain => [domain, []]));
+  const seen = new Set();
+  for (const item of [...(rightItem?.links || []), ...(leftItem?.links || [])]) {
+    const url = safeHttpUrl(item?.url || '');
+    if (!url) continue;
+    const domain = canonicalSitePropertyForUrl(url);
+    if (!domain) continue;
+    const key = url.replace(/#.*$/, '').replace(/\/$/, '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result[domain].push({ title: plainTitle(item?.name || '') || domain, url });
+  }
+  return result;
+}
+
+async function handleMergeAnimeApi(request, env) {
+  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, { allow: 'POST' });
+  const body = await request.json().catch(() => ({}));
+  const rightId = String(body.rightId || body.targetId || '').trim();
+  const leftId = String(body.leftId || body.sourceId || '').trim();
+  if (!rightId || !leftId) return json({ error: 'Потрібні rightId і leftId.' }, 400);
+  if (compactId(rightId) === compactId(leftId)) return json({ error: 'Не можна об’єднати тайтл із самим собою.' }, 400);
+
+  const [rightPage, leftPage] = await Promise.all([
+    notionFetch(env, `/pages/${rightId}`),
+    notionFetch(env, `/pages/${leftId}`),
+  ]);
+  const rightItem = mapPage(rightPage);
+  const leftItem = mapPage(leftPage);
+  const rightMapped = getMappedEntries(rightPage);
+  const titleSide = mergeChoice(body, 'title');
+  const posterSide = mergeChoice(body, 'poster');
+  const marksSide = mergeChoice(body, 'marks');
+  const bannerSide = mergeChoice(body, 'banner');
+  const descriptionSide = mergeChoice(body, 'description');
+  const titleItem = mergeSideItem(titleSide, leftItem, rightItem);
+  const markItem = mergeSideItem(marksSide, leftItem, rightItem);
+
+  const sourceId = rightPage?.parent?.data_source_id;
+  let source = sourceId ? await notionFetch(env, `/data_sources/${sourceId}`) : await getWriteSource(env);
+  source = await ensureWritableSchema(env, source);
+  if (markItem.group && markItem.group !== 'Без групи') source = await ensureGroupOption(env, source, markItem.group);
+
+  const titlePropName = rightMapped.titleEntry?.[0] || Object.entries(source.properties || {}).find(([, prop]) => prop?.type === 'title')?.[0] || NOTION_PROPERTIES.title;
+  const mergedPoster = chooseAvailable(posterSide, leftItem.hasPoster ? leftItem.poster : '', rightItem.hasPoster ? rightItem.poster : '');
+  const mergedBanner = chooseAvailable(bannerSide, leftItem.hasBanner ? leftItem.banner : '', rightItem.hasBanner ? rightItem.banner : '');
+  const mergedDescription = chooseAvailable(descriptionSide, leftItem.description, rightItem.description);
+  const mergedTitle = chooseAvailable(titleSide, leftItem.title, rightItem.title) || rightItem.title || leftItem.title || 'Без назви';
+  const mergedOriginal = chooseAvailable(titleSide, leftItem.originalTitle, rightItem.originalTitle);
+  const mergedEnglish = chooseAvailable(titleSide, leftItem.englishTitle, rightItem.englishTitle);
+  const mergedRussian = chooseAvailable(titleSide, leftItem.russianTitle, rightItem.russianTitle);
+  const mergedAliases = chooseAvailable(titleSide, leftItem.aliases, rightItem.aliases);
+  const mergedLinks = mergedSiteLinks(leftItem, rightItem);
+
+  const properties = {
+    [titlePropName]: { title: [{ type: 'text', text: { content: String(mergedTitle).slice(0, 1900) } }] },
+    [NOTION_PROPERTIES.description]: richTextChunksValue(mergedDescription),
+    [NOTION_PROPERTIES.originalTitle]: richTextChunksValue(mergedOriginal),
+    [NOTION_PROPERTIES.englishTitle]: richTextChunksValue(mergedEnglish),
+    [NOTION_PROPERTIES.russianTitle]: richTextChunksValue(mergedRussian),
+    [NOTION_PROPERTIES.aliases]: richTextChunksValue(mergedAliases),
+    [NOTION_PROPERTIES.key]: richTextValue(exactCoreTitleKey(mergedOriginal || mergedTitle)),
+    [NOTION_PROPERTIES.status]: markItem.status && markItem.status !== 'Без статусу' ? { status: { name: markItem.status } } : { status: null },
+    [NOTION_PROPERTIES.group]: markItem.group && markItem.group !== 'Без групи' ? { select: { name: markItem.group } } : { select: null },
+  };
+  if (mergedPoster) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(mergedPoster, 'merged-cover');
+  if (mergedBanner) properties[NOTION_PROPERTIES.banner] = notionFilesValue(mergedBanner, 'merged-banner');
+
+  const selectedTitlePage = titleSide === 'left' ? leftPage : rightPage;
+  const selectedSourceUrl = safeHttpUrl(textValue(selectedTitlePage?.properties?.[NOTION_PROPERTIES.sourceUrl]) || '');
+  if (selectedSourceUrl) properties[NOTION_PROPERTIES.sourceUrl] = { url: selectedSourceUrl };
+  for (const domain of SITE_PROPERTIES) {
+    if (mergedLinks[domain]?.length) properties[domain] = siteLinksRichText(mergedLinks[domain]);
+  }
+
+  const updated = await notionFetch(env, `/pages/${rightId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ properties }),
+  });
+  await notionFetch(env, `/pages/${leftId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ in_trash: true }),
+  });
+
+  return json({
+    ok: true,
+    item: mapPage(updated),
+    keptId: rightId,
+    removedId: leftId,
+    choices: { title: titleSide, poster: posterSide, marks: marksSide, banner: bannerSide, description: descriptionSide },
+    mergedLinks: Object.fromEntries(Object.entries(mergedLinks).map(([domain, items]) => [domain, items.length])),
+  });
+}
+
 async function handleAnimeApi(request, env) {
   const url = new URL(request.url);
   const requestedId = url.searchParams.get('id');
 
   if (request.method === 'GET') {
-    const queried = await queryDatabasePages(env);
-    const items = queried.pages.map(mapPage);
-    const options = schemaOptionsFromSources(queried.sources);
     if (requestedId) {
-      const norm = compactId(requestedId);
-      const item = items.find(entry => compactId(entry.id) === norm);
-      if (!item) return json({ error: 'Тайтл не знайдено.' }, 404);
-      return json({ item, count: 1, options });
+      const [page, resolved] = await Promise.all([
+        notionFetch(env, `/pages/${requestedId}`),
+        resolveDatabaseSources(env),
+      ]);
+      if (!page?.id) return json({ error: 'Тайтл не знайдено.' }, 404);
+      return json({ item: mapPage(page), count: 1, options: schemaOptionsFromSources(resolved.sources) });
     }
+
+    const queried = await queryDatabasePages(env);
+    const items = queried.pages.map(mapPageSummary);
+    const options = schemaOptionsFromSources(queried.sources);
     return json({ items, count: items.length, databaseId: queried.databaseId, sources: queried.sourceStats, options });
   }
 
@@ -1095,6 +1537,32 @@ async function handleAnimeApi(request, env) {
     source = await ensureWritableSchema(env, source);
     const body = await request.json().catch(() => ({}));
     const properties = {};
+
+    if (Object.prototype.hasOwnProperty.call(body, 'title')) {
+      const titleName = mapped.titleEntry?.[0] || Object.entries(source.properties || {}).find(([, prop]) => prop?.type === 'title')?.[0] || NOTION_PROPERTIES.title;
+      properties[titleName] = titlePropertyValue(body.title || '');
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'description')) {
+      const name = mapped.descriptionEntry?.[0] || NOTION_PROPERTIES.description;
+      properties[name] = richTextChunksValue(body.description || '');
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'originalTitle')) {
+      const name = mapped.originalEntry?.[0] || NOTION_PROPERTIES.originalTitle;
+      properties[name] = richTextChunksValue(body.originalTitle || '');
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'englishTitle')) {
+      const name = mapped.englishEntry?.[0] || NOTION_PROPERTIES.englishTitle;
+      properties[name] = richTextChunksValue(body.englishTitle || '');
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'russianTitle')) {
+      const name = mapped.russianEntry?.[0] || NOTION_PROPERTIES.russianTitle;
+      properties[name] = richTextChunksValue(body.russianTitle || '');
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'aliases')) {
+      const name = mapped.aliasesEntry?.[0] || NOTION_PROPERTIES.aliases;
+      properties[name] = richTextChunksValue(body.aliases || '');
+    }
 
     if (Object.prototype.hasOwnProperty.call(body, 'status')) {
       const statusName = String(body.status || '').trim();
@@ -1109,26 +1577,71 @@ async function handleAnimeApi(request, env) {
       properties[name] = groupName && groupName !== 'Без групи' ? { select: { name: groupName } } : { select: null };
     }
 
+    if (Object.prototype.hasOwnProperty.call(body, 'favorite')) {
+      const entry = mapped.favoriteEntry;
+      if (entry) {
+        const value = booleanPropertyValue(entry[1], body.favorite);
+        if (value) properties[entry[0]] = value;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'liked')) {
+      const entry = mapped.likedEntry;
+      if (entry) {
+        const value = booleanPropertyValue(entry[1], body.liked);
+        if (value) properties[entry[0]] = value;
+      }
+    }
+
     if (Object.prototype.hasOwnProperty.call(body, 'posterUrl')) {
-      const posterUrl = safeHttpUrl(body.posterUrl || '');
-      if (!posterUrl) return json({ error: 'Некоректний URL постера.' }, 400);
-      const name = mapped.posterEntry?.[0] || NOTION_PROPERTIES.coverImage;
-      properties[name] = notionFilesValue(posterUrl, 'manual-cover');
+      const rawPoster = String(body.posterUrl || '').trim();
+      const name = mapped.posterEntry?.[1]?.type === 'files' ? mapped.posterEntry[0] : NOTION_PROPERTIES.coverImage;
+      if (!rawPoster) properties[name] = { files: [] };
+      else {
+        const posterUrl = safeHttpUrl(rawPoster);
+        if (!posterUrl) return json({ error: 'Некоректний URL постера.' }, 400);
+        properties[name] = notionFilesValue(posterUrl, 'manual-cover');
+      }
     }
 
     if (Object.prototype.hasOwnProperty.call(body, 'bannerUrl')) {
-      const bannerUrl = safeHttpUrl(body.bannerUrl || '');
-      if (!bannerUrl) return json({ error: 'Некоректний URL банера.' }, 400);
-      const name = mapped.bannerEntry?.[0] || NOTION_PROPERTIES.banner;
-      properties[name] = notionFilesValue(bannerUrl, 'manual-banner');
+      const rawBanner = String(body.bannerUrl || '').trim();
+      const name = mapped.bannerEntry?.[1]?.type === 'files' ? mapped.bannerEntry[0] : NOTION_PROPERTIES.banner;
+      if (!rawBanner) properties[name] = { files: [] };
+      else {
+        const bannerUrl = safeHttpUrl(rawBanner);
+        if (!bannerUrl) return json({ error: 'Некоректний URL банера.' }, 400);
+        properties[name] = notionFilesValue(bannerUrl, 'manual-banner');
+      }
     }
+
+    if (body.siteLinks && typeof body.siteLinks === 'object') {
+      for (const domain of SITE_PROPERTIES) {
+        const rawItems = Array.isArray(body.siteLinks[domain]) ? body.siteLinks[domain] : [];
+        const items = rawItems
+          .map((item, index) => ({
+            url: safeHttpUrl(item?.url || ''),
+            title: plainTitle(item?.title || item?.name || '') || `Посилання ${index + 1}`,
+          }))
+          .filter(item => item.url);
+        properties[domain] = siteLinksRichText(items);
+      }
+    }
+
+    const keyBase = Object.prototype.hasOwnProperty.call(body, 'originalTitle') ? body.originalTitle : (Object.prototype.hasOwnProperty.call(body, 'title') ? body.title : '');
+    if (keyBase) properties[NOTION_PROPERTIES.key] = richTextValue(exactCoreTitleKey(keyBase));
 
     if (!Object.keys(properties).length) return json({ error: 'Немає змін для збереження.' }, 400);
     const updated = await notionFetch(env, `/pages/${requestedId}`, { method: 'PATCH', body: JSON.stringify({ properties }) });
     return json({ ok: true, item: mapPage(updated), options: schemaOptionsFromSources([source]) });
   }
 
-  return json({ error: 'Method not allowed' }, 405, { allow: 'GET, PATCH' });
+  if (request.method === 'DELETE') {
+    if (!requestedId) return json({ error: 'Не передано id тайтлу.' }, 400);
+    const trashed = await notionFetch(env, `/pages/${requestedId}`, { method: 'PATCH', body: JSON.stringify({ in_trash: true }) });
+    return json({ ok: true, id: requestedId, inTrash: Boolean(trashed?.in_trash) });
+  }
+
+  return json({ error: 'Method not allowed' }, 405, { allow: 'GET, PATCH, DELETE' });
 }
 
 async function handleOptionsApi(request, env) {
@@ -1777,7 +2290,7 @@ export default {
       if (request.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
         return new Response(null, { status: 204, headers: {
           'access-control-allow-origin': '*',
-          'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
+          'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
           'access-control-allow-headers': 'Content-Type, X-Ingest-Key',
           'access-control-max-age': '86400',
         } });
@@ -1788,12 +2301,15 @@ export default {
       if (url.pathname === '/api/process-title') return await handleProcessTitleApi(request, env);
       if (url.pathname === '/api/ingest' || url.pathname === '/api/anime/import') return await handleIngestApi(request, env);
       if (request.method === 'POST' && url.pathname === '/' && (request.headers.get('content-type') || '').includes('application/json')) return await handleIngestApi(request, env);
+      if (url.pathname === '/api/anime/merge') return await handleMergeAnimeApi(request, env);
+      if (url.pathname === '/api/anime/upload') return await handleAnimeUploadApi(request, env);
+      if (url.pathname === '/api/extension/context') return await handleExtensionContextApi(request, env);
       if (url.pathname === '/api/anime') return await handleAnimeApi(request, env);
       if (url.pathname === '/api/options') return await handleOptionsApi(request, env);
       if (url.pathname === '/api/discover') return await handleDiscoverApi(request, env);
       if (url.pathname === '/api/discover/prepare') return await handleDiscoverPrepareApi(request, env);
       if (url.pathname === '/api/catalog-search') return await handleCatalogSearchApi(request, env);
-      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v5.2-unified-custom-dropdowns-2026-08-11', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: 'ndjson-v1', coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true });
+      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v5.6-alias-context-url-editor-2026-08-13', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, catalogs: SITE_PROPERTIES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: 'ndjson-v1', coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true, mergeTitles: true, mergeEndpoint: '/api/anime/merge', deleteTitles: true, editTitles: true, uploadEndpoint: '/api/anime/upload', extensionContext: '/api/extension/context', aliasLookupV2: true, editorMediaMode: 'url' });
 
       if (url.pathname === '/api/health') {
         const databaseId = env.NOTION_DATABASE_ID || DEFAULT_DATABASE_ID;

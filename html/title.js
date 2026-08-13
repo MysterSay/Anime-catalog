@@ -4,6 +4,16 @@ const id = new URLSearchParams(location.search).get('id');
 const FALLBACK_IMAGE = 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 700 1000%22%3E%3Cdefs%3E%3ClinearGradient id=%22g%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22%3E%3Cstop stop-color=%22%23171b27%22/%3E%3Cstop offset=%221%22 stop-color=%22%23282d42%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%22700%22 height=%221000%22 fill=%22url(%23g)%22/%3E%3Ctext x=%22350%22 y=%22520%22 text-anchor=%22middle%22 fill=%22%23798094%22 font-family=%22Arial%22 font-size=%2270%22%3EYORU%3C/text%3E%3C/svg%3E';
 const ANILIST_PUBLIC_ENDPOINT = 'https://graphql.anilist.co';
 const STATUS_OPTIONS = ['Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто', 'Без статусу'];
+const EDIT_CATALOG_DOMAINS = [
+  'myanimelist.net', 'anilist.co', 'shikimori.io',
+  'jut-su.net', 'ru.yummyani.me', 'crunchyroll.com', 'animevost.org', 'jutsu.tv', 'jut.su', 'animego.studio', 'anilibria.tv',
+  'uaserials.com', 'uachan.com', 'anihub.in.ua', 'amanogawa.space', 'animeon.club', 'anidesu.net', 'mikai.me', 'anitube.in.ua',
+];
+const CATALOG_DOMAIN_ALIASES = {
+  'aniliberty.top': 'anilibria.tv', 'www.aniliberty.top': 'anilibria.tv', 'anilibria.top': 'anilibria.tv', 'www.anilibria.top': 'anilibria.tv',
+  'uachan.top': 'uachan.com', 'www.uachan.top': 'uachan.com', 'www.uachan.com': 'uachan.com',
+  'www.crunchyroll.com': 'crunchyroll.com',
+};
 const STATUS_THEME = {
   'Переглянув': { solid: '#7ee8b5', glow: 'rgba(126,232,181,.34)', border: 'rgba(126,232,181,.55)' },
   'Буду дивитись': { solid: '#a796ff', glow: 'rgba(167,150,255,.34)', border: 'rgba(167,150,255,.55)' },
@@ -37,6 +47,7 @@ saved.linkMarks = globalLinkMarks;
 let currentItem = null;
 let apiOptions = { statuses: [], groups: [] };
 let mediaKind = null;
+let editSiteLinks = {};
 
 function persistState() {
   saved.favorite = [...favorite];
@@ -114,15 +125,47 @@ function getSiteLabel(url) {
   } catch { return 'Сайт'; }
 }
 
+function canonicalCatalogDomain(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase().replace(/^www\./, '');
+    return CATALOG_DOMAIN_ALIASES[host] || host;
+  } catch {
+    const host = String(value || '').toLowerCase().replace(/^www\./, '');
+    return CATALOG_DOMAIN_ALIASES[host] || host;
+  }
+}
+
+function catalogLabel(domain) {
+  const d = canonicalCatalogDomain(domain);
+  const labels = {
+    'myanimelist.net': 'Myanimelist', 'anilist.co': 'Anilist', 'shikimori.io': 'Shikimori',
+    'jut-su.net': 'Jut Su', 'ru.yummyani.me': 'Yummyani', 'crunchyroll.com': 'Crunchyroll', 'animevost.org': 'Animevost',
+    'jutsu.tv': 'Jutsu', 'jut.su': 'Jut', 'animego.studio': 'Animego', 'anilibria.tv': 'Anilibria', 'uaserials.com': 'Uaserials',
+    'uachan.com': 'Uachan', 'anihub.in.ua': 'AniHub', 'amanogawa.space': 'Amanogawa', 'animeon.club': 'Animeon',
+    'anidesu.net': 'Anidesu', 'mikai.me': 'Mikai', 'anitube.in.ua': 'Anitube',
+  };
+  return labels[d] || getSiteLabel(`https://${d}`);
+}
+
+function sourceMarkRank(site) {
+  const mark = getSourceMark(site);
+  return mark === 'green' ? 0 : mark === 'red' ? 2 : 1;
+}
+
+function sortSourceGroups(groups) {
+  return [...groups].sort((a, b) => sourceMarkRank(a.site) - sourceMarkRank(b.site) || a.site.localeCompare(b.site, 'uk'));
+}
+
 function groupLinks(links = []) {
   const map = new Map();
   links.filter(link => safeHttpUrl(link.url)).forEach(link => {
     const url = safeHttpUrl(link.url);
-    const site = getSiteLabel(url);
-    if (!map.has(site)) map.set(site, []);
-    map.get(site).push({ ...link, url });
+    const domain = canonicalCatalogDomain(url);
+    const site = catalogLabel(domain);
+    if (!map.has(domain)) map.set(domain, { domain, site, items: [] });
+    map.get(domain).items.push({ ...link, url });
   });
-  return [...map.entries()].map(([site, items]) => ({ site, items })).sort((a, b) => a.site.localeCompare(b.site, 'uk'));
+  return sortSourceGroups([...map.values()]);
 }
 
 function buildDropdown(kind, currentValue, options) {
@@ -130,9 +173,12 @@ function buildDropdown(kind, currentValue, options) {
   const currentClass = kind === 'status' ? `status-badge ${statusClass(currentValue)}` : 'group-pill';
   const menuItems = options.map(option => {
     const selected = option === currentValue;
-    return `<button class="dropdown-option ${selected ? 'selected' : ''}" data-select-${kind}="${escapeHtml(option)}"><span class="${kind === 'status' ? `status-badge ${statusClass(option)}` : 'group-pill'}">${escapeHtml(option)}</span></button>`;
+    return `<button class="dropdown-option ${selected ? 'selected' : ''}" data-select-${kind}="${escapeHtml(option)}" data-option-search="${escapeHtml(option.toLocaleLowerCase('uk-UA'))}"><span class="${kind === 'status' ? `status-badge ${statusClass(option)}` : 'group-pill'}">${escapeHtml(option)}</span></button>`;
   }).join('');
-  const extra = kind === 'group' ? `<button class="dropdown-option add-new" data-add-group="true"><span class="group-pill">+ Нова група</span></button>` : '';
+  const search = kind === 'group'
+    ? `<div class="dropdown-search-wrap"><span>⌕</span><input class="dropdown-search-input" type="search" placeholder="Пошук групи…" data-group-search autocomplete="off" /></div>`
+    : '';
+  const extra = kind === 'group' ? `<button class="dropdown-option add-new sticky-add-group" data-add-group="true"><span class="group-pill">+ Нова група</span></button>` : '';
   return `
     <div class="control-block">
       <span class="control-label">${kind === 'status' ? 'Статус' : 'Група'}</span>
@@ -141,7 +187,11 @@ function buildDropdown(kind, currentValue, options) {
           <span class="${currentClass}">${valueText}</span>
           <span class="dropdown-caret">⌄</span>
         </button>
-        <div class="control-dropdown-menu">${menuItems}${extra}</div>
+        <div class="control-dropdown-menu ${kind === 'group' ? 'group-dropdown-menu' : ''}">
+          ${search}
+          <div class="dropdown-options-scroll" data-dropdown-options>${menuItems}</div>
+          ${extra}
+        </div>
       </div>
     </div>`;
 }
@@ -226,6 +276,17 @@ function renderItem(item) {
         </div>
         <div class="source-groups">${buildLinksAccordion(linkGroups)}</div>
       </aside>
+      <div class="title-record-actions">
+        <a class="record-action-btn merge-record-btn" href="index.html?merge=${encodeURIComponent(currentItem.id)}">
+          <span>Об’єднати</span><b>⇄</b>
+        </a>
+        <button class="record-action-btn edit-record-btn" type="button" data-edit-title>
+          <span>Редагувати</span><b>✎</b>
+        </button>
+        <button class="record-action-btn delete-record-btn" type="button" data-delete-title>
+          <span>Видалити</span><b>×</b>
+        </button>
+      </div>
     </section>`;
 
   const banner = safeHttpUrl(currentItem.banner || currentItem.poster || '');
@@ -409,7 +470,363 @@ async function applyMediaUrl(url) {
   }
 }
 
+
+
+function currentLinksByDomain() {
+  const out = Object.fromEntries(EDIT_CATALOG_DOMAINS.map(domain => [domain, []]));
+  for (const link of currentItem?.links || []) {
+    const url = safeHttpUrl(link.url || '');
+    if (!url) continue;
+    const domain = canonicalCatalogDomain(url);
+    if (!out[domain]) out[domain] = [];
+    out[domain].push({ title: link.name || link.title || catalogLabel(domain), url });
+  }
+  for (const domain of Object.keys(out)) {
+    const seen = new Set();
+    out[domain] = out[domain].filter(item => {
+      const url = safeHttpUrl(item.url || '');
+      if (!url || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+  }
+  return out;
+}
+
+function sortedEditCatalogs() {
+  return [...EDIT_CATALOG_DOMAINS].sort((a, b) => {
+    const la = catalogLabel(a);
+    const lb = catalogLabel(b);
+    return sourceMarkRank(la) - sourceMarkRank(lb) || la.localeCompare(lb, 'uk');
+  });
+}
+
+function editLinkInputRow(domain, item, index) {
+  return `
+    <div class="edit-link-input-row" data-edit-link-row data-domain="${escapeHtml(domain)}" data-index="${index}">
+      <input type="text" data-edit-link-title value="${escapeHtml(item?.title || '')}" placeholder="Назва кнопки" />
+      <input type="url" data-edit-link-url value="${escapeHtml(item?.url || '')}" placeholder="https://..." />
+      <button type="button" class="edit-link-remove" data-edit-link-remove aria-label="Видалити посилання">×</button>
+    </div>`;
+}
+
+function renderEditLinks() {
+  const modal = document.getElementById('editTitleModal');
+  const rootBox = modal?.querySelector('#editCatalogsRoot');
+  if (!rootBox) return;
+  const domains = sortedEditCatalogs();
+  rootBox.innerHTML = domains.map((domain, index) => {
+    const site = catalogLabel(domain);
+    const mark = getSourceMark(site);
+    const items = Array.isArray(editSiteLinks[domain]) ? editSiteLinks[domain] : [];
+    const isOpen = items.length > 0 && index < 5;
+    return `
+      <section class="source-group edit-catalog-group ${isOpen ? 'open' : ''} ${mark ? `marked-${mark}` : ''}" data-edit-catalog="${escapeHtml(domain)}">
+        <div class="source-group-head">
+          <button class="source-group-trigger" type="button" data-edit-catalog-toggle aria-expanded="${isOpen ? 'true' : 'false'}">
+            <span class="source-group-info"><strong>${escapeHtml(site)}</strong><small>${items.length} посилань</small></span>
+            <span class="source-group-caret">⌄</span>
+          </button>
+          <div class="source-group-tools">
+            <span class="edit-catalog-domain">${escapeHtml(domain)}</span>
+          </div>
+        </div>
+        <div class="source-group-body"><div class="source-group-list edit-link-list">
+          ${items.map((item, rowIndex) => editLinkInputRow(domain, item, rowIndex)).join('')}
+          <button class="edit-add-link-btn" type="button" data-edit-add-link data-domain="${escapeHtml(domain)}">＋ Додати посилання</button>
+        </div></div>
+      </section>`;
+  }).join('');
+}
+
+function existingValueCard(label, value, extra = '') {
+  return `<div class="edit-existing-card"><span>${escapeHtml(label)}</span>${extra || `<strong>${escapeHtml(value || '—')}</strong>`}</div>`;
+}
+
+function ensureEditModal() {
+  let modal = document.getElementById('editTitleModal');
+  if (modal) return modal;
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="editTitleModal" class="modal-shell edit-title-shell hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-edit-close></div>
+      <section class="edit-title-modal" role="dialog" aria-modal="true" aria-label="Редагування тайтлу">
+        <header class="edit-title-header">
+          <div><span class="section-kicker">РЕДАГУВАННЯ</span><h2>Редагування тайтлу</h2><p>Зліва — нові значення. Справа — поточні дані з Notion.</p></div>
+          <div class="edit-header-actions"><button class="ghost-btn" type="button" data-edit-close>Скасувати</button><button class="primary-btn" type="button" data-edit-save>Зберегти</button></div>
+        </header>
+        <div id="editTitleStatus" class="discover-status"></div>
+        <div class="edit-title-columns">
+          <form id="editTitleForm" class="edit-input-pane" autocomplete="off">
+            <h3>Нові дані</h3>
+            <label class="edit-field"><span>Назва</span><input id="editTitleValue" type="text" /></label>
+            <label class="edit-field"><span>Оригінальна назва</span><input id="editOriginalValue" type="text" /></label>
+            <label class="edit-field"><span>Англійська назва</span><input id="editEnglishValue" type="text" /></label>
+            <label class="edit-field"><span>Російська назва</span><input id="editRussianValue" type="text" /></label>
+            <label class="edit-field"><span>Аліаси</span><textarea id="editAliasesValue" rows="5"></textarea></label>
+            <div class="edit-two-cols">
+              <label class="edit-field"><span>Статус</span><input id="editStatusValue" type="text" /></label>
+              <label class="edit-field"><span>Група</span><input id="editGroupValue" type="text" /></label>
+            </div>
+            <div class="edit-suggestion-row" id="editStatusSuggestions"></div>
+            <div class="edit-suggestion-row edit-group-suggestions" id="editGroupSuggestions"></div>
+            <label class="edit-field"><span>Опис</span><textarea id="editDescriptionValue" rows="9"></textarea></label>
+            <div class="edit-media-field">
+              <span>Постер — посилання на зображення</span>
+              <input id="editPosterUrl" type="url" placeholder="https://example.com/poster.jpg" />
+              <small>Встав пряме http/https посилання. Якщо поле порожнє — поточний постер не зміниться.</small>
+            </div>
+            <div class="edit-media-field">
+              <span>Банер — посилання на зображення</span>
+              <input id="editBannerUrl" type="url" placeholder="https://example.com/banner.jpg" />
+              <small>Встав пряме http/https посилання. Якщо поле порожнє — поточний банер не зміниться.</small>
+            </div>
+            <div class="edit-flags">
+              <label><input id="editFavoriteValue" type="checkbox" /><span>Вибране</span></label>
+              <label><input id="editLikedValue" type="checkbox" /><span>Улюблене</span></label>
+            </div>
+          </form>
+          <aside class="edit-existing-pane">
+            <h3>Існуючі дані</h3>
+            <div id="editExistingCards"></div>
+          </aside>
+        </div>
+        <section class="edit-links-panel">
+          <div class="edit-links-head"><div><span class="section-kicker">ПОСИЛАННЯ</span><h3>Каталоги та посилання</h3></div><p>Порядок: зелені → без кольору → червоні. Показані всі доступні каталоги, навіть якщо в них 0 посилань.</p></div>
+          <div id="editCatalogsRoot" class="source-groups edit-catalogs-root"></div>
+        </section>
+        <footer class="edit-title-footer"><button class="ghost-btn" type="button" data-edit-close>Скасувати</button><button class="primary-btn" type="button" data-edit-save>Зберегти зміни</button></footer>
+      </section>
+    </div>`);
+  modal = document.getElementById('editTitleModal');
+
+  modal.addEventListener('click', async event => {
+    if (event.target.closest('[data-edit-close]')) { closeEditModal(); return; }
+    if (event.target.closest('[data-edit-save]')) { await saveEditModal(); return; }
+    const toggle = event.target.closest('[data-edit-catalog-toggle]');
+    if (toggle) {
+      const group = toggle.closest('.edit-catalog-group');
+      const next = !group.classList.contains('open');
+      group.classList.toggle('open', next);
+      toggle.setAttribute('aria-expanded', String(next));
+      return;
+    }
+    const add = event.target.closest('[data-edit-add-link]');
+    if (add) {
+      const domain = add.dataset.domain;
+      editSiteLinks[domain] ||= [];
+      editSiteLinks[domain].push({ title: '', url: '' });
+      renderEditLinks();
+      const target = document.querySelector(`[data-edit-catalog="${CSS.escape(domain)}"]`);
+      target?.classList.add('open');
+      target?.querySelector('[data-edit-catalog-toggle]')?.setAttribute('aria-expanded', 'true');
+      return;
+    }
+    const remove = event.target.closest('[data-edit-link-remove]');
+    if (remove) {
+      const row = remove.closest('[data-edit-link-row]');
+      const domain = row?.dataset.domain;
+      const index = Number(row?.dataset.index);
+      if (domain && Number.isInteger(index)) editSiteLinks[domain]?.splice(index, 1);
+      renderEditLinks();
+      return;
+    }
+    const suggestion = event.target.closest('[data-edit-set]');
+    if (suggestion) {
+      const target = modal.querySelector(`#${suggestion.dataset.editTarget}`);
+      if (target) target.value = suggestion.dataset.editSet;
+    }
+  });
+
+  modal.addEventListener('input', event => {
+    const row = event.target.closest('[data-edit-link-row]');
+    if (row) {
+      const domain = row.dataset.domain;
+      const index = Number(row.dataset.index);
+      const item = editSiteLinks[domain]?.[index];
+      if (item) {
+        if (event.target.matches('[data-edit-link-title]')) item.title = event.target.value;
+        if (event.target.matches('[data-edit-link-url]')) item.url = event.target.value;
+      }
+    }
+  });
+  return modal;
+}
+
+function openEditModal() {
+  if (!currentItem) return;
+  const modal = ensureEditModal();
+  editSiteLinks = currentLinksByDomain();
+  modal.querySelector('#editTitleValue').value = currentItem.title || '';
+  modal.querySelector('#editOriginalValue').value = currentItem.originalTitle || '';
+  modal.querySelector('#editEnglishValue').value = currentItem.englishTitle || '';
+  modal.querySelector('#editRussianValue').value = currentItem.russianTitle || '';
+  modal.querySelector('#editAliasesValue').value = currentItem.aliases || '';
+  modal.querySelector('#editStatusValue').value = currentItem.status || 'Без статусу';
+  modal.querySelector('#editGroupValue').value = currentItem.group || 'Без групи';
+  modal.querySelector('#editDescriptionValue').value = currentItem.description || '';
+  modal.querySelector('#editPosterUrl').value = '';
+  modal.querySelector('#editBannerUrl').value = '';
+  modal.querySelector('#editFavoriteValue').checked = favorite.has(currentItem.id);
+  modal.querySelector('#editLikedValue').checked = liked.has(currentItem.id);
+  modal.querySelector('#editTitleStatus').textContent = '';
+  modal.querySelector('#editTitleStatus').className = 'discover-status';
+
+  modal.querySelector('#editStatusSuggestions').innerHTML = [...new Set([...(apiOptions.statuses || []), ...STATUS_OPTIONS])]
+    .map(value => `<button type="button" data-edit-set="${escapeHtml(value)}" data-edit-target="editStatusValue">${escapeHtml(value)}</button>`).join('');
+  modal.querySelector('#editGroupSuggestions').innerHTML = [...new Set(['Без групи', ...(apiOptions.groups || [])])]
+    .map(value => `<button type="button" data-edit-set="${escapeHtml(value)}" data-edit-target="editGroupValue">${escapeHtml(value)}</button>`).join('');
+
+  const descPreview = (currentItem.description || '').slice(0, 420);
+  modal.querySelector('#editExistingCards').innerHTML = [
+    existingValueCard('Назва', currentItem.title),
+    existingValueCard('Оригінальна назва', currentItem.originalTitle),
+    existingValueCard('Англійська назва', currentItem.englishTitle),
+    existingValueCard('Російська назва', currentItem.russianTitle),
+    existingValueCard('Аліаси', currentItem.aliases),
+    existingValueCard('Статус', currentItem.status),
+    existingValueCard('Група', currentItem.group),
+    existingValueCard('Постер', '', currentItem.poster ? `<img class="edit-existing-image poster" src="${escapeHtml(currentItem.poster)}" alt="" />` : '<strong>—</strong>'),
+    existingValueCard('Банер', '', currentItem.hasBanner && currentItem.banner ? `<img class="edit-existing-image banner" src="${escapeHtml(currentItem.banner)}" alt="" />` : '<strong>—</strong>'),
+    existingValueCard('Опис', descPreview || '—'),
+    existingValueCard('Позначення', `${favorite.has(currentItem.id) ? 'Вибране · ' : ''}${liked.has(currentItem.id) ? 'Улюблене' : ''}` || '—'),
+  ].join('');
+  renderEditLinks();
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('modal-open');
+}
+
+function closeEditModal() {
+  const modal = document.getElementById('editTitleModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('modal-open');
+}
+
+async function saveEditModal() {
+  const modal = ensureEditModal();
+  const statusBox = modal.querySelector('#editTitleStatus');
+  const saveButtons = [...modal.querySelectorAll('[data-edit-save]')];
+  saveButtons.forEach(btn => { btn.disabled = true; });
+  statusBox.textContent = 'Зберігаю зміни в Notion…';
+  statusBox.className = 'discover-status loading';
+  try {
+    const payload = {
+      title: modal.querySelector('#editTitleValue').value.trim(),
+      originalTitle: modal.querySelector('#editOriginalValue').value.trim(),
+      englishTitle: modal.querySelector('#editEnglishValue').value.trim(),
+      russianTitle: modal.querySelector('#editRussianValue').value.trim(),
+      aliases: modal.querySelector('#editAliasesValue').value.trim(),
+      status: modal.querySelector('#editStatusValue').value.trim() || 'Без статусу',
+      group: modal.querySelector('#editGroupValue').value.trim() || 'Без групи',
+      description: modal.querySelector('#editDescriptionValue').value,
+      favorite: modal.querySelector('#editFavoriteValue').checked,
+      liked: modal.querySelector('#editLikedValue').checked,
+      siteLinks: editSiteLinks,
+    };
+    const posterUrl = modal.querySelector('#editPosterUrl').value.trim();
+    const bannerUrl = modal.querySelector('#editBannerUrl').value.trim();
+    if (posterUrl) payload.posterUrl = posterUrl;
+    if (bannerUrl) payload.bannerUrl = bannerUrl;
+
+    const response = await fetch(`/api/anime?id=${encodeURIComponent(currentItem.id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const savedPayload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(savedPayload.error || `HTTP ${response.status}`);
+    if (savedPayload.options) apiOptions = savedPayload.options;
+    if (savedPayload.item) currentItem = savedPayload.item;
+
+    if (payload.favorite) favorite.add(currentItem.id); else favorite.delete(currentItem.id);
+    if (payload.liked) liked.add(currentItem.id); else liked.delete(currentItem.id);
+    persistState();
+    statusBox.textContent = 'Зміни збережено.';
+    statusBox.className = 'discover-status ok';
+    renderItem(currentItem);
+    setTimeout(closeEditModal, 350);
+  } catch (error) {
+    console.error(error);
+    statusBox.textContent = error.message || 'Не вдалося зберегти зміни.';
+    statusBox.className = 'discover-status error';
+  } finally {
+    saveButtons.forEach(btn => { btn.disabled = false; });
+  }
+}
+
+function ensureDeleteModal() {
+  let modal = document.getElementById('deleteTitleModal');
+  if (modal) return modal;
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="deleteTitleModal" class="modal-shell hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-delete-close></div>
+      <section class="modal-card delete-title-modal" role="dialog" aria-modal="true">
+        <button class="modal-x" type="button" data-delete-close aria-label="Закрити">×</button>
+        <div class="modal-head">
+          <span class="section-kicker danger-kicker">ВИДАЛЕННЯ</span>
+          <h2>Видалити тайтл?</h2>
+          <p>Тайтл буде прибрано з каталогу разом з усіма його даними.</p>
+        </div>
+        <div class="delete-title-preview" id="deleteTitlePreview"></div>
+        <div class="delete-title-actions">
+          <button class="ghost-btn" type="button" data-delete-close>Скасувати</button>
+          <button class="danger-btn" type="button" data-delete-confirm>Видалити</button>
+        </div>
+      </section>
+    </div>`);
+  modal = document.getElementById('deleteTitleModal');
+  modal.addEventListener('click', async event => {
+    if (event.target.closest('[data-delete-close]')) {
+      modal.classList.add('hidden');
+      modal.setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('modal-open');
+      return;
+    }
+    const confirmBtn = event.target.closest('[data-delete-confirm]');
+    if (!confirmBtn || !currentItem) return;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Видаляю…';
+    try {
+      const response = await fetch(`/api/anime?id=${encodeURIComponent(currentItem.id)}`, { method: 'DELETE', headers: { Accept: 'application/json' }, cache: 'no-store' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      favorite.delete(currentItem.id);
+      liked.delete(currentItem.id);
+      persistState();
+      location.href = 'index.html';
+    } catch (error) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Видалити';
+      toastMessage(error.message || 'Не вдалося видалити тайтл.');
+    }
+  });
+  return modal;
+}
+
+function openDeleteModal() {
+  if (!currentItem) return;
+  const modal = ensureDeleteModal();
+  const preview = modal.querySelector('#deleteTitlePreview');
+  preview.innerHTML = `
+    <img src="${escapeHtml(currentItem.poster || FALLBACK_IMAGE)}" alt="${escapeHtml(currentItem.title)}" />
+    <div><strong>${escapeHtml(currentItem.title)}</strong><small>${escapeHtml(currentItem.status || 'Без статусу')} · ${escapeHtml(currentItem.group || 'Без групи')}</small></div>`;
+  const button = modal.querySelector('[data-delete-confirm]');
+  button.disabled = false;
+  button.textContent = 'Видалити';
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('modal-open');
+}
+
 root.addEventListener('click', async e => {
+  const editBtn = e.target.closest('[data-edit-title]');
+  if (editBtn) { openEditModal(); return; }
+
+  const deleteBtn = e.target.closest('[data-delete-title]');
+  if (deleteBtn) { openDeleteModal(); return; }
+
   const toggleBtn = e.target.closest('[data-toggle]');
   if (toggleBtn && currentItem) {
     const set = toggleBtn.dataset.toggle === 'favorite' ? favorite : liked;
@@ -483,6 +900,18 @@ root.addEventListener('click', async e => {
   if (!e.target.closest('[data-dropdown]')) closeDropdowns();
 });
 
+
+root.addEventListener('input', e => {
+  const search = e.target.closest('[data-group-search]');
+  if (!search) return;
+  const q = String(search.value || '').toLocaleLowerCase('uk-UA').trim();
+  const dropdown = search.closest('[data-dropdown="group"]');
+  dropdown?.querySelectorAll('[data-select-group]').forEach(button => {
+    const hay = String(button.dataset.optionSearch || '').toLocaleLowerCase('uk-UA');
+    button.hidden = Boolean(q && !hay.includes(q));
+  });
+});
+
 document.addEventListener('click', e => {
   if (!e.target.closest('#titleRoot [data-dropdown]')) closeDropdowns();
 });
@@ -492,6 +921,8 @@ document.addEventListener('keydown', e => {
     closeDropdowns();
     const modal = document.getElementById('mediaModal');
     if (modal && !modal.classList.contains('hidden')) closeMediaModal();
+    const editModal = document.getElementById('editTitleModal');
+    if (editModal && !editModal.classList.contains('hidden')) closeEditModal();
   }
 });
 
