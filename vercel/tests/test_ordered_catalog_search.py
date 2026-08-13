@@ -84,6 +84,8 @@ async def _ordered_case():
         'Повелитель тайн: Клоун',
     ]
     assert result['catalogs']['jut-su.net'][0]['url'].endswith('5539-povelitel-tajn-h1.html')
+    assert result['title']['original'] == 'Guimi Zhi Zhu: Xiaochou Pian'
+    assert result['title']['romaji'] == 'Guimi Zhi Zhu: Xiaochou Pian'
     assert not any(kind == 'google' and domain == 'jut-su.net' for kind, domain, *_ in core.calls)
 
 
@@ -180,3 +182,47 @@ async def _jutsu_fixture_case():
 
 def test_jutsu_search_card_is_verified_by_original_title_on_destination_page():
     asyncio.run(_jutsu_fixture_case())
+
+
+class TimeoutPolicyCore(OrderedProcessCore):
+    def __init__(self):
+        super().__init__()
+        self.timeout_calls = []
+
+    async def search_catalog_native(self, domain, queries, identity_aliases, authority, *, request_timeout=None):
+        query = queries[0]
+        if domain == 'jut-su.net':
+            self.timeout_calls.append((query, request_timeout))
+        # Force the first three priority names to fail, then succeed on native CJK.
+        if domain == 'jut-su.net' and query == '诡秘之主 小丑篇':
+            return [{
+                'url': 'https://jut-su.net/5539-povelitel-tajn-h1.html',
+                'title': 'Повелитель тайн: Клоун',
+                '_aliases': ['Guimi Zhi Zhu: Xiaochou Pian'],
+            }]
+        return []
+
+
+async def _timeout_policy_case():
+    core = TimeoutPolicyCore()
+    try:
+        result = await core.process(InputPayload(
+            title='Володар Таємниць',
+            url='https://anihub.in.ua/anime/volodar-tayemnyts-12208',
+        ), callback=False)
+    finally:
+        await core.close()
+    calls = core.timeout_calls
+    assert calls[0] == ('Guimi Zhi Zhu: Xiaochou Pian', None)
+    assert calls[1] == ('Lord of Mysteries', None)
+    assert calls[2] == ('Повелитель тайн: Клоун', None)
+    # Every name after the three semantic priority slots is secondary and gets
+    # the short timeout. Native CJK is allowed only in this secondary phase.
+    assert calls[3][1] == 7.0
+    cjk_call = next(call for call in calls[3:] if call[0] == '诡秘之主 小丑篇')
+    assert cjk_call[1] == 7.0
+    assert result['catalogs']['jut-su.net']
+
+
+def test_short_timeout_starts_only_for_secondary_aliases():
+    asyncio.run(_timeout_policy_case())

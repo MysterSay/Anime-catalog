@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.9.0"
+APP_VERSION = "2.10.0"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -1994,12 +1994,19 @@ class Core:
                 break
         return list(found.values())[:30]
 
-    async def search_dle_post(self, domain: str, queries: list[str], identity_aliases: list[str]) -> list[dict[str, str]]:
+    async def search_dle_post(
+        self,
+        domain: str,
+        queries: list[str],
+        identity_aliases: list[str],
+        *,
+        request_timeout: float | None = None,
+    ) -> list[dict[str, str]]:
         """Use the native DataLife Engine search form for one ordered query at a time.
 
         jut-su.net visibly returns the correct title through this form even when
-        generic /search?q= routes do not exist.  Each request has a short internal
-        timeout so a dead endpoint cannot consume the whole catalog budget.
+        generic /search?q= routes do not exist. Priority queries use the normal
+        HTTP transport timeout; only secondary aliases receive a short timeout.
         """
         hosts = logical_hosts(domain)
         for query in queries:
@@ -2012,24 +2019,33 @@ class Core:
                 "story": query,
             }
             for host in hosts[:2]:
-                endpoints = [
-                    f"https://{host}/index.php?do=search",
-                    f"https://{host}/index.php",
-                ]
+                # jut-su.net has a known DLE search action. Avoid a second generic
+                # POST on the priority query: it adds latency without improving the
+                # result. Other DLE clones keep the secondary endpoint as a fallback.
+                endpoints = (
+                    [f"https://{host}/index.php?do=search"]
+                    if domain == "jut-su.net"
+                    else [f"https://{host}/index.php?do=search", f"https://{host}/index.php"]
+                )
                 for endpoint in endpoints:
                     try:
-                        response = await asyncio.wait_for(
-                            self.request(
-                                "POST",
-                                endpoint,
-                                data=data,
-                                headers={
-                                    "Content-Type": "application/x-www-form-urlencoded",
-                                    "Accept": "text/html,application/xhtml+xml",
-                                    "Referer": f"https://{host}/",
-                                },
-                            ),
-                            timeout=4.5,
+                        request_coro = self.request(
+                            "POST",
+                            endpoint,
+                            data=data,
+                            headers={
+                                "Content-Type": "application/x-www-form-urlencoded",
+                                "Accept": "text/html,application/xhtml+xml",
+                                "Referer": f"https://{host}/",
+                            },
+                        )
+                        # Priority title searches intentionally have no short artificial
+                        # timeout. They use the HTTP client's transport timeout. A short
+                        # timeout is only supplied once we start probing secondary aliases.
+                        response = (
+                            await asyncio.wait_for(request_coro, timeout=request_timeout)
+                            if request_timeout is not None
+                            else await request_coro
                         )
                         if response.status_code >= 400:
                             continue
@@ -2149,6 +2165,8 @@ class Core:
         queries: list[str],
         identity_aliases: list[str],
         authority: AuthorityData,
+        *,
+        request_timeout: float | None = None,
     ) -> list[dict[str, str]]:
         queries = unique_strings(queries, limit=4)
         identity_aliases = unique_strings(identity_aliases, limit=20)
@@ -2179,7 +2197,14 @@ class Core:
             # DLE catalogs (including jut-su.net) must use their real POST search
             # first.  The old generic GET fan-out often consumed the whole outer
             # timeout before the site's actual search form was submitted.
-            result = await self.search_dle_post(domain, queries, identity_aliases)
+            try:
+                result = await self.search_dle_post(
+                    domain, queries, identity_aliases, request_timeout=request_timeout
+                )
+            except TypeError as error:
+                if "request_timeout" not in str(error):
+                    raise
+                result = await self.search_dle_post(domain, queries, identity_aliases)
             if not result:
                 result = await self.generic_site_search(domain, queries, identity_aliases, compact=True)
         else:
@@ -2395,45 +2420,55 @@ class Core:
             aliases: list[str],
             authority: AuthorityData,
             *,
-            query_limit: int = 7,
-            per_query_timeout: float = 6.0,
-            domain_timeout: float = 18.0,
+            priority_queries: Iterable[str] = (),
+            query_limit: int = 8,
+            secondary_timeout: float = 7.0,
         ) -> tuple[str, list[dict[str, str]], str, list[str]]:
-            """Search one catalog in strict query priority order.
+            """Search one catalog in the exact user-defined order.
 
-            Names are NEVER launched concurrently inside one catalog.  We try the
-            exact/original title first, then English, then the catalog language,
-            then remaining aliases.  As soon as a verified result exists we stop.
-            A network timeout means the site itself is unavailable for direct
-            search, so we stop retrying that same endpoint with more names and let
-            the later web-index fallback handle it.
+            Priority names are: Latin Original/Romaji -> English -> language of the
+            catalog (UA or RU).  These names are *not* wrapped in a short asyncio
+            timeout; they are allowed to finish using the HTTP transport timeout.
+            Only after those priority names fail do we probe remaining aliases with
+            ``secondary_timeout``.  This prevents a 6-second timer from killing the
+            exact title search on slower DLE sites such as jut-su.net.
             """
             ordered = unique_strings(queries, limit=query_limit)
+            priority_keys = {normalize_title(x) for x in priority_queries if normalize_title(x)}
             tried: list[str] = []
 
-            async def run() -> tuple[list[dict[str, str]], str]:
-                for query in ordered:
-                    tried.append(query)
-                    try:
-                        result = await asyncio.wait_for(
-                            self.search_catalog_native(domain, [query], aliases, authority),
-                            timeout=per_query_timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        return [], f"timeout {int(per_query_timeout)}s"
-                    except Exception as error:
-                        return [], clean_text(error)
-                    if result:
-                        return result, ""
-                return [], ""
+            async def call_native(query: str, timeout_value: float | None) -> list[dict[str, str]]:
+                try:
+                    return await self.search_catalog_native(
+                        domain, [query], aliases, authority, request_timeout=timeout_value
+                    )
+                except TypeError as error:
+                    # Backward-compatible with test subclasses / older adapters that
+                    # override search_catalog_native without the new keyword.
+                    if "request_timeout" not in str(error):
+                        raise
+                    return await self.search_catalog_native(domain, [query], aliases, authority)
 
-            try:
-                result, error = await asyncio.wait_for(run(), timeout=domain_timeout)
-                return domain, result, error, tried
-            except asyncio.TimeoutError:
-                return domain, [], f"timeout {int(domain_timeout)}s", tried
-            except Exception as error:
-                return domain, [], clean_text(error), tried
+            for query in ordered:
+                tried.append(query)
+                is_priority = normalize_title(query) in priority_keys
+                try:
+                    if is_priority:
+                        result = await call_native(query, None)
+                    else:
+                        result = await asyncio.wait_for(
+                            call_native(query, secondary_timeout),
+                            timeout=secondary_timeout,
+                        )
+                except asyncio.TimeoutError:
+                    # Timeout is intentionally only possible in the secondary alias
+                    # phase.  Stop native probing and let the indexed fallback take over.
+                    return domain, [], f"timeout {int(secondary_timeout)}s (інші назви)", tried
+                except Exception as error:
+                    return domain, [], clean_text(error), tried
+                if result:
+                    return domain, result, "", tried
+            return domain, [], "", tried
 
         async def google_job(
             domain: str,
@@ -2487,9 +2522,21 @@ class Core:
                 raise
             authority = await self.resolve_authorities(payload)
 
-        romanized = clean_title(authority.original or next((x for x in source_aliases if title_script(x) == "latin"), "") or payload.title)
-        native_original = clean_title(authority.native or romanized or payload.title)
+        # In this project "original" means the useful Latin/Romaji title, not
+        # native CJK script.  The exact Latin line exposed by the opened source
+        # page has first priority (AniHub: h1 + p.text-sm.text-gray-400.mb-1).
+        source_latin = next((clean_title(x) for x in source_aliases if title_script(x) == "latin"), "")
+        authority_romaji = clean_title(authority.original) if title_script(authority.original) == "latin" else ""
         english = clean_title(authority.english)
+        romanized = clean_title(
+            source_latin
+            or authority_romaji
+            or (english if title_script(english) == "latin" else "")
+            or (payload.title if title_script(payload.title) == "latin" else "")
+        )
+        # Native CJK remains useful as a late alias, but is never written to
+        # title.original and never outranks the Latin original during search.
+        native_original = clean_title(authority.native)
         self.log(
             f"Назва: input={clean_title(payload.title)!r}; native={native_original!r}; "
             f"romaji={romanized!r}; english={english!r}; source_aliases={source_aliases[:8]!r}"
@@ -2512,10 +2559,19 @@ class Core:
         source_originals = [
             name for name in source_aliases
             if normalize_title(name) != normalize_title(payload.title)
-            and title_script(name) in {"latin", "cjk"}
+            and title_script(name) == "latin"
         ]
         source_original = clean_title(source_originals[0] if source_originals else "")
-        search_original = source_original or romanized or native_original or clean_title(payload.title)
+        search_original = source_original or romanized or (english if title_script(english) == "latin" else "")
+        if not search_original:
+            # Last-resort Latin value. This can be an English transliteration when
+            # a catalog exposes no Romaji field, but never deliberately chooses CJK.
+            try:
+                translated_latin = clean_title(await self.translate_en(payload.title))
+            except Exception:
+                translated_latin = ""
+            search_original = translated_latin if title_script(translated_latin) == "latin" else clean_title(payload.title)
+        romanized = search_original
 
         # Determine localized names BEFORE catalog search.  They are third in the
         # per-domain priority chain, never used ahead of original/English.
@@ -2572,21 +2628,21 @@ class Core:
             if is_probable_title(value) and not is_catalog_noise_title(value)
         ]
 
-        def catalog_query_plan(domain: str, extra: Iterable[str] = ()) -> list[str]:
+        def catalog_priority_plan(domain: str) -> list[str]:
             local = ua_title if domain in UA_SITES else ru_title
-            # Required strict order:
-            # 1) original from source page; 2) English; 3) site language;
-            # 4) remaining exact names (native CJK, alternate romanization, etc.).
+            # The first three semantic slots are protected from short timeouts:
+            # Latin Original/Romaji -> English -> language of this catalog.
+            return unique_strings([search_original, english, local], limit=3)
+
+        def catalog_query_plan(domain: str, extra: Iterable[str] = ()) -> list[str]:
+            priority = catalog_priority_plan(domain)
+            # Only after the priority trio has failed may native CJK / alternate
+            # aliases be tried, and these secondary names use a short timeout.
             remaining = [
-                romanized, native_original, payload.title,
+                romanized, payload.title, native_original,
                 *source_aliases, *authority.aliases, *extra,
             ]
-            return unique_strings([
-                search_original,
-                english,
-                local,
-                *remaining,
-            ], limit=7)
+            return unique_strings([*priority, *remaining], limit=8)
 
         catalogs: dict[str, list[dict[str, Any]]] = {site: [] for site in CATALOG_SITES}
         timed_out_domains: set[str] = set()
@@ -2611,9 +2667,9 @@ class Core:
                     catalog_query_plan(domain),
                     identity_aliases,
                     authority,
-                    query_limit=7,
-                    per_query_timeout=6.0,
-                    domain_timeout=18.0,
+                    priority_queries=catalog_priority_plan(domain),
+                    query_limit=8,
+                    secondary_timeout=7.0,
                 )
             )
             for domain in phase1_domains
@@ -2684,8 +2740,10 @@ class Core:
                 pending = [x for x in new_names if normalize_title(x) not in already]
                 if pending:
                     replay_tasks.append(asyncio.create_task(
-                        catalog_job(domain, pending, unique_strings([*identity_aliases, *new_names], limit=50), authority,
-                                    query_limit=2, per_query_timeout=5.0, domain_timeout=9.0)
+                        catalog_job(
+                            domain, pending, unique_strings([*identity_aliases, *new_names], limit=50), authority,
+                            priority_queries=(), query_limit=2, secondary_timeout=6.0,
+                        )
                     ))
             completed = 0
             total = max(1, len(replay_tasks))
@@ -2799,7 +2857,7 @@ class Core:
                 "group": clean_text(payload.group),
             },
             "title": {
-                "original": native_original,
+                "original": romanized,
                 "romaji": romanized,
                 "english": english,
                 "ukrainian": final_uk or clean_title(payload.title),
@@ -2826,7 +2884,7 @@ class Core:
                 "source_catalog": source_catalog or "",
                 "search_strategy": {
                     "authority": "fast /api/search: Google site -> direct authority fallback",
-                    "catalogs": "per catalog: source Original/Romaji -> English -> UA/RU title -> remaining exact aliases; optional one verified-alias replay; ordered fallback",
+                    "catalogs": "per catalog: Latin Original/Romaji -> English -> UA/RU title without short timeout; then secondary aliases with timeout; ordered fallback",
                 },
                 "catalog_search": {
                     "async": True,
@@ -2838,8 +2896,9 @@ class Core:
                     "alias_replay_rounds": alias_replay_rounds,
                     "result_counts": {site: len(catalogs.get(site, [])) for site in CATALOG_SITES},
                     "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
-                    "per_query_timeout_seconds": 6,
-                    "per_domain_timeout_seconds": 18,
+                    "priority_short_timeout": False,
+                    "priority_order": "latin_original -> english -> catalog_language",
+                    "secondary_alias_timeout_seconds": 7,
                     "fallback_timeout_seconds": 12,
                     "timed_out_domains": sorted(timed_out_domains),
                 },
