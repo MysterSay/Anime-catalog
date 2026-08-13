@@ -21,4 +21,4 @@ git commit -m $commitMessage
 Write-Host "🚀 Відправляємо зміни на GitHub..." -ForegroundColor Green
 git push origin main
 
-Write-Host "✅ Синхронізацію успішно завершено!" -ForegroundColor BrightGreen
+Write-Host "✅ Синхронізацію успішно завершено!" -ForegroundColor Green
