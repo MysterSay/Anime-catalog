@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Anime -> Notion Collector
 // @namespace    myster.anime.notion
-// @version      2.2.0
+// @version      2.2.1
 // @description  Thin client for Anime Title Core: streams progress packets, runs full catalog search on Vercel, then imports schema-v2 JSON into Notion through Yoru.
 // @author       Myster
 //
@@ -64,12 +64,13 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.2.0';
+  const VERSION = '2.2.1';
   const BASE = 'https://myster-anime.pages.dev';
   const STREAM_URL = `${BASE}/api/process-title-stream`;
   const INGEST_URL = `${BASE}/api/ingest`;
   const CONTEXT_URL = `${BASE}/api/extension/context`;
   const ANIME_URL = `${BASE}/api/anime`;
+  const PROCESS_FALLBACK_URL = `${BASE}/api/process-title`;
   const DEFAULT_STATUSES = ['Без статусу', 'Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто'];
 
   const state = {
@@ -313,7 +314,6 @@
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let finalResult = null;
     while (true) {
       const { value, done } = await reader.read();
       if (value) buffer += decoder.decode(value, { stream: !done });
@@ -324,8 +324,13 @@
         let packet;
         try { packet = JSON.parse(line); } catch { continue; }
         onPacket(packet);
-        if (packet.type === 'error') throw new Error(packet.message || 'Python core завершився з помилкою.');
-        if (packet.type === 'result' && packet.result) finalResult = packet.result;
+        if (packet.type === 'error') throw new Error(`CORE:${packet.message || 'Python core завершився з помилкою.'}`);
+        if (packet.type === 'result' && packet.result) {
+          // The final JSON is complete. Do not wait for server-side HTTP client cleanup
+          // or for Tampermonkey to emit a second end event.
+          try { await reader.cancel(); } catch {}
+          return packet.result;
+        }
       }
       if (done) break;
     }
@@ -333,13 +338,13 @@
       try {
         const packet = JSON.parse(buffer);
         onPacket(packet);
-        if (packet.type === 'error') throw new Error(packet.message || 'Python core завершився з помилкою.');
-        if (packet.type === 'result' && packet.result) finalResult = packet.result;
+        if (packet.type === 'error') throw new Error(`CORE:${packet.message || 'Python core завершився з помилкою.'}`);
+        if (packet.type === 'result' && packet.result) return packet.result;
       } catch (error) {
         if (!(error instanceof SyntaxError)) throw error;
       }
     }
-    return finalResult;
+    return null;
   }
 
   async function streamWithFetch(payload, onPacket) {
@@ -356,7 +361,30 @@
     return new Promise((resolve, reject) => {
       let streamStarted = false;
       let settled = false;
-      GM_xmlhttpRequest({
+      let lastPacketAt = Date.now();
+      let lastPercent = 0;
+      let requestHandle = null;
+      const trackedPacket = packet => {
+        lastPacketAt = Date.now();
+        lastPercent = Number(packet?.percent || lastPercent || 0);
+        onPacket(packet);
+      };
+      const finish = (ok, value) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(watchdog);
+        ok ? resolve(value) : reject(value);
+      };
+      const watchdog = setInterval(() => {
+        // After 95% only JSON assembly/serialization remains. If the transport is
+        // silent for 35s, treat it as a broken stream and use the non-stream fallback.
+        if (lastPercent >= 95 && Date.now() - lastPacketAt > 35000) {
+          try { requestHandle?.abort?.(); } catch {}
+          finish(false, new Error('STREAM_STALLED: фінальний пакет не прийшов після 95%.'));
+        }
+      }, 4000);
+
+      requestHandle = GM_xmlhttpRequest({
         method: 'POST', url: STREAM_URL,
         headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
         data: JSON.stringify(payload), responseType: 'stream',
@@ -364,33 +392,35 @@
           const stream = response?.response;
           if (!stream?.getReader) return;
           streamStarted = true;
-          parseReadableStream(stream, onPacket).then(result => { settled = true; resolve(result); }).catch(error => { settled = true; reject(error); });
+          parseReadableStream(stream, trackedPacket)
+            .then(result => finish(true, result))
+            .catch(error => finish(false, error));
         },
         onload: response => {
           if (settled || streamStarted) return;
-          if (response.status < 200 || response.status >= 400) return reject(new Error(`Stream HTTP ${response.status}: ${String(response.responseText || '').slice(0, 500)}`));
+          if (response.status < 200 || response.status >= 400) return finish(false, new Error(`Stream HTTP ${response.status}: ${String(response.responseText || '').slice(0, 500)}`));
           let result = null;
           for (const line of String(response.responseText || '').split(/\r?\n/)) {
             if (!line.trim()) continue;
             try {
-              const packet = JSON.parse(line); onPacket(packet);
-              if (packet.type === 'error') throw new Error(packet.message || 'Python core error');
+              const packet = JSON.parse(line); trackedPacket(packet);
+              if (packet.type === 'error') throw new Error(`CORE:${packet.message || 'Python core error'}`);
               if (packet.type === 'result') result = packet.result;
-            } catch (error) { if (!(error instanceof SyntaxError)) return reject(error); }
+            } catch (error) { if (!(error instanceof SyntaxError)) return finish(false, error); }
           }
-          resolve(result);
+          finish(true, result);
         },
-        onerror: error => reject(new Error(`Network error: ${error?.error || 'GM_xmlhttpRequest'}`)),
+        onerror: error => finish(false, new Error(`Network error: ${error?.error || 'GM_xmlhttpRequest'}`)),
+        ontimeout: () => finish(false, new Error('STREAM_TIMEOUT: Tampermonkey stream timeout')),
       });
     });
   }
 
+
   async function streamProcess(payload, onPacket) {
-    try { return await streamWithFetch(payload, onPacket); }
-    catch (error) {
-      addLog(`Native stream недоступний, використовую Tampermonkey stream: ${error.message}`, 'warn');
-      return streamWithGM(payload, onPacket);
-    }
+    // On third-party anime sites a normal fetch is usually blocked by CORS. Use
+    // Tampermonkey's privileged transport directly instead of failing once first.
+    return streamWithGM(payload, onPacket);
   }
 
   function onProgressPacket(packet) {
@@ -403,6 +433,19 @@
     }
   }
 
+  async function runNonStreamFallback(requestPayload) {
+    addLog('Стрім не віддав фінальний JSON. Запускаю резервний non-stream endpoint…', 'warn');
+    setProgress(96, 'Резервне завершення: формую JSON і записую в Notion…');
+    const saved = await gmJson('POST', PROCESS_FALLBACK_URL, requestPayload);
+    if (!saved?.item?.id) throw new Error('Резервний endpoint не повернув ID тайтлу.');
+    state.existingItem = saved.item;
+    setProgress(100, saved.existing ? 'Готово: тайтл оновлено в Notion.' : 'Готово: тайтл додано в Notion.', 'ok');
+    addLog(`100% · ${saved.existing ? 'Оновлено' : 'Додано'} резервним шляхом: ${saved.item.title || requestPayload.title}`, 'ok');
+    notify('Anime → Notion', `${saved.existing ? 'Оновлено' : 'Додано'}: ${saved.item.title || requestPayload.title}`);
+    await refreshContext();
+    return saved;
+  }
+
   async function createNew() {
     const title = cleanTitle(state.titleInput?.value || extractTitle());
     if (!title) return alert('Не вдалося визначити назву. Введи її вручну в полі панелі.');
@@ -413,13 +456,25 @@
     setProgress(1, 'Запускаю Python core…');
     addLog(`Джерело: ${location.href}`);
     addLog(`Назва: ${title}`);
+    const requestPayload = {
+      title, url: location.href,
+      status: state.statusSelect?.value || '',
+      group: state.groupSelect?.value || '',
+    };
     try {
-      const result = await streamProcess({
-        title, url: location.href,
-        status: state.statusSelect?.value || '',
-        group: state.groupSelect?.value || '',
-      }, onProgressPacket);
-      if (!result?.title) throw new Error('Stream завершився без schema-v2 JSON.');
+      let result = null;
+      try {
+        result = await streamProcess(requestPayload, onProgressPacket);
+      } catch (streamError) {
+        if (String(streamError?.message || '').startsWith('CORE:')) throw streamError;
+        addLog(`Проблема транспорту: ${streamError.message}`, 'warn');
+        await runNonStreamFallback(requestPayload);
+        return;
+      }
+      if (!result?.title) {
+        await runNonStreamFallback(requestPayload);
+        return;
+      }
       setProgress(99, 'JSON готовий. Відправляю в Yoru / Notion…');
       const saved = await gmJson('POST', INGEST_URL, result);
       if (!saved?.item?.id) throw new Error('Yoru ingest не повернув ID тайтлу.');
@@ -429,10 +484,11 @@
       notify('Anime → Notion', `${saved.existing ? 'Оновлено' : 'Додано'}: ${saved.item.title || title}`);
       await refreshContext();
     } catch (error) {
-      console.error('[Anime -> Notion v2.2]', error);
-      setProgress(Number(state.progressPercent?.textContent?.replace('%', '')) || 0, `Помилка: ${error.message}`, 'error');
-      addLog(error.message || String(error), 'error');
-      notify('Anime → Notion', `Помилка: ${error.message || error}`);
+      console.error('[Anime -> Notion v2.2.1]', error);
+      const msg = String(error?.message || error).replace(/^CORE:/, '');
+      setProgress(Number(state.progressPercent?.textContent?.replace('%', '')) || 0, `Помилка: ${msg}`, 'error');
+      addLog(msg, 'error');
+      notify('Anime → Notion', `Помилка: ${msg}`);
     } finally {
       state.running = false;
       state.startButton.disabled = false;
