@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.7.1"
+APP_VERSION = "2.8.0"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -140,6 +140,8 @@ CATALOG_NOISE_TITLES = {
     "военные", "исторические", "історичні", "психология", "психологія", "сверхъестественное",
     "надприродне", "супер сила", "суперсила", "подборки", "добірки", "популярные франшизы",
     "популярні франшизи", "франшизы", "франшизи", "с субтитрами", "із субтитрами", "рандом",
+    "telegram", "tiktok", "підтримка", "поддержка", "донат", "головна", "главная", "новинки",
+    "інше", "другое", "профіль", "профиль", "anihub", "аніхаб", "анихаб",
 }
 
 TITLE_PATH_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
@@ -568,15 +570,18 @@ def site_specific_title_variants(domain: str, soup: BeautifulSoup) -> list[str]:
             values.append(value)
 
     if domain == "anihub.in.ua":
-        # AniHub renders the Romaji/original title directly below H1, e.g.
-        # <p class="text-sm text-gray-400 mb-1">Shin no Nakama ... 2nd</p>.
+        # AniHub: the canonical Romaji/original line is the <p> immediately
+        # following H1.  Keep this deliberately exact: broad text-gray-400
+        # selectors also match menus/navigation and used to pollute aliases.
         for selector in [
+            "h1 + p.text-sm.text-gray-400.mb-1",
+            "h1 + p.text-sm.text-gray-400",
             "p.text-sm.text-gray-400.mb-1",
-            "h1 ~ p.text-sm",
-            "[class*=text-gray-400]",
         ]:
-            for tag in soup.select(selector)[:12]:
-                add(tag.get_text(" ", strip=True))
+            tags = soup.select(selector)
+            if tags:
+                add(tags[0].get_text(" ", strip=True))
+                break
 
     elif domain == "jut-su.net":
         # The .net clone has an explicit adjacent original-title block.
@@ -618,22 +623,22 @@ def source_page_title_variants(domain: str, soup: BeautifulSoup) -> list[str]:
 
 
 def trusted_source_title_variants(domain: str, soup: BeautifulSoup) -> list[str]:
-    """Small high-confidence query set harvested from the currently opened page.
+    """Small, high-confidence query set harvested from the opened title page.
 
-    Do not use the whole JSON-LD/metadata alias soup as search queries: some sites
-    expose genres, franchise labels and recommendation names there.  The full set
-    is still useful for verification, but only explicit original/Romaji fields,
-    the small H1 neighborhood and the primary title are allowed to drive searches.
+    Known sites get strict selectors first.  We intentionally avoid broad JSON-LD
+    and generic metadata as search-driving aliases because AniHub and several
+    catalogs expose navigation/recommendation text there.
     """
     primary = page_primary_title(soup)
-    values = [
-        *site_specific_title_variants(domain, soup),
-        *explicit_title_variants(soup),
-        *_near_h1_title_variants(soup),
-        primary,
-    ]
+    specific = site_specific_title_variants(domain, soup)
+
+    if domain in {"anihub.in.ua", "jut-su.net", "jut.su"}:
+        values = [*specific[:2], primary]
+    else:
+        values = [*specific[:2], *explicit_title_variants(soup)[:3], *_near_h1_title_variants(soup)[:2], primary]
+
     return [
-        x for x in unique_strings(values, limit=14)
+        x for x in unique_strings(values, limit=8)
         if is_probable_title(x) and not is_catalog_noise_title(x)
     ]
 
@@ -2271,8 +2276,8 @@ class Core:
             return None, None, []
         soup, final_url = await self.fetch_soup(payload.url)
         final_url = compact_url(final_url or payload.url)
-        full_source_aliases = source_page_title_variants(domain, soup) if soup else []
         trusted_aliases = trusted_source_title_variants(domain, soup) if soup else []
+        explicit_aliases = site_specific_title_variants(domain, soup) if soup else []
         if not is_catalog_title_url(domain, final_url):
             return domain, None, unique_strings([payload.title, *trusted_aliases], limit=16)
 
@@ -2286,8 +2291,10 @@ class Core:
                 same_script = title_script(primary) == title_script(title)
                 if not title or normalize_title(primary) == normalize_title(title) or (same_script and titles_related(primary, title, 0.62)):
                     title = primary
-        source_aliases = unique_strings([title, payload.title, *trusted_aliases], limit=16)
-        item_aliases = unique_strings([*source_aliases, *full_source_aliases], limit=40)
+        source_aliases = unique_strings([*explicit_aliases, title, payload.title, *trusted_aliases], limit=8)
+        # Store only identity-bearing aliases from this page.  Do not persist broad
+        # JSON-LD/navigation strings such as Telegram/TikTok/menu labels.
+        item_aliases = unique_strings([*explicit_aliases, title, payload.title, *trusted_aliases], limit=12)
         return domain, {"url": final_url, "title": title or clean_title(payload.title), "_aliases": item_aliases}, source_aliases
 
     async def send_callback(self, result: dict[str, Any]) -> dict[str, Any] | None:
@@ -2436,17 +2443,23 @@ class Core:
             name for name in source_aliases
             if title_script(name) in {"latin", "cjk"} and normalize_title(name) != normalize_title(payload.title)
         ]
-        base_queries = unique_strings([
-            *source_originals[:3], romanized, native_original, english, payload.title,
-        ], limit=6)
-        if not base_queries:
-            base_queries = [clean_title(payload.title)]
+        # Search-driving names are deliberately small and ordered by confidence.
+        # Exact Romaji/original from the source page wins; local H1 is deferred to
+        # the localized pass instead of multiplying every native search request.
+        primary_queries = unique_strings([
+            *source_originals[:1], romanized, english, native_original,
+        ], limit=3)
+        if not primary_queries:
+            primary_queries = [clean_title(payload.title)]
+        base_queries = primary_queries
 
         identity_aliases = unique_strings([
             native_original, romanized, english, *source_aliases, *authority.aliases, payload.title,
-        ], limit=50)
+        ], limit=30)
 
         catalogs: dict[str, list[dict[str, Any]]] = {site: [] for site in CATALOG_SITES}
+        timed_out_domains: set[str] = set()
+        native_attempted_domains: set[str] = set()
         if source_catalog and source_item:
             catalogs[source_catalog] = [source_item]
             await emit(
@@ -2457,126 +2470,104 @@ class Core:
                 found=1,
             )
 
-        # PHASE 1: all catalogs concurrently with every trustworthy name known at
-        # start, including the original/Romaji field harvested from the source page.
+        # PHASE 1: one compact exact/original search per catalog.  Each catalog may
+        # try at most 2 strong names internally.  A timeout is remembered and that
+        # domain is NOT retried by native search in later phases.
         phase1_domains = [domain for domain in CATALOG_SITES if domain != source_catalog]
         phase1_tasks = [
-            asyncio.create_task(catalog_job(domain, base_queries, identity_aliases, authority))
+            asyncio.create_task(
+                catalog_job(domain, primary_queries, identity_aliases, authority, query_limit=2, timeout=9.0)
+            )
             for domain in phase1_domains
         ]
         completed = 0
         total = max(1, len(phase1_tasks))
-        await emit("catalogs_primary", 16, f"Паралельний пошук: 0/{len(phase1_tasks)} каталогів.")
+        await emit("catalogs_primary", 16, f"Точний пошук оригінальною назвою: 0/{len(phase1_tasks)} каталогів.")
         for task in asyncio.as_completed(phase1_tasks):
             domain, result, error = await task
+            native_attempted_domains.add(domain)
             completed += 1
+            if error.startswith("timeout"):
+                timed_out_domains.add(domain)
             if result:
                 catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
-            pct = 16 + round((completed / total) * 35)
+            pct = 16 + round((completed / total) * 34)
             await emit(
                 "catalogs_primary",
                 pct,
-                f"{domain}: {'знайдено ' + str(len(catalogs[domain])) if catalogs[domain] else (('помилка (' + error + ')') if error else 'без збігів')} · {completed}/{len(phase1_tasks)}",
+                f"{domain}: {'знайдено ' + str(len(catalogs[domain])) if catalogs[domain] else (('timeout → fallback' if domain in timed_out_domains else 'без збігів'))} · {completed}/{len(phase1_tasks)}",
                 domain=domain,
                 completed=completed,
                 total=len(phase1_tasks),
                 found=len(catalogs[domain]),
                 error=error,
             )
-        self.log("Фаза 1 завершена: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
+        self.log("Точний прохід завершено: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
 
         def collect_verified_aliases() -> list[str]:
-            values: list[str] = [
-                native_original, romanized, english,
-                *source_aliases, *authority.aliases,
-            ]
-            # Prefer exact spellings exposed by verified catalog pages over the
-            # browser H1 when the normalized strings are identical.
+            values: list[str] = [native_original, romanized, english, *source_aliases, *authority.aliases]
             for items in catalogs.values():
                 for item in items:
                     values.append(item.get("title", ""))
                     aliases = item.get("_aliases") if isinstance(item, dict) else None
                     if isinstance(aliases, list):
-                        values.extend(aliases)
+                        values.extend(aliases[:6])
             values.append(payload.title)
             return [
-                value for value in unique_strings(values, limit=120)
+                value for value in unique_strings(values, limit=60)
                 if is_probable_title(value) and not is_catalog_noise_title(value)
             ]
 
-        queried_alias_keys = {
-            normalize_title(x) for x in unique_strings([*base_queries, *source_aliases, *authority.aliases], limit=100)
-            if normalize_title(x)
-        }
+        queried_alias_keys = {normalize_title(x) for x in primary_queries if normalize_title(x)}
         alias_replay_rounds = 0
 
-        async def replay_new_aliases(stage: str, pct_start: int, pct_end: int, max_rounds: int = 3) -> None:
-            nonlocal identity_aliases, alias_replay_rounds
-            for _ in range(max_rounds):
-                if not within_budget(55.0):
-                    await emit(stage, pct_end, "Пропускаю додатковий replay: наближаюсь до ліміту часу Vercel.")
-                    return
-                empty_domains = [domain for domain in CATALOG_SITES if not catalogs[domain]]
-                if not empty_domains:
-                    return
-                discovered = collect_verified_aliases()
-                identity_aliases = unique_strings([*identity_aliases, *discovered], limit=100)
-                new_names = [
-                    name for name in discovered
-                    if normalize_title(name) and normalize_title(name) not in queried_alias_keys
-                ]
-                # Prefer concise useful names; a page can expose many season/family aliases.
-                new_names = unique_strings(new_names, limit=4)
-                if not new_names:
-                    return
-                alias_replay_rounds += 1
-                for name in new_names:
-                    queried_alias_keys.add(normalize_title(name))
-                await emit(
-                    stage,
-                    pct_start,
-                    f"Нові назви знайдено. Повторюю {len(empty_domains)} порожніх каталогів.",
-                    aliases=new_names,
-                    round=alias_replay_rounds,
-                    remaining=len(empty_domains),
+        # A single targeted replay is allowed only for domains that answered
+        # normally. Timed-out domains go straight to fallback, preventing the old
+        # 20s -> 14s -> 12s retry cascade.
+        discovered = collect_verified_aliases()
+        identity_aliases = unique_strings([*identity_aliases, *discovered], limit=60)
+        new_names = [
+            name for name in discovered
+            if normalize_title(name) and normalize_title(name) not in queried_alias_keys
+            and title_script(name) in {"latin", "cjk"}
+        ]
+        new_names = unique_strings(new_names, limit=2)
+        replay_domains = [
+            domain for domain in CATALOG_SITES
+            if not catalogs[domain] and domain not in timed_out_domains and domain != source_catalog
+        ]
+        if new_names and replay_domains and within_budget(45.0):
+            alias_replay_rounds = 1
+            for name in new_names:
+                queried_alias_keys.add(normalize_title(name))
+            await emit(
+                "catalogs_alias_replay", 52,
+                f"Знайдено нову точну назву. Один повтор для {len(replay_domains)} каталогів без timeout.",
+                aliases=new_names,
+                remaining=len(replay_domains),
+            )
+            replay_tasks = [
+                asyncio.create_task(
+                    catalog_job(domain, new_names, identity_aliases, authority, query_limit=1, timeout=7.0)
                 )
-                tasks = [
-                    asyncio.create_task(
-                        catalog_job(
-                            domain,
-                            new_names,
-                            identity_aliases,
-                            authority,
-                            query_limit=min(3, len(new_names)),
-                            timeout=14.0,
-                        )
-                    )
-                    for domain in empty_domains
-                ]
-                completed_round = 0
-                total_round = max(1, len(tasks))
-                for task in asyncio.as_completed(tasks):
-                    domain, result, error = await task
-                    completed_round += 1
-                    if result:
-                        catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
-                    pct = pct_start + round((completed_round / total_round) * max(1, pct_end - pct_start))
-                    await emit(
-                        stage,
-                        pct,
-                        f"{domain}: повторний пошук новими назвами {completed_round}/{len(tasks)}" + (f" · {error}" if error else "") + ".",
-                        domain=domain,
-                        completed=completed_round,
-                        total=len(tasks),
-                        found=len(catalogs[domain]),
-                        error=error,
-                        round=alias_replay_rounds,
-                    )
-
-        # This is the missing behavior from older cores: as soon as any verified
-        # catalog reveals another original/localized title, revisit catalogs that
-        # previously returned zero. Repeat until no new names appear (bounded).
-        await replay_new_aliases("catalogs_alias_replay", 52, 62, max_rounds=2)
+                for domain in replay_domains
+            ]
+            completed = 0
+            total = max(1, len(replay_tasks))
+            for task in asyncio.as_completed(replay_tasks):
+                domain, result, error = await task
+                completed += 1
+                if error.startswith("timeout"):
+                    timed_out_domains.add(domain)
+                if result:
+                    catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
+                pct = 52 + round((completed / total) * 6)
+                await emit(
+                    "catalogs_alias_replay", pct,
+                    f"{domain}: точний повтор {completed}/{len(replay_tasks)}" + (f" · {error}" if error else "") + ".",
+                    domain=domain, completed=completed, total=len(replay_tasks),
+                    found=len(catalogs[domain]), error=error,
+                )
 
         ru_candidates: list[str] = []
         ua_candidates: list[str] = []
@@ -2587,101 +2578,93 @@ class Core:
         current_identity = collect_verified_aliases()
         ru_title = choose_localized_title("RU", ru_candidates, current_identity)
         ua_title = choose_localized_title("UA", ua_candidates, current_identity)
+        # The opened UA/RU catalog H1 is already a verified localized title and is
+        # better than machine translation when no second catalog supplied one yet.
+        if source_catalog in UA_SITES and re.search(r"[А-Яа-яІіЇїЄєҐґ]", payload.title or ""):
+            ua_title = ua_title or clean_title(payload.title)
+        if source_catalog in RU_SITES and re.search(r"[А-Яа-яЁё]", payload.title or ""):
+            ru_title = ru_title or clean_title(payload.title)
         await emit(
-            "localized_titles",
-            65,
-            "Визначаю реальні українську та російську назви з перевірених каталогів.",
-            ukrainian=ua_title,
-            russian=ru_title,
+            "localized_titles", 61,
+            "Локалізовані назви визначено. Перевіряю лише каталоги, що відповіли без timeout.",
+            ukrainian=ua_title, russian=ru_title,
         )
 
-        # Targeted localized pass only for still-empty domains.
+        # One localized pass, only for domains that did not timeout and only if the
+        # localized name differs from names already queried.
         phase2_specs: list[tuple[str, str]] = []
         for domain in CATALOG_SITES:
-            if catalogs[domain]:
+            if catalogs[domain] or domain in timed_out_domains or domain == source_catalog:
                 continue
             local = ua_title if domain in UA_SITES else ru_title
-            if not local:
+            if not local or normalize_title(local) in queried_alias_keys:
                 continue
             phase2_specs.append((domain, local))
 
-        local_identity = unique_strings([*identity_aliases, *current_identity, ru_title, ua_title], limit=100)
+        local_identity = unique_strings([*identity_aliases, *current_identity, ru_title, ua_title], limit=60)
         phase2_tasks = [
-            asyncio.create_task(
-                catalog_job(domain, [local], local_identity, authority, query_limit=1, timeout=12.0)
-            )
+            asyncio.create_task(catalog_job(domain, [local], local_identity, authority, query_limit=1, timeout=7.0))
             for domain, local in phase2_specs
         ]
         completed = 0
         total = max(1, len(phase2_tasks))
         if phase2_tasks:
-            await emit("catalogs_localized", 66, f"Локалізований прохід: 0/{len(phase2_tasks)} каталогів.")
+            await emit("catalogs_localized", 63, f"Один локалізований прохід: 0/{len(phase2_tasks)} каталогів.")
         for task in asyncio.as_completed(phase2_tasks):
             domain, result, error = await task
             completed += 1
+            if error.startswith("timeout"):
+                timed_out_domains.add(domain)
             if result:
                 catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
-            pct = 66 + round((completed / total) * 7)
+            pct = 63 + round((completed / total) * 8)
             await emit(
-                "catalogs_localized",
-                pct,
-                f"{domain}: локалізований прохід {completed}/{len(phase2_tasks)}" + (f" · {error}" if error else "") + ".",
-                domain=domain,
-                completed=completed,
-                total=len(phase2_tasks),
-                found=len(catalogs[domain]),
-                error=error,
+                "catalogs_localized", pct,
+                f"{domain}: локалізований пошук {completed}/{len(phase2_tasks)}" + (f" · {error}" if error else "") + ".",
+                domain=domain, completed=completed, total=len(phase2_tasks),
+                found=len(catalogs[domain]), error=error,
             )
         for _, local in phase2_specs:
             queried_alias_keys.add(normalize_title(local))
-
-        # A localized hit can itself reveal a Romaji/original field. Replay once
-        # more so that this late alias can unlock catalogs processed earlier.
-        await replay_new_aliases("catalogs_alias_replay", 73, 76, max_rounds=1)
 
         ru_candidates = [item.get("title", "") for d, items in catalogs.items() if d in RU_SITES for item in items]
         ua_candidates = [item.get("title", "") for d, items in catalogs.items() if d in UA_SITES for item in items]
         final_identity_aliases = collect_verified_aliases()
         ru_title = choose_localized_title("RU", ru_candidates, final_identity_aliases) or ru_title
         ua_title = choose_localized_title("UA", ua_candidates, final_identity_aliases) or ua_title
-        all_identity = unique_strings([*identity_aliases, *final_identity_aliases, ru_title, ua_title], limit=110)
+        all_identity = unique_strings([*identity_aliases, *final_identity_aliases, ru_title, ua_title], limit=70)
 
-        # PHASE 3: Google fallback only for empty domains. Run domains and aliases concurrently,
-        # but cap each domain so Google throttling cannot stall the whole request.
+        # Final fallback: one/two strongest names per remaining domain. Timed-out
+        # native domains arrive here immediately instead of being retried twice.
         google_specs: list[tuple[str, list[str]]] = []
         for domain in CATALOG_SITES:
             if catalogs[domain]:
                 continue
             local = ua_title if domain in UA_SITES else ru_title
-            queries = unique_strings([
-                romanized, english, native_original, payload.title, local,
-                *source_aliases, *final_identity_aliases, *authority.aliases,
-            ], limit=6)
+            queries = unique_strings([romanized, english, local, native_original], limit=2)
+            if not queries:
+                queries = primary_queries[:1]
             google_specs.append((domain, queries))
 
         google_tasks = [
-            asyncio.create_task(google_job(domain, queries, all_identity, query_limit=4, timeout=12.0))
+            asyncio.create_task(google_job(domain, queries, all_identity, query_limit=2, timeout=8.0))
             for domain, queries in google_specs
         ]
         completed = 0
         total = max(1, len(google_tasks))
         if google_tasks:
-            await emit("catalogs_fallback", 77, f"Fallback-пошук для порожніх каталогів: 0/{len(google_tasks)}.")
+            await emit("catalogs_fallback", 74, f"Короткий fallback для порожніх каталогів: 0/{len(google_tasks)}.")
         for task in asyncio.as_completed(google_tasks):
             domain, result, error = await task
             completed += 1
             if result:
                 catalogs[domain] = self.merge_catalog_items(catalogs[domain], result)
-            pct = 77 + round((completed / total) * 12)
+            pct = 74 + round((completed / total) * 15)
             await emit(
-                "catalogs_fallback",
-                pct,
+                "catalogs_fallback", pct,
                 f"{domain}: fallback {completed}/{len(google_tasks)}" + (f" · {error}" if error else "") + ".",
-                domain=domain,
-                completed=completed,
-                total=len(google_tasks),
-                found=len(catalogs[domain]),
-                error=error,
+                domain=domain, completed=completed, total=len(google_tasks),
+                found=len(catalogs[domain]), error=error,
             )
 
         self.log("Пошук завершено: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
@@ -2716,10 +2699,13 @@ class Core:
         final_ru = clean_title(final_ru)
         await emit("finalize", 95, "Назви та опис готові. Збираю JSON schema v2.")
 
-        output_aliases = unique_strings([
-            native_original, romanized, english, final_uk, final_ru,
-            *source_aliases, *final_identity_aliases, *authority.aliases,
-        ], limit=80)
+        output_aliases = [
+            value for value in unique_strings([
+                native_original, romanized, english, final_uk, final_ru,
+                *source_aliases, *final_identity_aliases, *authority.aliases,
+            ], limit=80)
+            if is_probable_title(value) and not is_catalog_noise_title(value)
+        ]
 
         public_catalogs = {
             site: [
@@ -2765,7 +2751,7 @@ class Core:
                 "source_catalog": source_catalog or "",
                 "search_strategy": {
                     "authority": "fast /api/search: Google site -> direct authority fallback",
-                    "catalogs": "source original-title harvest -> async all-catalog search -> iterative alias replay for empty catalogs -> localized pass -> Google fallback",
+                    "catalogs": "strict source original/Romaji -> one compact native pass -> optional one exact alias replay -> one localized pass -> short fallback",
                 },
                 "catalog_search": {
                     "async": True,
@@ -2776,8 +2762,9 @@ class Core:
                     "alias_replay_rounds": alias_replay_rounds,
                     "result_counts": {site: len(catalogs.get(site, [])) for site in CATALOG_SITES},
                     "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
-                    "per_domain_timeout_seconds": 22,
-                    "fallback_timeout_seconds": 14,
+                    "per_domain_timeout_seconds": 9,
+                    "fallback_timeout_seconds": 8,
+                    "timed_out_domains": sorted(timed_out_domains),
                 },
                 "generated_at_unix": int(time.time()),
             },

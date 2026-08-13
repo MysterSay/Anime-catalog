@@ -47,3 +47,22 @@ def test_source_page_variants_include_visible_and_original():
     values = source_page_title_variants('anihub.in.ua', doc)
     assert 'Нове життя блискучого цілителя в тіні' in values
     assert any(v.startswith('Isshun de Chiryou') for v in values)
+
+
+def test_anihub_trusted_titles_do_not_include_navigation_noise():
+    from app import trusted_source_title_variants
+    doc = soup('''
+      <nav><span class="text-sm text-gray-400 mb-1">Telegram</span><span>TikTok</span></nav>
+      <div>
+        <h1>Володар Таємниць</h1>
+        <p class="text-sm text-gray-400 mb-1">Guimi Zhi Zhu: Xiaochou Pian</p>
+      </div>
+      <footer><span class="text-gray-400">Підтримка</span></footer>
+    ''')
+    values = trusted_source_title_variants('anihub.in.ua', doc)
+    assert values[0] == 'Guimi Zhi Zhu: Xiaochou Pian'
+    assert 'Володар Таємниць' in values
+    assert 'Telegram' not in values
+    assert 'TikTok' not in values
+    assert 'Підтримка' not in values
+    assert len(values) <= 3
