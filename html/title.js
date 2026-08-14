@@ -22,11 +22,19 @@ const STATUS_THEME = {
   'Кинуто': { solid: '#d688a3', glow: 'rgba(214,136,163,.34)', border: 'rgba(214,136,163,.55)' },
   'Без статусу': { solid: '#d5dceb', glow: 'rgba(213,220,235,.22)', border: 'rgba(213,220,235,.4)' },
 };
+const GROUP_COLOR_THEME = {
+  default:{solid:'#a8b0bf',soft:'rgba(168,176,191,.12)',border:'rgba(168,176,191,.28)'}, gray:{solid:'#9b9a97',soft:'rgba(155,154,151,.13)',border:'rgba(155,154,151,.30)'},
+  brown:{solid:'#b08468',soft:'rgba(176,132,104,.14)',border:'rgba(176,132,104,.30)'}, orange:{solid:'#d99058',soft:'rgba(217,144,88,.14)',border:'rgba(217,144,88,.32)'},
+  yellow:{solid:'#d8b55b',soft:'rgba(216,181,91,.14)',border:'rgba(216,181,91,.32)'}, green:{solid:'#6fbe8b',soft:'rgba(111,190,139,.14)',border:'rgba(111,190,139,.32)'},
+  blue:{solid:'#65a8df',soft:'rgba(101,168,223,.14)',border:'rgba(101,168,223,.32)'}, purple:{solid:'#a589d4',soft:'rgba(165,137,212,.14)',border:'rgba(165,137,212,.32)'},
+  pink:{solid:'#d879a2',soft:'rgba(216,121,162,.14)',border:'rgba(216,121,162,.32)'}, red:{solid:'#d76868',soft:'rgba(215,104,104,.14)',border:'rgba(215,104,104,.32)'},
+};
+
 
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem('yoru-state') || '{}'); } catch { saved = {}; }
-const favorite = new Set(Array.isArray(saved.favorite) ? saved.favorite : []);
-const liked = new Set(Array.isArray(saved.liked) ? saved.liked : []);
+const favorite = new Set();
+const liked = new Set();
 
 // Global site colors. These defaults live in code and apply on every title page.
 const DEFAULT_SOURCE_MARKS = Object.freeze({
@@ -45,7 +53,7 @@ for (const [key, mark] of Object.entries(previousLinkMarks)) {
 }
 saved.linkMarks = globalLinkMarks;
 let currentItem = null;
-let apiOptions = { statuses: [], groups: [] };
+let apiOptions = { statuses: [], groups: [], groupOptions: [] };
 let mediaKind = null;
 let editSiteLinks = {};
 
@@ -74,6 +82,13 @@ function statusClass(status) {
 function statusTheme(status) {
   return STATUS_THEME[status] || STATUS_THEME['Без статусу'];
 }
+
+function groupOption(name) {
+  const key = String(name || '').trim().toLocaleLowerCase('uk-UA');
+  return (apiOptions.groupOptions || []).find(option => String(option.name || '').trim().toLocaleLowerCase('uk-UA') === key) || null;
+}
+function groupTheme(name) { return GROUP_COLOR_THEME[groupOption(name)?.color || 'default'] || GROUP_COLOR_THEME.default; }
+function groupTagStyle(name) { const t = groupTheme(name); return `--group-accent:${t.solid};--group-soft:${t.soft};--group-border:${t.border}`; }
 
 function sourceMarkKey(site) {
   // Deliberately global: a site's color is the same on every anime title page.
@@ -170,10 +185,12 @@ function groupLinks(links = []) {
 
 function buildDropdown(kind, currentValue, options) {
   const valueText = escapeHtml(currentValue || (kind === 'status' ? 'Без статусу' : 'Без групи'));
-  const currentClass = kind === 'status' ? `status-badge ${statusClass(currentValue)}` : 'group-pill';
+  const groupStyle = kind === 'group' ? ` style="${groupTagStyle(currentValue)}"` : '';
+  const currentClass = kind === 'status' ? `status-badge ${statusClass(currentValue)}` : 'group-pill colored-group-pill';
   const menuItems = options.map(option => {
     const selected = option === currentValue;
-    return `<button class="dropdown-option ${selected ? 'selected' : ''}" data-select-${kind}="${escapeHtml(option)}" data-option-search="${escapeHtml(option.toLocaleLowerCase('uk-UA'))}"><span class="${kind === 'status' ? `status-badge ${statusClass(option)}` : 'group-pill'}">${escapeHtml(option)}</span></button>`;
+    const style = kind === 'group' ? ` style="${groupTagStyle(option)}"` : '';
+    return `<button class="dropdown-option ${selected ? 'selected' : ''}" data-select-${kind}="${escapeHtml(option)}" data-option-search="${escapeHtml(option.toLocaleLowerCase('uk-UA'))}"><span class="${kind === 'status' ? `status-badge ${statusClass(option)}` : 'group-pill colored-group-pill'}"${style}>${escapeHtml(option)}</span></button>`;
   }).join('');
   const search = kind === 'group'
     ? `<div class="dropdown-search-wrap"><span>⌕</span><input class="dropdown-search-input" type="search" placeholder="Пошук групи…" data-group-search autocomplete="off" /></div>`
@@ -184,7 +201,7 @@ function buildDropdown(kind, currentValue, options) {
       <span class="control-label">${kind === 'status' ? 'Статус' : 'Група'}</span>
       <div class="control-dropdown" data-dropdown="${kind}">
         <button class="control-dropdown-btn" data-dropdown-trigger="${kind}" aria-expanded="false">
-          <span class="${currentClass}">${valueText}</span>
+          <span class="${currentClass}"${groupStyle}>${valueText}</span>
           <span class="dropdown-caret">⌄</span>
         </button>
         <div class="control-dropdown-menu ${kind === 'group' ? 'group-dropdown-menu' : ''}">
@@ -222,8 +239,16 @@ function buildLinksAccordion(linkGroups) {
   }).join('');
 }
 
+function syncMarksFromItem(item) {
+  if (!item?.id) return;
+  if (item.favorite) favorite.add(item.id); else favorite.delete(item.id);
+  if (item.liked) liked.add(item.id); else liked.delete(item.id);
+  persistState();
+}
+
 function renderItem(item) {
   currentItem = item;
+  syncMarksFromItem(currentItem);
   document.title = `${currentItem.title} — Yoru`;
   const linkGroups = groupLinks(currentItem.links || []);
   const totalLinks = linkGroups.reduce((sum, group) => sum + group.items.length, 0);
@@ -251,6 +276,7 @@ function renderItem(item) {
             <div class="detail-actions detail-actions-vertical">
               <button class="detail-action ${favorite.has(currentItem.id) ? 'active' : ''}" data-toggle="favorite">${icon('favorite', favorite.has(currentItem.id))}<span>Вибране</span></button>
               <button class="detail-action ${liked.has(currentItem.id) ? 'active liked' : ''}" data-toggle="liked">${icon('liked', liked.has(currentItem.id))}<span>Улюблене</span></button>
+              <button class="detail-action viewed-action" data-viewed-increment title="Додати один перегляд"><b>＋1</b><span>Переглянуто</span><strong>${Number(currentItem.viewed || 0)}</strong></button>
             </div>
             ${missingMedia ? `<div class="media-repair-actions">${missingMedia}</div>` : ''}
           </div>
@@ -674,7 +700,7 @@ function openEditModal() {
   modal.querySelector('#editStatusSuggestions').innerHTML = [...new Set([...(apiOptions.statuses || []), ...STATUS_OPTIONS])]
     .map(value => `<button type="button" data-edit-set="${escapeHtml(value)}" data-edit-target="editStatusValue">${escapeHtml(value)}</button>`).join('');
   modal.querySelector('#editGroupSuggestions').innerHTML = [...new Set(['Без групи', ...(apiOptions.groups || [])])]
-    .map(value => `<button type="button" data-edit-set="${escapeHtml(value)}" data-edit-target="editGroupValue">${escapeHtml(value)}</button>`).join('');
+    .map(value => `<button type="button" class="edit-group-suggestion" style="${groupTagStyle(value)}" data-edit-set="${escapeHtml(value)}" data-edit-target="editGroupValue">${escapeHtml(value)}</button>`).join('');
 
   const descPreview = (currentItem.description || '').slice(0, 420);
   modal.querySelector('#editExistingCards').innerHTML = [
@@ -827,13 +853,35 @@ root.addEventListener('click', async e => {
   const deleteBtn = e.target.closest('[data-delete-title]');
   if (deleteBtn) { openDeleteModal(); return; }
 
+  const viewedBtn = e.target.closest('[data-viewed-increment]');
+  if (viewedBtn && currentItem && !viewedBtn.disabled) {
+    viewedBtn.disabled = true;
+    try {
+      const response = await fetch(`/api/anime/viewed?id=${encodeURIComponent(currentItem.id)}`, { method:'POST', headers:{Accept:'application/json'}, cache:'no-store' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      if (payload.options) apiOptions = payload.options;
+      if (payload.item) currentItem = payload.item;
+      else currentItem.viewed = Number(payload.viewed || currentItem.viewed || 0);
+      renderItem(currentItem);
+      toastMessage(`Переглянуто: ${Number(currentItem.viewed || 0)}`);
+    } catch (error) { toastMessage(error.message || 'Не вдалося оновити лічильник'); }
+    return;
+  }
+
   const toggleBtn = e.target.closest('[data-toggle]');
-  if (toggleBtn && currentItem) {
-    const set = toggleBtn.dataset.toggle === 'favorite' ? favorite : liked;
-    if (set.has(currentItem.id)) set.delete(currentItem.id); else set.add(currentItem.id);
-    persistState();
-    renderItem(currentItem);
-    toastMessage('Збережено');
+  if (toggleBtn && currentItem && toggleBtn.dataset.busy !== '1') {
+    const kind = toggleBtn.dataset.toggle === 'favorite' ? 'favorite' : 'liked';
+    const next = !Boolean(currentItem[kind]);
+    toggleBtn.dataset.busy = '1';
+    toggleBtn.disabled = true;
+    try {
+      await patchCurrent({ [kind]: next }, kind === 'favorite' ? 'Вибране збережено в Notion' : 'Улюблене збережено в Notion');
+    } catch (error) {
+      toggleBtn.disabled = false;
+      delete toggleBtn.dataset.busy;
+      toastMessage(error.message || 'Не вдалося зберегти в Notion');
+    }
     return;
   }
 

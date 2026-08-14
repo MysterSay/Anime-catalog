@@ -1,6 +1,6 @@
 let db = [];
 let apiSources = [];
-let apiOptions = { statuses: [], groups: [] };
+let apiOptions = { statuses: [], groups: [], groupOptions: [] };
 let discoverSelected = null;
 
 const catalog = document.getElementById('catalog');
@@ -26,6 +26,10 @@ const catalogTitle = document.getElementById('catalogTitle');
 const quickButtons = [...document.querySelectorAll('[data-quick]')];
 const toast = document.getElementById('toast');
 const openAddTitle = document.getElementById('openAddTitle');
+const openSettings = document.getElementById('openSettings');
+const settingsModal = document.getElementById('settingsModal');
+const settingsGroupsList = document.getElementById('settingsGroupsList');
+const settingsStatus = document.getElementById('settingsStatus');
 const discoverModal = document.getElementById('discoverModal');
 const discoverSearchForm = document.getElementById('discoverSearchForm');
 const discoverSearchInput = document.getElementById('discoverSearchInput');
@@ -47,6 +51,20 @@ const STATUS_THEME = {
   'Кинуто': { solid: '#d688a3', glow: 'rgba(214,136,163,.34)', border: 'rgba(214,136,163,.55)' },
   'Без статусу': { solid: '#d5dceb', glow: 'rgba(213,220,235,.22)', border: 'rgba(213,220,235,.4)' },
 };
+const GROUP_COLOR_THEME = {
+  default:{solid:'#a8b0bf',soft:'rgba(168,176,191,.12)',border:'rgba(168,176,191,.28)'},
+  gray:{solid:'#9b9a97',soft:'rgba(155,154,151,.13)',border:'rgba(155,154,151,.30)'},
+  brown:{solid:'#b08468',soft:'rgba(176,132,104,.14)',border:'rgba(176,132,104,.30)'},
+  orange:{solid:'#d99058',soft:'rgba(217,144,88,.14)',border:'rgba(217,144,88,.32)'},
+  yellow:{solid:'#d8b55b',soft:'rgba(216,181,91,.14)',border:'rgba(216,181,91,.32)'},
+  green:{solid:'#6fbe8b',soft:'rgba(111,190,139,.14)',border:'rgba(111,190,139,.32)'},
+  blue:{solid:'#65a8df',soft:'rgba(101,168,223,.14)',border:'rgba(101,168,223,.32)'},
+  purple:{solid:'#a589d4',soft:'rgba(165,137,212,.14)',border:'rgba(165,137,212,.32)'},
+  pink:{solid:'#d879a2',soft:'rgba(216,121,162,.14)',border:'rgba(216,121,162,.32)'},
+  red:{solid:'#d76868',soft:'rgba(215,104,104,.14)',border:'rgba(215,104,104,.32)'},
+};
+const GROUP_COLOR_ORDER = ['default','gray','brown','orange','yellow','green','blue','purple','pink','red'];
+
 
 const mergeFirstId = new URLSearchParams(location.search).get('merge') || '';
 const mergeMode = Boolean(mergeFirstId);
@@ -65,8 +83,8 @@ const state = {
   excludeStatus: saved.excludeStatus || 'all',
   hideFavorite: Boolean(saved.hideFavorite),
   hideLiked: Boolean(saved.hideLiked),
-  favorite: new Set(Array.isArray(saved.favorite) ? saved.favorite : []),
-  liked: new Set(Array.isArray(saved.liked) ? saved.liked : []),
+  favorite: new Set(),
+  liked: new Set(),
 };
 
 function saveState() {
@@ -92,6 +110,18 @@ function normalize(value) {
 
 function statusTheme(status) {
   return STATUS_THEME[status] || STATUS_THEME['Без статусу'];
+}
+
+function groupOption(name) {
+  return (apiOptions.groupOptions || []).find(option => normalize(option.name) === normalize(name)) || null;
+}
+function groupTheme(name) {
+  const color = groupOption(name)?.color || 'default';
+  return GROUP_COLOR_THEME[color] || GROUP_COLOR_THEME.default;
+}
+function groupTagStyle(name) {
+  const t = groupTheme(name);
+  return `--group-accent:${t.solid};--group-soft:${t.soft};--group-border:${t.border}`;
 }
 
 function syncExcludeControls() {
@@ -158,12 +188,18 @@ function syncCustomSelect(wrapper) {
     trigger.setAttribute('aria-label', `${label}: ${selectedText}`);
   }
 
-  menu.innerHTML = [...select.options].map(option => `
+  const isGroupSelect = selectId === 'groupFilter' || selectId === 'excludeGroupFilter';
+  menu.innerHTML = [...select.options].map(option => {
+    const group = isGroupSelect && option.value !== 'all' ? groupOption(option.value) : null;
+    const theme = group ? (GROUP_COLOR_THEME[group.color] || GROUP_COLOR_THEME.default) : null;
+    const dot = theme ? `<b class="group-color-dot" style="--dot:${theme.solid}"></b>` : '';
+    return `
     <button class="custom-select-option ${option.value === select.value ? 'selected' : ''}" type="button" role="option"
       aria-selected="${option.value === select.value ? 'true' : 'false'}" data-custom-option="${escapeHtml(option.value)}">
-      <span>${escapeHtml(option.textContent)}</span>
+      <span class="custom-option-label">${dot}<span>${escapeHtml(option.textContent)}</span></span>
       <i>✓</i>
-    </button>`).join('');
+    </button>`;
+  }).join('');
 }
 
 function syncCustomSelects() {
@@ -194,7 +230,7 @@ function populateFilters() {
   if (excludeGroupFilter) excludeGroupFilter.innerHTML = '<option value="all">Нічого не приховувати</option>';
   if (excludeStatusFilter) excludeStatusFilter.innerHTML = '<option value="all">Нічого не приховувати</option>';
 
-  const groups = [...new Set(db.map(x => x.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+  const groups = [...new Set([...(apiOptions.groups || []), ...db.map(x => x.group).filter(Boolean)])].sort((a, b) => a.localeCompare(b, 'uk'));
   groups.forEach(group => {
     const option = `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`;
     groupFilter.insertAdjacentHTML('beforeend', option);
@@ -297,7 +333,7 @@ function cardTemplate(item, index) {
       <div class="card-body">
         <h3>${escapeHtml(item.title)}</h3>
         <div class="card-meta">
-          <span>${escapeHtml(item.group || 'Без групи')}</span>
+          <span class="card-group-tag" style="${groupTagStyle(item.group || 'Без групи')}">${escapeHtml(item.group || 'Без групи')}</span>
           <span>${formatDate(item.addedAt)}</span>
         </div>
         <p>${escapeHtml(item.description || 'Опис поки відсутній.')}</p>
@@ -402,8 +438,11 @@ async function loadAnime() {
     apiSources = Array.isArray(payload.sources) ? payload.sources : [];
     apiOptions = payload.options && typeof payload.options === 'object' ? payload.options : apiOptions;
 
-    if (!Array.isArray(saved.favorite)) db.filter(x => x.favorite).forEach(x => state.favorite.add(x.id));
-    if (!Array.isArray(saved.liked)) db.filter(x => x.liked).forEach(x => state.liked.add(x.id));
+    state.favorite.clear();
+    state.liked.clear();
+    db.filter(x => x.favorite).forEach(x => state.favorite.add(x.id));
+    db.filter(x => x.liked).forEach(x => state.liked.add(x.id));
+    saveState();
 
     populateFilters();
     render();
@@ -413,18 +452,43 @@ async function loadAnime() {
   }
 }
 
-catalog.addEventListener('click', e => {
+catalog.addEventListener('click', async e => {
   const action = e.target.closest('[data-action]');
-  if (!action) return;
+  if (!action || action.dataset.busy === '1') return;
   e.preventDefault();
   e.stopPropagation();
   const card = action.closest('[data-id]');
-  const id = card.dataset.id;
-  const set = action.dataset.action === 'favorite' ? state.favorite : state.liked;
-  if (set.has(id)) set.delete(id); else set.add(id);
-  saveState();
+  const id = card?.dataset.id;
+  if (!id) return;
+  const kind = action.dataset.action === 'favorite' ? 'favorite' : 'liked';
+  const set = kind === 'favorite' ? state.favorite : state.liked;
+  const next = !set.has(id);
+  action.dataset.busy = '1';
+  action.disabled = true;
+  if (next) set.add(id); else set.delete(id);
   render();
-  showToast(action.dataset.action === 'favorite' ? 'Вибране оновлено' : 'Улюблене оновлено');
+  try {
+    const response = await fetch(`/api/anime?id=${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ [kind]: next }),
+      cache: 'no-store',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const item = payload.item;
+    const actual = Boolean(item?.[kind]);
+    if (actual) set.add(id); else set.delete(id);
+    const dbItem = db.find(x => x.id === id);
+    if (dbItem) dbItem[kind] = actual;
+    saveState();
+    render();
+    showToast(kind === 'favorite' ? 'Вибране збережено в Notion' : 'Улюблене збережено в Notion');
+  } catch (error) {
+    if (next) set.delete(id); else set.add(id);
+    render();
+    showToast(error.message || 'Не вдалося зберегти в Notion');
+  }
 });
 
 searchInput.addEventListener('input', () => { state.search = searchInput.value.trim(); render(); });
@@ -773,6 +837,94 @@ async function executeDiscoverSearch(q) {
   }
 }
 
+
+function setSettingsStatus(message = '', type = '') {
+  if (!settingsStatus) return;
+  settingsStatus.textContent = message;
+  settingsStatus.className = `discover-status ${type}`.trim();
+}
+
+function renderSettingsGroups() {
+  if (!settingsGroupsList) return;
+  const groups = Array.isArray(apiOptions.groupOptions) ? apiOptions.groupOptions : [];
+  if (!groups.length) {
+    settingsGroupsList.innerHTML = '<div class="settings-empty">У Notion ще немає груп.</div>';
+    return;
+  }
+  settingsGroupsList.innerHTML = groups.map(group => {
+    const color = GROUP_COLOR_THEME[group.color] || GROUP_COLOR_THEME.default;
+    return `<article class="group-setting-row" data-group-setting="${escapeHtml(group.id || group.name)}" data-group-id="${escapeHtml(group.id || '')}" data-group-old-name="${escapeHtml(group.name)}">
+      <div class="group-setting-main">
+        <span class="group-setting-preview" style="--group-accent:${color.solid};--group-soft:${color.soft};--group-border:${color.border}">${escapeHtml(group.name)}</span>
+        <input class="group-setting-name" type="text" value="${escapeHtml(group.name)}" aria-label="Назва групи ${escapeHtml(group.name)}" />
+      </div>
+      <div class="group-color-palette" role="group" aria-label="Колір групи ${escapeHtml(group.name)}">
+        ${GROUP_COLOR_ORDER.map(colorName => {
+          const t = GROUP_COLOR_THEME[colorName];
+          return `<button class="group-color-swatch ${colorName === group.color ? 'selected' : ''}" type="button" data-group-color="${colorName}" style="--swatch:${t.solid}" title="${colorName}"></button>`;
+        }).join('')}
+      </div>
+      <button class="group-setting-save" type="button" data-save-group>Зберегти</button>
+    </article>`;
+  }).join('');
+}
+
+function openSettingsModal() {
+  if (!settingsModal) return;
+  renderSettingsGroups();
+  setSettingsStatus('');
+  settingsModal.classList.remove('hidden');
+  settingsModal.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('modal-open');
+}
+function closeSettingsModal() {
+  if (!settingsModal) return;
+  settingsModal.classList.add('hidden');
+  settingsModal.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('modal-open');
+}
+
+async function saveGroupSetting(row) {
+  const button = row.querySelector('[data-save-group]');
+  const input = row.querySelector('.group-setting-name');
+  const selected = row.querySelector('.group-color-swatch.selected');
+  const name = input?.value.trim() || '';
+  const color = selected?.dataset.groupColor || 'default';
+  if (!name) return setSettingsStatus('Назва групи не може бути порожньою.', 'error');
+  button.disabled = true;
+  setSettingsStatus(`Оновлюю «${row.dataset.groupOldName}» у Notion…`, 'loading');
+  try {
+    const response = await fetch('/api/groups', {
+      method:'PATCH', headers:{'Content-Type':'application/json',Accept:'application/json'},
+      body:JSON.stringify({ id:row.dataset.groupId, oldName:row.dataset.groupOldName, name, color }), cache:'no-store',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    apiOptions = { ...apiOptions, groups: payload.groups || [], groupOptions: payload.groupOptions || [] };
+    setSettingsStatus(`Готово. Оновлено записів: ${payload.migrated || 0}.`, 'ok');
+    await loadAnime();
+    renderSettingsGroups();
+  } catch (error) {
+    setSettingsStatus(error.message || 'Не вдалося оновити групу.', 'error');
+  } finally { button.disabled = false; }
+}
+
+openSettings?.addEventListener('click', openSettingsModal);
+settingsModal?.addEventListener('click', e => {
+  if (e.target.closest('[data-settings-close]')) return closeSettingsModal();
+  const swatch = e.target.closest('[data-group-color]');
+  if (swatch) {
+    const row = swatch.closest('[data-group-setting]');
+    row?.querySelectorAll('.group-color-swatch').forEach(el => el.classList.toggle('selected', el === swatch));
+    const theme = GROUP_COLOR_THEME[swatch.dataset.groupColor] || GROUP_COLOR_THEME.default;
+    const preview = row?.querySelector('.group-setting-preview');
+    if (preview) preview.style.cssText = `--group-accent:${theme.solid};--group-soft:${theme.soft};--group-border:${theme.border}`;
+    return;
+  }
+  const save = e.target.closest('[data-save-group]');
+  if (save) saveGroupSetting(save.closest('[data-group-setting]'));
+});
+
 openAddTitle?.addEventListener('click', openDiscoverModal);
 discoverModal?.addEventListener('click', e => {
   if (e.target.closest('[data-discover-close]')) closeDiscoverModal();
@@ -786,6 +938,7 @@ discoverSearchForm?.addEventListener('submit', async e => {
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && discoverModal && !discoverModal.classList.contains('hidden')) closeDiscoverModal();
+  if (e.key === 'Escape' && settingsModal && !settingsModal.classList.contains('hidden')) closeSettingsModal();
 });
 
 loadAnime();

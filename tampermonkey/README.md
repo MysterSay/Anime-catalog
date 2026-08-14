@@ -1,15 +1,10 @@
-# Anime -> Notion Collector v2.0.0
+Anime -> Notion Collector v2.3.0
 
-The userscript is now a thin client of the same Yoru/Python pipeline as the website.
-It no longer stores a Notion integration token and no longer runs 17 catalog scrapers inside the browser.
+Changes:
+- resets third-party select styling to remove repeated wave/chevron backgrounds;
+- adds Notion-backed "Вибране" and "Улюблене" switches;
+- existing titles load Checkbox values from Notion;
+- Update writes status, group, Вибране and Улюблене together;
+- new titles save the two Checkbox values immediately after ingest.
 
-Flow:
-
-1. Detect title + current page URL.
-2. POST to `https://myster-anime.pages.dev/api/process-title-stream`.
-3. Display the same NDJSON progress packets as the website (stage, percentage, catalog).
-4. Receive the final schema-v2 JSON.
-5. POST that JSON to `https://myster-anime.pages.dev/api/ingest`.
-6. Show 100% only after Notion confirms the write.
-
-Install by opening `anime-to-notion-collector-v2.0.0.user.js` with Tampermonkey.
+Requires Yoru/Cloudflare site v5.7+ with Notion Checkbox support.

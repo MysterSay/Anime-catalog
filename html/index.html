@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=5.6" />
+  <link rel="stylesheet" href="styles.css?v=5.9" />
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -34,6 +34,9 @@
       </button>
       <button id="openAddTitle" class="chip-btn add-title-chip" type="button">
         <span>＋ Додати тайтл</span>
+      </button>
+      <button id="openSettings" class="chip-btn settings-chip" type="button">
+        <span>⚙ Налаштувати</span>
       </button>
     </nav>
   </header>
@@ -181,8 +184,29 @@
     </section>
   </div>
 
+
+  <div id="settingsModal" class="modal-shell hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-settings-close></div>
+    <section class="modal-card settings-modal-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <button class="modal-x" type="button" data-settings-close aria-label="Закрити">×</button>
+      <div class="modal-head">
+        <span class="section-kicker">НАЛАШТУВАННЯ</span>
+        <h2 id="settingsTitle">Каталог</h2>
+        <p>Налаштування зберігаються в Notion і підтягуються сайтом та розширенням.</p>
+      </div>
+      <div class="settings-layout">
+        <aside class="settings-nav"><button class="settings-nav-item active" type="button">Групи</button></aside>
+        <section class="settings-content">
+          <div class="settings-section-head"><div><span class="section-kicker">ГРУПИ</span><h3>Назви та кольори</h3></div></div>
+          <div id="settingsStatus" class="discover-status"></div>
+          <div id="settingsGroupsList" class="settings-groups-list"></div>
+        </section>
+      </div>
+    </section>
+  </div>
+
   <div id="toast" class="toast" role="status"></div>
 
-  <script src="app.js?v=5.6"></script>
+  <script src="app.js?v=5.9"></script>
 </body>
 </html>

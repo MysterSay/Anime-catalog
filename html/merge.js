@@ -8,10 +8,6 @@ const FALLBACK_IMAGE = 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://
 let rightItem = null;
 let leftItem = null;
 let busy = false;
-let saved = {};
-try { saved = JSON.parse(localStorage.getItem('yoru-state') || '{}'); } catch { saved = {}; }
-const favorite = new Set(Array.isArray(saved.favorite) ? saved.favorite : []);
-const liked = new Set(Array.isArray(saved.liked) ? saved.liked : []);
 const choices = { title: 'right', poster: 'right', marks: 'right', banner: 'right', description: 'right' };
 
 function escapeHtml(value = '') {
@@ -52,11 +48,11 @@ function snippet(text, max = 260) {
 }
 
 function sideFavorite(item) {
-  return favorite.has(item.id) || (!Array.isArray(saved.favorite) && item.favorite);
+  return Boolean(item?.favorite);
 }
 
 function sideLiked(item) {
-  return liked.has(item.id) || (!Array.isArray(saved.liked) && item.liked);
+  return Boolean(item?.liked);
 }
 
 function sideCard(field, side, item) {
@@ -152,18 +148,6 @@ function selectSide(field, side) {
   render();
 }
 
-function updateLocalMarks() {
-  const selected = choices.marks === 'left' ? leftItem : rightItem;
-  const selectedFavorite = sideFavorite(selected);
-  const selectedLiked = sideLiked(selected);
-  favorite.delete(leftItem.id);
-  liked.delete(leftItem.id);
-  if (selectedFavorite) favorite.add(rightItem.id); else favorite.delete(rightItem.id);
-  if (selectedLiked) liked.add(rightItem.id); else liked.delete(rightItem.id);
-  saved.favorite = [...favorite];
-  saved.liked = [...liked];
-  localStorage.setItem('yoru-state', JSON.stringify(saved));
-}
 
 async function submitMerge() {
   if (busy) return;
@@ -178,7 +162,6 @@ async function submitMerge() {
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-    updateLocalMarks();
     location.href = `title.html?id=${encodeURIComponent(payload.keptId || rightItem.id)}`;
   } catch (error) {
     busy = false;
@@ -218,14 +201,6 @@ async function load() {
     if (!leftResponse.ok) throw new Error(leftPayload.error || 'Не вдалося завантажити другий тайтл.');
     rightItem = rightPayload.item;
     leftItem = leftPayload.item;
-    if (!Array.isArray(saved.favorite)) {
-      if (rightItem.favorite) favorite.add(rightItem.id);
-      if (leftItem.favorite) favorite.add(leftItem.id);
-    }
-    if (!Array.isArray(saved.liked)) {
-      if (rightItem.liked) liked.add(rightItem.id);
-      if (leftItem.liked) liked.add(leftItem.id);
-    }
     render();
   } catch (error) {
     root.innerHTML = `<div class="merge-loading"><h1>Не вдалося відкрити об’єднання</h1><p>${escapeHtml(error.message || 'Невідома помилка')}</p><a href="index.html">Повернутися в каталог</a></div>`;

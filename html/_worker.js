@@ -8,6 +8,7 @@ const CORE_PROCESS_STREAM_URL = 'https://anime-catalog-flame.vercel.app/api/proc
 const CORE_SEARCH_URL = 'https://anime-catalog-flame.vercel.app/api/search';
 
 const TITLE_STATUS_OPTIONS = ['Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто'];
+const NOTION_SELECT_COLORS = ['default','gray','brown','orange','yellow','green','blue','purple','pink','red'];
 const CATALOG_GROUPS = {
   RU: ['jut-su.net', 'ru.yummyani.me', 'crunchyroll.com', 'shikimori.io', 'animevost.org', 'jutsu.tv', 'jut.su', 'animego.studio', 'anilibria.tv'],
   UA: ['uaserials.com', 'uachan.com', 'anihub.in.ua', 'amanogawa.space', 'animeon.club', 'anidesu.net', 'mikai.me', 'anitube.in.ua'],
@@ -40,6 +41,9 @@ const NOTION_PROPERTIES = {
   sourceUrl: 'Сторінка-джерело',
   key: 'Ключ',
   addedAt: 'Додано',
+  favorite: 'Вибране',
+  liked: 'Улюблене',
+  viewed: 'Переглянуто',
 };
 
 class HttpError extends Error {
@@ -277,6 +281,7 @@ function getMappedEntries(page) {
     addedEntry: findProperty(entries, ['Дата додавання', 'Added At', 'Added', 'Додано', 'Created', 'Created time'], ['date', 'created_time', 'last_edited_time']),
     favoriteEntry: findProperty(entries, ['Вибране', 'Favorite', 'Bookmark'], ['checkbox', 'select', 'status', 'rich_text']),
     likedEntry: findProperty(entries, ['Улюблене', 'Liked', 'Loved', 'Love'], ['checkbox', 'select', 'status', 'rich_text']),
+    viewedEntry: findProperty(entries, ['Переглянуто', 'Viewed', 'Watch count', 'Watch Count'], ['number']),
   };
 }
 
@@ -289,8 +294,9 @@ function mapPageSummary(page) {
   const statusProp = props[NOTION_PROPERTIES.status] || null;
   const groupProp = props[NOTION_PROPERTIES.group] || null;
   const addedProp = props[NOTION_PROPERTIES.addedAt] || null;
-  const favoriteProp = props['Вибране'] || props['Favorite'] || props['Bookmark'] || null;
-  const likedProp = props['Улюблене'] || props['Liked'] || props['Loved'] || props['Love'] || null;
+  const favoriteProp = props[NOTION_PROPERTIES.favorite] || props['Favorite'] || props['Bookmark'] || null;
+  const likedProp = props[NOTION_PROPERTIES.liked] || props['Liked'] || props['Loved'] || props['Love'] || null;
+  const viewedProp = props[NOTION_PROPERTIES.viewed] || null;
   const posterRaw = fileUrl(posterProp);
   const fallbackPoster = iconUrl(page) || coverUrl(page);
   return {
@@ -302,6 +308,7 @@ function mapPageSummary(page) {
     addedAt: textValue(addedProp) || page.created_time || page.last_edited_time || '',
     favorite: boolValue(favoriteProp),
     liked: boolValue(likedProp),
+    viewed: Number(viewedProp?.number || 0),
     description: textValue(descriptionProp),
   };
 }
@@ -310,7 +317,7 @@ function mapPage(page) {
   const m = getMappedEntries(page);
   const excludedNames = new Set([
     m.titleEntry?.[0], m.posterEntry?.[0], m.bannerEntry?.[0], m.descriptionEntry?.[0], m.originalEntry?.[0], m.englishEntry?.[0], m.russianEntry?.[0], m.aliasesEntry?.[0], m.keyEntry?.[0],
-    m.statusEntry?.[0], m.groupEntry?.[0], m.addedEntry?.[0], m.favoriteEntry?.[0], m.likedEntry?.[0],
+    m.statusEntry?.[0], m.groupEntry?.[0], m.addedEntry?.[0], m.favoriteEntry?.[0], m.likedEntry?.[0], m.viewedEntry?.[0],
   ].filter(Boolean));
   const posterRaw = fileUrl(m.posterEntry?.[1]);
   const bannerRaw = fileUrl(m.bannerEntry?.[1]);
@@ -333,6 +340,7 @@ function mapPage(page) {
     addedAt: textValue(m.addedEntry?.[1]) || page.created_time || page.last_edited_time || '',
     favorite: boolValue(m.favoriteEntry?.[1]),
     liked: boolValue(m.likedEntry?.[1]),
+    viewed: Number(m.viewedEntry?.[1]?.number || 0),
     links: extractLinks(m.entries, excludedNames),
     notionUrl: safeHttpUrl(page.url || ''),
   };
@@ -379,6 +387,12 @@ async function resolveDatabaseSources(env) {
   return { databaseId, database, sources };
 }
 
+
+function isCompletedStatus(value) {
+  const key = String(value || '').trim().toLocaleLowerCase('uk-UA');
+  return key === 'переглянув' || key === 'переглянуто' || key === 'completed' || key === 'watched';
+}
+
 function compactId(value) { return String(value || '').replace(/-/g, '').toLowerCase(); }
 
 async function getWriteSource(env, resolved = null) {
@@ -419,7 +433,7 @@ async function queryDatabasePages(env) {
 
 function schemaOptionsFromSources(sources) {
   const statuses = new Set(TITLE_STATUS_OPTIONS);
-  const groups = new Set();
+  const groups = new Map();
   for (const source of sources || []) {
     for (const [name, prop] of Object.entries(source?.properties || {})) {
       if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.status)) {
@@ -427,13 +441,21 @@ function schemaOptionsFromSources(sources) {
         if (prop?.type === 'select') for (const option of prop.select?.options || []) if (option?.name) statuses.add(option.name);
       }
       if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.group)) {
-        if (prop?.type === 'select') for (const option of prop.select?.options || []) if (option?.name) groups.add(option.name);
-        if (prop?.type === 'multi_select') for (const option of prop.multi_select?.options || []) if (option?.name) groups.add(option.name);
-        if (prop?.type === 'status') for (const option of prop.status?.options || []) if (option?.name) groups.add(option.name);
+        const options = prop?.type === 'select' ? (prop.select?.options || []) : prop?.type === 'multi_select' ? (prop.multi_select?.options || []) : prop?.type === 'status' ? (prop.status?.options || []) : [];
+        for (const option of options) {
+          if (!option?.name) continue;
+          const key = normalizeName(option.name);
+          if (!groups.has(key)) groups.set(key, { id: option.id || '', name: option.name, color: option.color || 'default', sourceId: source.id || '' });
+        }
       }
     }
   }
-  return { statuses: [...statuses], groups: [...groups].sort((a, b) => a.localeCompare(b, 'uk')) };
+  const groupOptions = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+  return {
+    statuses: [...statuses],
+    groups: groupOptions.map(option => option.name),
+    groupOptions,
+  };
 }
 
 function richTextValue(value) {
@@ -793,6 +815,9 @@ async function ensureWritableSchema(env, source) {
     [NOTION_PROPERTIES.sourceUrl]: { url: {} },
     [NOTION_PROPERTIES.key]: { rich_text: {} },
     [NOTION_PROPERTIES.addedAt]: { date: {} },
+    [NOTION_PROPERTIES.favorite]: { checkbox: {} },
+    [NOTION_PROPERTIES.liked]: { checkbox: {} },
+    [NOTION_PROPERTIES.viewed]: { number: { format: 'number' } },
   };
   for (const [name, config] of Object.entries(required)) if (!properties[name]) additions[name] = config;
   for (const domain of SITE_PROPERTIES) if (!properties[domain]) additions[domain] = { rich_text: {} };
@@ -822,6 +847,142 @@ async function ensureGroupOption(env, source, groupName) {
     }),
   });
   return notionFetch(env, `/data_sources/${current.id}`);
+}
+
+
+function groupSelectProperty(source) {
+  return Object.entries(source?.properties || {}).find(([name, prop]) => normalizeName(name) === normalizeName(NOTION_PROPERTIES.group) && prop?.type === 'select') || null;
+}
+
+async function patchSelectSchema(env, source, prop, options) {
+  await notionFetch(env, `/data_sources/${source.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      properties: {
+        [prop.id || NOTION_PROPERTIES.group]: { select: { options } },
+      },
+    }),
+  });
+  return notionFetch(env, `/data_sources/${source.id}`);
+}
+
+async function queryPagesWithGroup(env, sourceId, propertyName, groupName) {
+  const pages = [];
+  let cursor = null;
+  do {
+    const body = {
+      page_size: 100,
+      filter: { property: propertyName, select: { equals: groupName } },
+    };
+    if (cursor) body.start_cursor = cursor;
+    const result = await notionFetch(env, `/data_sources/${sourceId}/query`, { method: 'POST', body: JSON.stringify(body) });
+    pages.push(...(result.results || []).filter(item => item?.object === 'page'));
+    cursor = result.has_more ? result.next_cursor : null;
+  } while (cursor && pages.length < 10000);
+  return pages;
+}
+
+async function migratePagesGroup(env, pages, propertyName, targetName) {
+  const queue = [...pages];
+  const workers = Array.from({ length: Math.min(5, queue.length || 1) }, async () => {
+    while (queue.length) {
+      const page = queue.shift();
+      if (!page?.id) continue;
+      await notionFetch(env, `/pages/${page.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ properties: { [propertyName]: { select: targetName ? { name: targetName } : null } } }),
+      });
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function updateGroupOption(env, source, requested) {
+  let current = await ensureWritableSchema(env, source);
+  let entry = groupSelectProperty(current);
+  if (!entry) throw new HttpError(400, 'Поле «Група» має бути типу Select.', '', '', 'group_schema');
+  let [propertyName, prop] = entry;
+  const options = prop.select?.options || [];
+  const old = options.find(option => (requested.id && option.id === requested.id) || (!requested.id && normalizeName(option.name) === normalizeName(requested.oldName || '')));
+  if (!old) throw new HttpError(404, 'Групу не знайдено в схемі Notion.', '', '', 'group_not_found');
+
+  const targetName = String(requested.name || '').trim();
+  const targetColor = NOTION_SELECT_COLORS.includes(requested.color) ? requested.color : (old.color || 'default');
+  if (!targetName) throw new HttpError(400, 'Назва групи не може бути порожньою.', '', '', 'group_name');
+  const duplicate = options.find(option => option.id !== old.id && normalizeName(option.name) === normalizeName(targetName));
+  if (duplicate) throw new HttpError(409, `Група «${targetName}» уже існує.`, '', '', 'group_duplicate');
+  if (targetName === old.name && targetColor === (old.color || 'default')) return { source: current, migrated: 0 };
+
+  const pages = await queryPagesWithGroup(env, current.id, propertyName, old.name);
+  let migrated = pages.length;
+
+  if (normalizeName(targetName) !== normalizeName(old.name)) {
+    current = await patchSelectSchema(env, current, prop, [
+      ...options.map(option => ({ id: option.id })),
+      { name: targetName, color: targetColor },
+    ]);
+    await migratePagesGroup(env, pages, propertyName, targetName);
+    entry = groupSelectProperty(current);
+    prop = entry[1];
+    current = await patchSelectSchema(env, current, prop, (prop.select?.options || []).filter(option => option.id !== old.id).map(option => ({ id: option.id })));
+    return { source: current, migrated };
+  }
+
+  // Notion does not allow changing an existing select option's color directly.
+  // For a color-only change, migrate through a temporary option, recreate the
+  // original name with the requested color, then migrate the pages back.
+  const tempName = `__YORU_${Date.now().toString(36)}__`;
+  current = await patchSelectSchema(env, current, prop, [
+    ...options.map(option => ({ id: option.id })),
+    { name: tempName, color: targetColor },
+  ]);
+  await migratePagesGroup(env, pages, propertyName, tempName);
+
+  entry = groupSelectProperty(current); prop = entry[1];
+  current = await patchSelectSchema(env, current, prop, (prop.select?.options || []).filter(option => option.id !== old.id).map(option => ({ id: option.id })));
+
+  entry = groupSelectProperty(current); prop = entry[1];
+  current = await patchSelectSchema(env, current, prop, [
+    ...(prop.select?.options || []).map(option => ({ id: option.id })),
+    { name: targetName, color: targetColor },
+  ]);
+  await migratePagesGroup(env, pages, propertyName, targetName);
+
+  entry = groupSelectProperty(current); prop = entry[1];
+  const temp = (prop.select?.options || []).find(option => option.name === tempName);
+  if (temp) current = await patchSelectSchema(env, current, prop, (prop.select?.options || []).filter(option => option.id !== temp.id).map(option => ({ id: option.id })));
+  return { source: current, migrated };
+}
+
+async function handleGroupsApi(request, env) {
+  const resolved = await resolveDatabaseSources(env);
+  let source = await getWriteSource(env, resolved);
+  source = await ensureWritableSchema(env, source);
+  if (request.method === 'GET') return json({ ok: true, ...schemaOptionsFromSources([source]) });
+  if (request.method !== 'PATCH') return json({ error: 'Method not allowed' }, 405, { allow: 'GET, PATCH' });
+  const body = await request.json().catch(() => ({}));
+  const result = await updateGroupOption(env, source, body);
+  return json({ ok: true, migrated: result.migrated, ...schemaOptionsFromSources([result.source]) });
+}
+
+async function handleViewedApi(request, env) {
+  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405, { allow: 'POST' });
+  const url = new URL(request.url);
+  const requestedId = url.searchParams.get('id');
+  if (!requestedId) return json({ error: 'Не передано id тайтлу.' }, 400);
+  const page = await notionFetch(env, `/pages/${requestedId}`);
+  const mapped = getMappedEntries(page);
+  const sourceId = page?.parent?.data_source_id;
+  let source = sourceId ? await notionFetch(env, `/data_sources/${sourceId}`) : await getWriteSource(env);
+  source = await ensureWritableSchema(env, source);
+  const name = mapped.viewedEntry?.[0] || NOTION_PROPERTIES.viewed;
+  const current = Number(mapped.viewedEntry?.[1]?.number || 0);
+  const next = Math.max(1, current + 1);
+  const updated = await notionFetch(env, `/pages/${requestedId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ properties: { [name]: { number: next } } }),
+  });
+  return json({ ok: true, viewed: next, item: mapPage(updated), options: schemaOptionsFromSources([source]) });
 }
 
 async function aniListRequest(query, variables) {
@@ -1364,6 +1525,9 @@ function buildCreateProperties(media, payload, translated, siteLinks, source) {
   };
   if (payload.status && payload.status !== 'Без статусу') properties[NOTION_PROPERTIES.status] = { status: { name: payload.status } };
   if (payload.group && payload.group !== 'Без групи') properties[NOTION_PROPERTIES.group] = { select: { name: payload.group } };
+  let initialViewed = Math.max(0, Number(payload.viewed) || 0);
+  if (isCompletedStatus(payload.status) && initialViewed < 1) initialViewed = 1;
+  properties[NOTION_PROPERTIES.viewed] = { number: initialViewed };
   const cover = safeHttpUrl(media?.coverImage?.extraLarge || media?.coverImage?.large || media?.coverImage?.medium || '');
   const banner = safeHttpUrl(media?.bannerImage || '');
   if (cover) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(cover, `${media?.provider || 'anime'}-cover`, mediaProviderId(media));
@@ -1478,6 +1642,8 @@ async function handleMergeAnimeApi(request, env) {
     [NOTION_PROPERTIES.key]: richTextValue(exactCoreTitleKey(mergedOriginal || mergedTitle)),
     [NOTION_PROPERTIES.status]: markItem.status && markItem.status !== 'Без статусу' ? { status: { name: markItem.status } } : { status: null },
     [NOTION_PROPERTIES.group]: markItem.group && markItem.group !== 'Без групи' ? { select: { name: markItem.group } } : { select: null },
+    [NOTION_PROPERTIES.favorite]: { checkbox: Boolean(markItem.favorite) },
+    [NOTION_PROPERTIES.liked]: { checkbox: Boolean(markItem.liked) },
   };
   if (mergedPoster) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(mergedPoster, 'merged-cover');
   if (mergedBanner) properties[NOTION_PROPERTIES.banner] = notionFilesValue(mergedBanner, 'merged-banner');
@@ -1519,12 +1685,23 @@ async function handleAnimeApi(request, env) {
         resolveDatabaseSources(env),
       ]);
       if (!page?.id) return json({ error: 'Тайтл не знайдено.' }, 404);
-      return json({ item: mapPage(page), count: 1, options: schemaOptionsFromSources(resolved.sources) });
+      let optionSources = resolved.sources;
+      const pageSource = resolved.sources.find(source => source.id === page?.parent?.data_source_id) || resolved.sources[0];
+      if (pageSource) {
+        const ensured = await ensureWritableSchema(env, pageSource);
+        optionSources = resolved.sources.map(source => source.id === ensured.id ? ensured : source);
+      }
+      return json({ item: mapPage(page), count: 1, options: schemaOptionsFromSources(optionSources) });
     }
 
     const queried = await queryDatabasePages(env);
+    let optionSources = queried.sources;
+    if (queried.sources[0]) {
+      const ensured = await ensureWritableSchema(env, queried.sources[0]);
+      optionSources = queried.sources.map(source => source.id === ensured.id ? ensured : source);
+    }
     const items = queried.pages.map(mapPageSummary);
-    const options = schemaOptionsFromSources(queried.sources);
+    const options = schemaOptionsFromSources(optionSources);
     return json({ items, count: items.length, databaseId: queried.databaseId, sources: queried.sourceStats, options });
   }
 
@@ -1564,8 +1741,10 @@ async function handleAnimeApi(request, env) {
       properties[name] = richTextChunksValue(body.aliases || '');
     }
 
+    let requestedStatus = null;
     if (Object.prototype.hasOwnProperty.call(body, 'status')) {
       const statusName = String(body.status || '').trim();
+      requestedStatus = statusName;
       const name = mapped.statusEntry?.[0] || NOTION_PROPERTIES.status;
       properties[name] = statusName && statusName !== 'Без статусу' ? { status: { name: statusName } } : { status: null };
     }
@@ -1579,17 +1758,30 @@ async function handleAnimeApi(request, env) {
 
     if (Object.prototype.hasOwnProperty.call(body, 'favorite')) {
       const entry = mapped.favoriteEntry;
-      if (entry) {
-        const value = booleanPropertyValue(entry[1], body.favorite);
-        if (value) properties[entry[0]] = value;
-      }
+      const name = entry?.[0] || NOTION_PROPERTIES.favorite;
+      const prop = entry?.[1] || source?.properties?.[name] || { type: 'checkbox' };
+      const value = booleanPropertyValue(prop, body.favorite);
+      if (value) properties[name] = value;
     }
     if (Object.prototype.hasOwnProperty.call(body, 'liked')) {
       const entry = mapped.likedEntry;
-      if (entry) {
-        const value = booleanPropertyValue(entry[1], body.liked);
-        if (value) properties[entry[0]] = value;
-      }
+      const name = entry?.[0] || NOTION_PROPERTIES.liked;
+      const prop = entry?.[1] || source?.properties?.[name] || { type: 'checkbox' };
+      const value = booleanPropertyValue(prop, body.liked);
+      if (value) properties[name] = value;
+    }
+
+    const currentViewed = Math.max(0, Number(mapped.viewedEntry?.[1]?.number || 0));
+    let nextViewed = Object.prototype.hasOwnProperty.call(body, 'viewed')
+      ? Math.max(0, Number(body.viewed) || 0)
+      : null;
+    if (requestedStatus !== null && isCompletedStatus(requestedStatus)) {
+      const effectiveViewed = nextViewed === null ? currentViewed : nextViewed;
+      if (effectiveViewed < 1) nextViewed = 1;
+    }
+    if (nextViewed !== null) {
+      const name = mapped.viewedEntry?.[0] || NOTION_PROPERTIES.viewed;
+      properties[name] = { number: nextViewed };
     }
 
     if (Object.prototype.hasOwnProperty.call(body, 'posterUrl')) {
@@ -1962,6 +2154,8 @@ function coreTitleData(payload) {
     banner: safeHttpUrl(payload?.banner?.url || ''),
     status: plainTitle(payload?.status || input.status || ''),
     group: plainTitle(payload?.group || input.group || ''),
+    viewed: Math.max(0, Number(payload?.viewed ?? input.viewed) || 0),
+    hasViewed: Object.prototype.hasOwnProperty.call(payload || {}, 'viewed') || Object.prototype.hasOwnProperty.call(input || {}, 'viewed'),
     sourceUrl: safeHttpUrl(input.url || ''),
   };
 }
@@ -1990,6 +2184,9 @@ function buildCoreProperties(payload, source, { includeAddedAt = true } = {}) {
   if (includeAddedAt) properties[NOTION_PROPERTIES.addedAt] = { date: { start: new Date().toISOString() } };
   if (data.status && data.status !== 'Без статусу') properties[NOTION_PROPERTIES.status] = { status: { name: data.status } };
   if (data.group && data.group !== 'Без групи') properties[NOTION_PROPERTIES.group] = { select: { name: data.group } };
+  let coreViewed = Math.max(0, Number(data.viewed) || 0);
+  if (isCompletedStatus(data.status) && coreViewed < 1) coreViewed = 1;
+  properties[NOTION_PROPERTIES.viewed] = { number: coreViewed };
   if (data.cover) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(data.cover, 'core-cover', payload?.meta?.anilist_id || payload?.meta?.mal_id || '');
   if (data.banner) properties[NOTION_PROPERTIES.banner] = notionFilesValue(data.banner, 'core-banner', payload?.meta?.anilist_id || payload?.meta?.mal_id || '');
   if (data.sourceUrl) properties[NOTION_PROPERTIES.sourceUrl] = { url: data.sourceUrl };
@@ -2023,6 +2220,22 @@ async function ingestCorePayload(env, payload) {
   const titleData = coreTitleData(payload);
   if (titleData.group) source = await ensureGroupOption(env, source, titleData.group);
   const built = buildCoreProperties(payload, source, { includeAddedAt: !existing });
+
+  // Do not reset an existing watch counter just because Python core does not carry it.
+  // The only automatic mutation is 0 -> 1 when status becomes "Переглянув".
+  if (existing && existingPage) {
+    const existingMapped = getMappedEntries(existingPage);
+    const currentViewed = Math.max(0, Number(existingMapped.viewedEntry?.[1]?.number || 0));
+    if (!built.data.hasViewed) {
+      if (isCompletedStatus(built.data.status) && currentViewed < 1) {
+        const viewedName = existingMapped.viewedEntry?.[0] || NOTION_PROPERTIES.viewed;
+        delete built.properties[NOTION_PROPERTIES.viewed];
+        built.properties[viewedName] = { number: 1 };
+      } else {
+        delete built.properties[NOTION_PROPERTIES.viewed];
+      }
+    }
+  }
 
   let savedPage;
   if (existing) {
@@ -2302,6 +2515,8 @@ export default {
       if (url.pathname === '/api/ingest' || url.pathname === '/api/anime/import') return await handleIngestApi(request, env);
       if (request.method === 'POST' && url.pathname === '/' && (request.headers.get('content-type') || '').includes('application/json')) return await handleIngestApi(request, env);
       if (url.pathname === '/api/anime/merge') return await handleMergeAnimeApi(request, env);
+      if (url.pathname === '/api/anime/viewed') return await handleViewedApi(request, env);
+      if (url.pathname === '/api/groups') return await handleGroupsApi(request, env);
       if (url.pathname === '/api/anime/upload') return await handleAnimeUploadApi(request, env);
       if (url.pathname === '/api/extension/context') return await handleExtensionContextApi(request, env);
       if (url.pathname === '/api/anime') return await handleAnimeApi(request, env);
@@ -2309,7 +2524,7 @@ export default {
       if (url.pathname === '/api/discover') return await handleDiscoverApi(request, env);
       if (url.pathname === '/api/discover/prepare') return await handleDiscoverPrepareApi(request, env);
       if (url.pathname === '/api/catalog-search') return await handleCatalogSearchApi(request, env);
-      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v5.6-alias-context-url-editor-2026-08-13', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, catalogs: SITE_PROPERTIES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: 'ndjson-v1', coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true, mergeTitles: true, mergeEndpoint: '/api/anime/merge', deleteTitles: true, editTitles: true, uploadEndpoint: '/api/anime/upload', extensionContext: '/api/extension/context', aliasLookupV2: true, editorMediaMode: 'url' });
+      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v5.9-viewed-status-sync-2026-08-14', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, catalogs: SITE_PROPERTIES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: 'ndjson-v1', coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true, mergeTitles: true, mergeEndpoint: '/api/anime/merge', deleteTitles: true, editTitles: true, uploadEndpoint: '/api/anime/upload', extensionContext: '/api/extension/context', aliasLookupV2: true, editorMediaMode: 'url', favoriteStorage: 'notion-checkbox', likedStorage: 'notion-checkbox', viewedStorage: 'notion-number', groupSettings: '/api/groups' });
 
       if (url.pathname === '/api/health') {
         const databaseId = env.NOTION_DATABASE_ID || DEFAULT_DATABASE_ID;
