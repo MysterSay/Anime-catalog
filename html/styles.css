@@ -1823,3 +1823,71 @@ body.modal-open { overflow:hidden; }
   .group-setting-preview { justify-self:start; }
   .group-setting-save { width:100%; }
 }
+
+/* v6.0 season / episode controls */
+.watch-progress-group {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+  width:100%;
+}
+.watch-progress-field {
+  display:grid;
+  gap:7px;
+}
+.watch-progress-label {
+  color:#8fa1b8;
+  font-size:10px;
+  font-weight:800;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+.watch-number-field {
+  display:grid;
+  grid-template-columns:42px minmax(0,1fr) 42px;
+  align-items:center;
+  min-height:42px;
+  overflow:hidden;
+  border:1px solid rgba(255,255,255,.11);
+  border-radius:13px;
+  background:rgba(15,19,29,.76);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.025);
+}
+.watch-number-field button {
+  align-self:stretch;
+  border:0;
+  background:rgba(255,255,255,.025);
+  color:#9ca8ba;
+  font:800 22px/1 system-ui;
+  cursor:pointer;
+  transition:.18s ease;
+}
+.watch-number-field button:first-child { border-right:1px solid rgba(255,255,255,.08); }
+.watch-number-field button:last-child { border-left:1px solid rgba(255,255,255,.08); }
+.watch-number-field button:hover {
+  color:#fff;
+  background:rgba(112,201,255,.09);
+}
+.watch-number-field button:disabled { opacity:.45; cursor:default; }
+.watch-number-field input {
+  width:100%;
+  min-width:0;
+  height:40px;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:#f3f6fb;
+  text-align:center;
+  font:800 14px/1 system-ui;
+  appearance:textfield;
+  -moz-appearance:textfield;
+}
+.watch-number-field input::-webkit-inner-spin-button,
+.watch-number-field input::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+.watch-number-field:focus-within {
+  border-color:rgba(112,201,255,.34);
+  box-shadow:0 0 0 3px rgba(112,201,255,.07);
+}
+@media (max-width:720px) {
+  .watch-progress-group { grid-template-columns:1fr; }
+}

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Anime -> Notion Collector
 // @namespace    myster.anime.notion
-// @version      2.5.0
+// @version      2.7.0
 // @description  Thin client for Anime Title Core: streams progress packets, runs full catalog search on Vercel, then imports schema-v2 JSON into Notion through Yoru.
 // @author       Myster
 //
@@ -57,6 +57,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
 // @grant        GM_notification
+// @grant        GM_setClipboard
 //
 // @run-at       document-idle
 // ==/UserScript==
@@ -64,7 +65,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.5.0';
+  const VERSION = '2.7.0';
   const BASE = 'https://myster-anime.pages.dev';
   const STREAM_URL = `${BASE}/api/process-title-stream`;
   const INGEST_URL = `${BASE}/api/ingest`;
@@ -86,6 +87,11 @@
     likedInput: null,
     viewedButton: null,
     viewed: 0,
+    watchProgress: null,
+    seasonInput: null,
+    episodeInput: null,
+    season: 0,
+    episode: 0,
     startButton: null,
     renameButton: null,
     lookupButton: null,
@@ -94,6 +100,8 @@
     progressPercent: null,
     progressText: null,
     log: null,
+    copyLogButton: null,
+    logEntries: [],
     existingItem: null,
     options: { statuses: [], groups: [], groupOptions: [] },
   };
@@ -136,19 +144,142 @@
     return '';
   }
 
+  function isJutSu() {
+    return /(^|\.)jut\.su$/i.test(location.hostname);
+  }
+
+  function cleanJutSuDisplayTitle(value) {
+    let text = cleanTitle(value);
+    text = text
+      .replace(/^смотреть\s+/i, '')
+      .replace(/\s+(?:все\s+серии(?:\s+и\s+сезоны)?|все\s+сезоны)\s*$/i, '')
+      .replace(/\s+смотреть\s+онлайн.*$/i, '')
+      .trim();
+    return text;
+  }
+
+  function extractJutSuOriginal() {
+    // Old/classic jut.su layout: the canonical romanized title is inside
+    // .watch_l > .under_video_additional.the_hildi and follows the label
+    // "Оригинальное название:" in a <b>/<strong> element.
+    const watchInfoBlocks = [
+      ...document.querySelectorAll('.watch_l .under_video_additional.the_hildi'),
+    ];
+    for (const container of watchInfoBlocks) {
+      const full = cleanTitle(container.textContent || '');
+      if (!/оригинальн(?:ое|ая)\s+названи[ея]/i.test(full)) continue;
+
+      for (const bold of container.querySelectorAll('b, strong')) {
+        const value = cleanTitle(bold.textContent || '');
+        if (!value || value.length < 3) continue;
+
+        let prefix = '';
+        let node = bold.previousSibling;
+        while (node && prefix.length < 240) {
+          prefix = `${node.textContent || ''} ${prefix}`;
+          if (/оригинальн(?:ое|ая)\s+названи[ея]/i.test(prefix)) break;
+          node = node.previousSibling;
+        }
+        if (/оригинальн(?:ое|ая)\s+названи[ея]/i.test(prefix)) return value;
+      }
+
+      const match = full.match(/оригинальн(?:ое|ая)\s+названи[ея]\s*[:—-]?\s*([^\n\r]{3,220})/i);
+      if (match) {
+        const value = cleanTitle(match[1]).split(/возрастной рейтинг|жанр|годы выпуска|описание/i)[0].trim();
+        if (value) return value;
+      }
+    }
+
+    // New jut.su / jut-su style pages.
+    const direct = firstText([
+      '.jutsu-page__original',
+      '.jutsu-page__title-text .jutsu-page__original',
+      '[class*="jutsu-page__original"]',
+    ]);
+    if (direct) return direct;
+
+    // Generic fallback, only after the exact .watch_l selector above.
+    const containers = [
+      ...document.querySelectorAll('.under_video_additional, .jutsu-page__info, .jutsu-page__meta, #dle-content, main'),
+    ];
+    for (const container of containers) {
+      const full = cleanTitle(container.textContent || '');
+      if (!/оригинальн(?:ое|ая)\s+названи[ея]/i.test(full)) continue;
+
+      const bolds = [...container.querySelectorAll('b, strong')];
+      for (const bold of bolds) {
+        const value = cleanTitle(bold.textContent || '');
+        if (!value || value.length < 3) continue;
+        const before = cleanTitle((bold.previousSibling?.textContent || '') + ' ' + (bold.parentElement?.textContent || ''));
+        if (/оригинальн(?:ое|ая)\s+названи[ея]/i.test(before)) return value;
+      }
+
+      const match = full.match(/оригинальн(?:ое|ая)\s+названи[ея]\s*[:—-]?\s*([^\n\r]{3,220})/i);
+      if (match) {
+        const value = cleanTitle(match[1]).split(/возрастной рейтинг|жанр|годы выпуска|описание/i)[0].trim();
+        if (value) return value;
+      }
+    }
+    return '';
+  }
+
+  function extractJutSuTitle() {
+    const direct = firstText([
+      '.jutsu-page__title-text h1',
+      '.jutsu-page__title h1',
+      '.jutsu-page__header h1',
+      'main h1',
+      'article h1',
+      'h1',
+    ]);
+    const cleaned = cleanJutSuDisplayTitle(direct);
+    if (cleaned && !/^смотреть$/i.test(cleaned)) return cleaned;
+
+    const og = cleanJutSuDisplayTitle(metaContent(['meta[property="og:title"]', 'meta[name="twitter:title"]']));
+    if (og) return og;
+    return '';
+  }
+
+  function jutSuCanonicalUrl() {
+    if (!isJutSu()) return location.href;
+    const parts = location.pathname.split('/').filter(Boolean);
+    if (parts.length >= 2 && /^season-?\d+/i.test(parts[1])) {
+      return `${location.origin}/${parts[0]}/`;
+    }
+    if (parts.length >= 2 && /episode-?\d+/i.test(parts[1])) {
+      return `${location.origin}/${parts[0]}/`;
+    }
+    if (parts.length >= 3 && parts.some(part => /episode-?\d+/i.test(part))) {
+      return `${location.origin}/${parts[0]}/`;
+    }
+    return location.href;
+  }
+
   function extractTitleCandidates() {
+    // For jut.su the romanized "Оригинальное название" is the strongest
+    // identifier for matching an existing Notion record, so keep it first.
+    const siteSpecific = isJutSu() ? [extractJutSuOriginal(), extractJutSuTitle()] : [];
     const values = [
+      ...siteSpecific,
       firstText([
         'h1[itemprop="name"]', '[itemprop="name"] h1', '.anime-title h1',
         '.release-title h1', '.post-title h1', '.entry-title', 'main h1', 'article h1', 'h1',
       ]),
       metaContent(['meta[property="og:title"]', 'meta[name="twitter:title"]']),
       cleanTitle(document.title),
-    ].map(cleanTitle).filter(Boolean);
-    return [...new Set(values.map(value => value.trim()).filter(value => value.length >= 2))];
+    ].map(value => isJutSu() ? cleanJutSuDisplayTitle(value) : cleanTitle(value)).filter(Boolean);
+
+    return [...new Set(values
+      .map(value => value.trim())
+      .filter(value => value.length >= 2)
+      .filter(value => !isJutSu() || !/^(jut-su|jut\.su|смотреть онлайн)$/i.test(value))
+    )];
   }
 
   function extractTitle() {
+    if (isJutSu()) {
+      return extractJutSuTitle() || extractJutSuOriginal() || extractTitleCandidates()[0] || '';
+    }
     const candidates = extractTitleCandidates();
     return [...candidates].sort((a, b) => a.length - b.length)[0] || '';
   }
@@ -175,12 +306,38 @@
   }
 
   function addLog(message, type = '') {
-    if (!state.log || !message) return;
-    const row = document.createElement('div');
-    row.className = `an2n2-log ${type}`.trim();
-    row.textContent = message;
-    state.log.appendChild(row);
-    state.log.scrollTop = state.log.scrollHeight;
+    if (!message) return;
+    const text = String(message);
+    state.logEntries.push(text);
+    if (state.logEntries.length > 1000) state.logEntries.splice(0, state.logEntries.length - 1000);
+    if (state.log) {
+      state.log.className = `an2n2-log-latest ${type}`.trim();
+      state.log.textContent = text;
+      state.log.title = text;
+    }
+  }
+
+  function resetLogs() {
+    state.logEntries = [];
+    if (state.log) {
+      state.log.className = 'an2n2-log-latest';
+      state.log.textContent = 'Лог сеансу порожній.';
+      state.log.title = '';
+    }
+  }
+
+  function copySessionLog() {
+    const text = state.logEntries.join('\n');
+    if (!text) return;
+    try {
+      if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text');
+      else navigator.clipboard?.writeText(text);
+      const old = state.copyLogButton?.textContent;
+      if (state.copyLogButton) state.copyLogButton.textContent = '✓';
+      setTimeout(() => { if (state.copyLogButton) state.copyLogButton.textContent = old || '⧉'; }, 900);
+    } catch (error) {
+      console.warn('[Anime -> Notion] copy log failed', error);
+    }
   }
 
   function gmJson(method, url, payload = null) {
@@ -248,6 +405,35 @@
     if (state.viewedButton) state.viewedButton.title = `Додати один перегляд. Зараз: ${state.viewed}`;
   }
 
+
+  function setWatchValue(kind, value) {
+    const key = kind === 'season' ? 'season' : 'episode';
+    const next = Math.max(0, Math.floor(Number(value) || 0));
+    state[key] = next;
+    const input = key === 'season' ? state.seasonInput : state.episodeInput;
+    if (input && Number(input.value) !== next) input.value = String(next);
+  }
+
+  function syncWatchProgressVisibility() {
+    if (!state.watchProgress) return;
+    state.watchProgress.hidden = String(state.statusSelect?.value || '').trim() !== 'Дивлюсь';
+  }
+
+  async function persistWatchValue(kind, value) {
+    const key = kind === 'season' ? 'season' : 'episode';
+    const next = Math.max(0, Math.floor(Number(value) || 0));
+    setWatchValue(key, next);
+    if (!state.existingItem?.id || state.running) return;
+    try {
+      const payload = await gmJson('PATCH', `${ANIME_URL}?id=${encodeURIComponent(state.existingItem.id)}`, { [key]: next });
+      if (payload?.item) state.existingItem = payload.item;
+      setWatchValue(key, state.existingItem?.[key] ?? next);
+      addLog(`${key === 'season' ? 'Сезон' : 'Серія'} → ${state[key]}`, 'ok');
+    } catch (error) {
+      addLog(`Не вдалося оновити ${key === 'season' ? 'сезон' : 'серію'}: ${error.message}`, 'error');
+    }
+  }
+
   async function incrementViewed() {
     if (state.running || !state.viewedButton) return;
     if (!state.existingItem?.id) {
@@ -274,6 +460,8 @@
     return {
       favorite: Boolean(state.favoriteInput?.checked),
       liked: Boolean(state.likedInput?.checked),
+      season: state.season,
+      episode: state.episode,
     };
   }
 
@@ -311,6 +499,9 @@
       setToggle(state.favoriteInput, state.existingItem.favorite);
       setToggle(state.likedInput, state.existingItem.liked);
       setViewed(state.existingItem.viewed || 0);
+      setWatchValue('season', state.existingItem.season || 0);
+      setWatchValue('episode', state.existingItem.episode || 0);
+      syncWatchProgressVisibility();
       state.startButton.textContent = 'Оновити';
       state.startButton.dataset.mode = 'update';
       setLookupStatus(`Знайдено в базі: ${state.existingItem.title}`, 'ok');
@@ -321,6 +512,9 @@
       setToggle(state.favoriteInput, false);
       setToggle(state.likedInput, false);
       setViewed(0);
+      setWatchValue('season', 0);
+      setWatchValue('episode', 0);
+      syncWatchProgressVisibility();
       state.startButton.textContent = 'Підтвердити та запустити пошук';
       state.startButton.dataset.mode = 'create';
       setLookupStatus('У базі не знайдено · після підтвердження запуститься Python-ядро', 'new');
@@ -335,9 +529,12 @@
     state.lookupButton.disabled = true;
     setLookupStatus('Шукаю по «Аліасах» усіма назвами зі сторінки та завантажую групи…', 'loading');
     try {
-      const candidates = [...new Set([typed, ...extractTitleCandidates()].map(cleanTitle).filter(Boolean))].slice(0, 5);
+      const jutOriginal = isJutSu() ? cleanTitle(extractJutSuOriginal()) : '';
+      const lookupTitle = jutOriginal || typed;
+      const candidates = [...new Set([lookupTitle, typed, ...extractTitleCandidates()].map(cleanTitle).filter(Boolean))].slice(0, 8);
+      if (jutOriginal) addLog(`Jut.su первинна назва для перевірки бази: ${jutOriginal}`, 'ok');
       candidates.forEach(candidate => addLog(`Аліас-кандидат: ${candidate}`));
-      const params = new URLSearchParams({ title: typed, titles: JSON.stringify(candidates) });
+      const params = new URLSearchParams({ title: lookupTitle, titles: JSON.stringify(candidates) });
       const payload = await gmJson('GET', `${CONTEXT_URL}?${params.toString()}`);
       if (payload?.exists && payload?.matchedBy) addLog(`Збіг по аліасу: ${payload.matchedBy}`, 'ok');
       applyContext(payload);
@@ -385,11 +582,14 @@
       });
       state.existingItem = payload.item || item;
       setViewed(state.existingItem.viewed ?? state.viewed);
+      setWatchValue('season', state.existingItem.season ?? state.season);
+      setWatchValue('episode', state.existingItem.episode ?? state.episode);
+      syncWatchProgressVisibility();
       if (payload.options) state.options = payload.options;
       populateGroupSelect(state.existingItem.group || state.groupSelect?.value || 'Без групи');
       setProgress(100, 'Готово: дані тайтлу оновлено.', 'ok');
       setLookupStatus(`Оновлено: ${state.existingItem.title}`, 'ok');
-      addLog(`Статус → ${state.existingItem.status}; група → ${state.existingItem.group}; вибране → ${state.existingItem.favorite ? 'так' : 'ні'}; улюблене → ${state.existingItem.liked ? 'так' : 'ні'}; переглянуто → ${state.existingItem.viewed || 0}`, 'ok');
+      addLog(`Статус → ${state.existingItem.status}; група → ${state.existingItem.group}; вибране → ${state.existingItem.favorite ? 'так' : 'ні'}; улюблене → ${state.existingItem.liked ? 'так' : 'ні'}; переглянуто → ${state.existingItem.viewed || 0}; сезон → ${state.existingItem.season || 0}; серія → ${state.existingItem.episode || 0}`, 'ok');
       notify('Anime → Notion', `Оновлено: ${state.existingItem.title}`);
     } catch (error) {
       setProgress(20, `Помилка: ${error.message}`, 'error');
@@ -545,14 +745,22 @@
     state.running = true;
     state.startButton.disabled = true;
     state.button.disabled = true;
-    if (state.log) state.log.innerHTML = '';
+    resetLogs();
     setProgress(1, 'Запускаю Python core…');
-    addLog(`Джерело: ${location.href}`);
+    const sourceUrl = isJutSu() ? jutSuCanonicalUrl() : location.href;
+    addLog(`Джерело: ${sourceUrl}`);
+    if (isJutSu()) {
+      const original = extractJutSuOriginal();
+      if (original) addLog(`Jut.su original: ${original}`, 'ok');
+      if (sourceUrl !== location.href) addLog(`Jut.su canonical: ${sourceUrl}`, 'ok');
+    }
     addLog(`Назва: ${title}`);
     const requestPayload = {
-      title, url: location.href,
+      title, url: sourceUrl,
       status: state.statusSelect?.value || '',
       group: state.groupSelect?.value || '',
+      season: state.season,
+      episode: state.episode,
       ...(state.viewed > 0 ? { viewed: state.viewed } : {}),
     };
     try {
@@ -580,7 +788,7 @@
       notify('Anime → Notion', `${saved.existing ? 'Оновлено' : 'Додано'}: ${saved.item.title || title}`);
       await refreshContext();
     } catch (error) {
-      console.error('[Anime -> Notion v2.5.0]', error);
+      console.error('[Anime -> Notion v2.7.0]', error);
       const msg = String(error?.message || error).replace(/^CORE:/, '');
       setProgress(Number(state.progressPercent?.textContent?.replace('%', '')) || 0, `Помилка: ${msg}`, 'error');
       addLog(msg, 'error');
@@ -601,7 +809,7 @@
   async function resetPanel() {
     if (state.titleInput) state.titleInput.value = extractTitle();
     state.existingItem = null;
-    if (state.log) state.log.innerHTML = '';
+    resetLogs();
     setProgress(0, 'Готовий до запуску.');
     await refreshContext();
   }
@@ -613,9 +821,10 @@
       #an2n2-panel[hidden]{display:none!important}.an2n2-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.an2n2-head strong{font-size:15px}.an2n2-close{border:0;background:rgba(255,255,255,.07);color:#fff;width:32px;height:32px;border-radius:10px;cursor:pointer}
       .an2n2-lookup{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:9px 10px;border:1px solid rgba(255,255,255,.08);border-radius:11px;background:rgba(255,255,255,.025)}.an2n2-lookup span{color:#a8b3c4;font-size:11px}.an2n2-lookup span[data-type=ok]{color:#8ee6b0}.an2n2-lookup span[data-type=new]{color:#ffd47e}.an2n2-lookup span[data-type=error]{color:#ff98a9}.an2n2-lookup button{flex:0 0 auto;border:1px solid rgba(112,201,255,.18);border-radius:9px;background:rgba(112,201,255,.07);color:#dff5ff;padding:7px 9px;cursor:pointer}
       .an2n2-field{display:grid;gap:6px;margin:10px 0}.an2n2-field span{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b8;font-weight:800}.an2n2-field input,.an2n2-field select{box-sizing:border-box!important;width:100%!important;min-height:42px!important;border:1px solid rgba(255,255,255,.12)!important;border-radius:11px!important;padding:0 34px 0 11px!important;background:#151a27!important;background-image:none!important;background-repeat:no-repeat!important;box-shadow:none!important;color:#fff!important;outline:none!important;font:600 13px/1.2 system-ui!important;text-shadow:none!important;filter:none!important}.an2n2-field select{-webkit-appearance:none!important;-moz-appearance:none!important;appearance:none!important;mask:none!important;-webkit-mask:none!important}.an2n2-field select option{background:#151a27!important;color:#fff!important}.an2n2-select-wrap{position:relative}.an2n2-select-wrap:after{content:'⌄';position:absolute;right:12px;top:50%;transform:translateY(-54%);pointer-events:none;color:#8fa1b8;font-size:15px;line-height:1}.an2n2-group-wrap:before{content:'';position:absolute;left:12px;top:50%;transform:translateY(-50%);width:9px;height:9px;border-radius:50%;background:var(--group-color,#a8b0bf);box-shadow:0 0 0 3px color-mix(in srgb,var(--group-color,#a8b0bf) 16%,transparent);pointer-events:none;z-index:2}.an2n2-group-wrap select{padding-left:34px!important;border-color:color-mix(in srgb,var(--group-color,#a8b0bf) 35%,rgba(255,255,255,.12))!important}.an2n2-marks{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:10px 0}.an2n2-viewed{width:100%;min-height:44px;margin:0 0 10px;border:1px solid rgba(126,232,181,.22);border-radius:11px;background:rgba(126,232,181,.07);color:#dff8ea;font:800 13px system-ui;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px}.an2n2-viewed:hover{background:rgba(126,232,181,.12);border-color:rgba(126,232,181,.38)}.an2n2-viewed:disabled{opacity:.55;cursor:default}.an2n2-viewed strong{min-width:24px;padding:2px 7px;border-radius:999px;background:rgba(126,232,181,.12);color:#8ee6b0}.an2n2-toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:44px;padding:0 11px;border:1px solid rgba(255,255,255,.11);border-radius:11px;background:#151a27;color:#dbe3ef;cursor:pointer;user-select:none}.an2n2-toggle>span{font-weight:750}.an2n2-toggle input{position:absolute;opacity:0;pointer-events:none}.an2n2-toggle-knob{position:relative;width:36px;height:20px;flex:0 0 36px;border-radius:999px;background:#2a3140;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);transition:.2s ease}.an2n2-toggle-knob:after{content:'';position:absolute;width:14px;height:14px;left:3px;top:3px;border-radius:50%;background:#edf2fa;transition:.2s ease}.an2n2-toggle.active{border-color:rgba(112,201,255,.28);background:rgba(112,201,255,.07)}.an2n2-toggle.active .an2n2-toggle-knob{background:#70c9ff}.an2n2-toggle.active .an2n2-toggle-knob:after{transform:translateX(16px);background:#08111a}
+      .an2n2-watch-progress{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:10px 0}.an2n2-watch-progress[hidden]{display:none!important}.an2n2-watch-field{display:grid;gap:6px}.an2n2-watch-field>span{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#8fa1b8;font-weight:800}.an2n2-number-field{display:grid;grid-template-columns:38px 1fr 38px;min-height:42px;overflow:hidden;border:1px solid rgba(255,255,255,.12);border-radius:11px;background:#151a27}.an2n2-number-field button{border:0;background:rgba(255,255,255,.025);color:#aeb8c8;font:800 20px/1 system-ui;cursor:pointer}.an2n2-number-field button:first-child{border-right:1px solid rgba(255,255,255,.08)}.an2n2-number-field button:last-child{border-left:1px solid rgba(255,255,255,.08)}.an2n2-number-field button:hover{background:rgba(112,201,255,.08);color:#fff}.an2n2-number-field input{box-sizing:border-box!important;width:100%!important;min-width:0!important;border:0!important;padding:0!important;background:transparent!important;color:#fff!important;text-align:center!important;outline:0!important;font:800 13px system-ui!important;-moz-appearance:textfield!important;appearance:textfield!important}.an2n2-number-field input::-webkit-inner-spin-button,.an2n2-number-field input::-webkit-outer-spin-button{-webkit-appearance:none!important;margin:0!important}
       .an2n2-actions{display:flex;gap:9px;margin-top:12px;flex-wrap:wrap}.an2n2-start,.an2n2-rename{min-height:42px;border-radius:11px;font-weight:800;cursor:pointer}.an2n2-start{flex:1;border:1px solid rgba(112,201,255,.3);background:rgba(112,201,255,.12);color:#dff5ff}.an2n2-rename{border:1px solid rgba(167,150,255,.28);background:rgba(167,150,255,.10);color:#e4dcff;padding:0 13px}.an2n2-start:disabled,.an2n2-rename:disabled{opacity:.5;cursor:default}
       .an2n2-track{height:7px;margin-top:15px;border-radius:99px;overflow:hidden;background:rgba(255,255,255,.08)}.an2n2-track>div{height:100%;width:0;background:linear-gradient(90deg,#70c9ff,#9b8cff);transition:width .3s ease}.an2n2-progress-meta{display:grid;grid-template-columns:46px 1fr;gap:8px;margin-top:8px;color:#9ea9ba}.an2n2-progress-meta b{color:#dff5ff}.an2n2-progress-meta span[data-type=error]{color:#ff98a9}.an2n2-progress-meta span[data-type=ok]{color:#8ee6b0}
-      .an2n2-logs{display:grid;gap:6px;max-height:220px;overflow:auto;margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)}.an2n2-log{padding:7px 9px;border-radius:9px;background:rgba(255,255,255,.035);color:#aab5c5;font-size:11px}.an2n2-log.ok{color:#8ee6b0}.an2n2-log.warn{color:#ffd38a}.an2n2-log.error{color:#ff98a9}
+      .an2n2-logbar{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:8px;align-items:center;margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)}.an2n2-log-latest{min-width:0;padding:7px 9px;border-radius:9px;background:rgba(255,255,255,.035);color:#aab5c5;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.an2n2-log-latest.ok{color:#8ee6b0}.an2n2-log-latest.warn{color:#ffd38a}.an2n2-log-latest.error{color:#ff98a9}.an2n2-copy-log{width:34px;height:32px;border:1px solid rgba(255,255,255,.11);border-radius:9px;background:rgba(255,255,255,.045);color:#dce5f2;cursor:pointer;font:800 15px system-ui}.an2n2-copy-log:hover{background:rgba(112,201,255,.09);border-color:rgba(112,201,255,.25)}
     `);
 
     const button = document.createElement('button');
@@ -637,10 +846,14 @@
         <label class="an2n2-toggle"><span>Улюблене</span><input class="an2n2-liked" type="checkbox"><i class="an2n2-toggle-knob"></i></label>
       </div>
       <button class="an2n2-viewed" type="button"><span>＋1 Переглянуто</span><strong data-viewed-count>0</strong></button>
+      <div class="an2n2-watch-progress" hidden>
+        <label class="an2n2-watch-field"><span>Сезон</span><span class="an2n2-number-field"><button type="button" data-watch-adjust="season" data-delta="-1">‹</button><input class="an2n2-season" type="number" min="0" step="1" inputmode="numeric" value="0"><button type="button" data-watch-adjust="season" data-delta="1">›</button></span></label>
+        <label class="an2n2-watch-field"><span>Серія</span><span class="an2n2-number-field"><button type="button" data-watch-adjust="episode" data-delta="-1">‹</button><input class="an2n2-episode" type="number" min="0" step="1" inputmode="numeric" value="0"><button type="button" data-watch-adjust="episode" data-delta="1">›</button></span></label>
+      </div>
       <div class="an2n2-actions"><button class="an2n2-start" type="button">Завантаження…</button><button class="an2n2-rename" type="button" hidden>Оновити назву</button></div>
       <div class="an2n2-track"><div></div></div>
       <div class="an2n2-progress-meta"><b>0%</b><span>Готовий до запуску.</span></div>
-      <div class="an2n2-logs"></div>`;
+      <div class="an2n2-logbar"><div class="an2n2-log-latest">Лог сеансу порожній.</div><button class="an2n2-copy-log" type="button" title="Копіювати весь лог сеансу">⧉</button></div>`;
     (document.body || document.documentElement).appendChild(panel);
 
     state.button = button;
@@ -651,6 +864,9 @@
     state.favoriteInput = panel.querySelector('.an2n2-favorite');
     state.likedInput = panel.querySelector('.an2n2-liked');
     state.viewedButton = panel.querySelector('.an2n2-viewed');
+    state.watchProgress = panel.querySelector('.an2n2-watch-progress');
+    state.seasonInput = panel.querySelector('.an2n2-season');
+    state.episodeInput = panel.querySelector('.an2n2-episode');
     state.startButton = panel.querySelector('.an2n2-start');
     state.renameButton = panel.querySelector('.an2n2-rename');
     state.lookupButton = panel.querySelector('.an2n2-lookup-btn');
@@ -658,7 +874,8 @@
     state.progressBar = panel.querySelector('.an2n2-track > div');
     state.progressPercent = panel.querySelector('.an2n2-progress-meta b');
     state.progressText = panel.querySelector('.an2n2-progress-meta span');
-    state.log = panel.querySelector('.an2n2-logs');
+    state.log = panel.querySelector('.an2n2-log-latest');
+    state.copyLogButton = panel.querySelector('.an2n2-copy-log');
 
     button.addEventListener('click', async () => {
       panel.hidden = !panel.hidden;
@@ -669,10 +886,22 @@
     state.startButton.addEventListener('click', run);
     state.renameButton.addEventListener('click', renameExisting);
     state.viewedButton?.addEventListener('click', incrementViewed);
+    state.copyLogButton?.addEventListener('click', copySessionLog);
+    panel.querySelectorAll('[data-watch-adjust]').forEach(button => button.addEventListener('click', () => {
+      const kind = button.dataset.watchAdjust === 'season' ? 'season' : 'episode';
+      const delta = Number(button.dataset.delta || 0);
+      persistWatchValue(kind, state[kind] + delta);
+    }));
+    state.seasonInput?.addEventListener('change', () => persistWatchValue('season', state.seasonInput.value));
+    state.episodeInput?.addEventListener('change', () => persistWatchValue('episode', state.episodeInput.value));
+    [state.seasonInput, state.episodeInput].forEach(input => input?.addEventListener('keydown', event => {
+      if (event.key === 'Enter') input.blur();
+    }));
     state.titleInput.addEventListener('input', updateRenameButton);
     state.groupSelect?.addEventListener('change', applyGroupColor);
     state.statusSelect?.addEventListener('change', () => {
       if (String(state.statusSelect.value || '').trim() === 'Переглянув' && state.viewed < 1) setViewed(1);
+      syncWatchProgressVisibility();
     });
     [state.favoriteInput, state.likedInput].forEach(input => input?.addEventListener('change', () => {
       input.closest('.an2n2-toggle')?.classList.toggle('active', input.checked);

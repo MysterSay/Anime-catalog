@@ -90,6 +90,27 @@ function groupOption(name) {
 function groupTheme(name) { return GROUP_COLOR_THEME[groupOption(name)?.color || 'default'] || GROUP_COLOR_THEME.default; }
 function groupTagStyle(name) { const t = groupTheme(name); return `--group-accent:${t.solid};--group-soft:${t.soft};--group-border:${t.border}`; }
 
+function watchProgressField(kind, label, value) {
+  const safeValue = Math.max(0, Math.floor(Number(value) || 0));
+  return `
+    <div class="watch-progress-field" data-watch-field="${kind}">
+      <span class="watch-progress-label">${label}</span>
+      <div class="watch-number-field">
+        <button type="button" data-watch-adjust="${kind}" data-delta="-1" aria-label="Зменшити ${label.toLocaleLowerCase('uk-UA')}">‹</button>
+        <input type="number" min="0" step="1" inputmode="numeric" value="${safeValue}" data-watch-input="${kind}" aria-label="${label}" />
+        <button type="button" data-watch-adjust="${kind}" data-delta="1" aria-label="Збільшити ${label.toLocaleLowerCase('uk-UA')}">›</button>
+      </div>
+    </div>`;
+}
+
+function watchProgressPanel(item) {
+  if (String(item?.status || '').trim() !== 'Дивлюсь') return '';
+  return `<div class="watch-progress-group reveal delay-1">
+    ${watchProgressField('season', 'Сезон', item?.season)}
+    ${watchProgressField('episode', 'Серія', item?.episode)}
+  </div>`;
+}
+
 function sourceMarkKey(site) {
   // Deliberately global: a site's color is the same on every anime title page.
   return String(site || '').trim();
@@ -284,6 +305,7 @@ function renderItem(item) {
             <img class="title-poster" src="${escapeHtml(currentItem.poster || FALLBACK_IMAGE)}" alt="${escapeHtml(currentItem.title)}" />
             ${!currentItem.hasPoster ? '<button class="poster-add-overlay" data-media-kind="poster">＋ Постер</button>' : ''}
           </div>
+          ${watchProgressPanel(currentItem)}
         </div>
 
         <div class="title-info reveal delay-1">
@@ -846,12 +868,39 @@ function openDeleteModal() {
   document.body.classList.add('modal-open');
 }
 
+root.addEventListener('change', async e => {
+  const input = e.target.closest('[data-watch-input]');
+  if (!input || !currentItem) return;
+  const kind = input.dataset.watchInput === 'season' ? 'season' : 'episode';
+  const next = Math.max(0, Math.floor(Number(input.value) || 0));
+  if (next === Number(currentItem[kind] || 0)) return;
+  input.disabled = true;
+  try { await patchCurrent({ [kind]: next }, `${kind === 'season' ? 'Сезон' : 'Серію'} оновлено`); }
+  catch (error) { input.disabled = false; toastMessage(error.message || 'Не вдалося оновити прогрес'); }
+});
+
+root.addEventListener('keydown', e => {
+  const input = e.target.closest('[data-watch-input]');
+  if (input && e.key === 'Enter') input.blur();
+});
+
 root.addEventListener('click', async e => {
   const editBtn = e.target.closest('[data-edit-title]');
   if (editBtn) { openEditModal(); return; }
 
   const deleteBtn = e.target.closest('[data-delete-title]');
   if (deleteBtn) { openDeleteModal(); return; }
+
+  const watchAdjust = e.target.closest('[data-watch-adjust]');
+  if (watchAdjust && currentItem && !watchAdjust.disabled) {
+    const kind = watchAdjust.dataset.watchAdjust === 'season' ? 'season' : 'episode';
+    const delta = Number(watchAdjust.dataset.delta || 0);
+    const next = Math.max(0, Math.floor(Number(currentItem[kind] || 0) + delta));
+    watchAdjust.disabled = true;
+    try { await patchCurrent({ [kind]: next }, `${kind === 'season' ? 'Сезон' : 'Серію'} оновлено`); }
+    catch (error) { toastMessage(error.message || 'Не вдалося оновити прогрес'); }
+    return;
+  }
 
   const viewedBtn = e.target.closest('[data-viewed-increment]');
   if (viewedBtn && currentItem && !viewedBtn.disabled) {

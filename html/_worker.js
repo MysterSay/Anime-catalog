@@ -44,6 +44,8 @@ const NOTION_PROPERTIES = {
   favorite: 'Вибране',
   liked: 'Улюблене',
   viewed: 'Переглянуто',
+  season: 'Сезон',
+  episode: 'Серія',
 };
 
 class HttpError extends Error {
@@ -282,6 +284,8 @@ function getMappedEntries(page) {
     favoriteEntry: findProperty(entries, ['Вибране', 'Favorite', 'Bookmark'], ['checkbox', 'select', 'status', 'rich_text']),
     likedEntry: findProperty(entries, ['Улюблене', 'Liked', 'Loved', 'Love'], ['checkbox', 'select', 'status', 'rich_text']),
     viewedEntry: findProperty(entries, ['Переглянуто', 'Viewed', 'Watch count', 'Watch Count'], ['number']),
+    seasonEntry: findProperty(entries, ['Сезон', 'Season'], ['number']),
+    episodeEntry: findProperty(entries, ['Серія', 'Серия', 'Episode', 'Ep'], ['number']),
   };
 }
 
@@ -297,6 +301,8 @@ function mapPageSummary(page) {
   const favoriteProp = props[NOTION_PROPERTIES.favorite] || props['Favorite'] || props['Bookmark'] || null;
   const likedProp = props[NOTION_PROPERTIES.liked] || props['Liked'] || props['Loved'] || props['Love'] || null;
   const viewedProp = props[NOTION_PROPERTIES.viewed] || null;
+  const seasonProp = props[NOTION_PROPERTIES.season] || null;
+  const episodeProp = props[NOTION_PROPERTIES.episode] || null;
   const posterRaw = fileUrl(posterProp);
   const fallbackPoster = iconUrl(page) || coverUrl(page);
   return {
@@ -309,6 +315,8 @@ function mapPageSummary(page) {
     favorite: boolValue(favoriteProp),
     liked: boolValue(likedProp),
     viewed: Number(viewedProp?.number || 0),
+    season: Number(seasonProp?.number || 0),
+    episode: Number(episodeProp?.number || 0),
     description: textValue(descriptionProp),
   };
 }
@@ -317,7 +325,7 @@ function mapPage(page) {
   const m = getMappedEntries(page);
   const excludedNames = new Set([
     m.titleEntry?.[0], m.posterEntry?.[0], m.bannerEntry?.[0], m.descriptionEntry?.[0], m.originalEntry?.[0], m.englishEntry?.[0], m.russianEntry?.[0], m.aliasesEntry?.[0], m.keyEntry?.[0],
-    m.statusEntry?.[0], m.groupEntry?.[0], m.addedEntry?.[0], m.favoriteEntry?.[0], m.likedEntry?.[0], m.viewedEntry?.[0],
+    m.statusEntry?.[0], m.groupEntry?.[0], m.addedEntry?.[0], m.favoriteEntry?.[0], m.likedEntry?.[0], m.viewedEntry?.[0], m.seasonEntry?.[0], m.episodeEntry?.[0],
   ].filter(Boolean));
   const posterRaw = fileUrl(m.posterEntry?.[1]);
   const bannerRaw = fileUrl(m.bannerEntry?.[1]);
@@ -341,6 +349,8 @@ function mapPage(page) {
     favorite: boolValue(m.favoriteEntry?.[1]),
     liked: boolValue(m.likedEntry?.[1]),
     viewed: Number(m.viewedEntry?.[1]?.number || 0),
+    season: Number(m.seasonEntry?.[1]?.number || 0),
+    episode: Number(m.episodeEntry?.[1]?.number || 0),
     links: extractLinks(m.entries, excludedNames),
     notionUrl: safeHttpUrl(page.url || ''),
   };
@@ -818,6 +828,8 @@ async function ensureWritableSchema(env, source) {
     [NOTION_PROPERTIES.favorite]: { checkbox: {} },
     [NOTION_PROPERTIES.liked]: { checkbox: {} },
     [NOTION_PROPERTIES.viewed]: { number: { format: 'number' } },
+    [NOTION_PROPERTIES.season]: { number: { format: 'number' } },
+    [NOTION_PROPERTIES.episode]: { number: { format: 'number' } },
   };
   for (const [name, config] of Object.entries(required)) if (!properties[name]) additions[name] = config;
   for (const domain of SITE_PROPERTIES) if (!properties[domain]) additions[domain] = { rich_text: {} };
@@ -1528,6 +1540,8 @@ function buildCreateProperties(media, payload, translated, siteLinks, source) {
   let initialViewed = Math.max(0, Number(payload.viewed) || 0);
   if (isCompletedStatus(payload.status) && initialViewed < 1) initialViewed = 1;
   properties[NOTION_PROPERTIES.viewed] = { number: initialViewed };
+  properties[NOTION_PROPERTIES.season] = { number: Math.max(0, Number(payload.season) || 0) };
+  properties[NOTION_PROPERTIES.episode] = { number: Math.max(0, Number(payload.episode) || 0) };
   const cover = safeHttpUrl(media?.coverImage?.extraLarge || media?.coverImage?.large || media?.coverImage?.medium || '');
   const banner = safeHttpUrl(media?.bannerImage || '');
   if (cover) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(cover, `${media?.provider || 'anime'}-cover`, mediaProviderId(media));
@@ -1644,6 +1658,9 @@ async function handleMergeAnimeApi(request, env) {
     [NOTION_PROPERTIES.group]: markItem.group && markItem.group !== 'Без групи' ? { select: { name: markItem.group } } : { select: null },
     [NOTION_PROPERTIES.favorite]: { checkbox: Boolean(markItem.favorite) },
     [NOTION_PROPERTIES.liked]: { checkbox: Boolean(markItem.liked) },
+    [NOTION_PROPERTIES.viewed]: { number: Math.max(0, Number(markItem.viewed) || 0) },
+    [NOTION_PROPERTIES.season]: { number: Math.max(0, Number(markItem.season) || 0) },
+    [NOTION_PROPERTIES.episode]: { number: Math.max(0, Number(markItem.episode) || 0) },
   };
   if (mergedPoster) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(mergedPoster, 'merged-cover');
   if (mergedBanner) properties[NOTION_PROPERTIES.banner] = notionFilesValue(mergedBanner, 'merged-banner');
@@ -1782,6 +1799,15 @@ async function handleAnimeApi(request, env) {
     if (nextViewed !== null) {
       const name = mapped.viewedEntry?.[0] || NOTION_PROPERTIES.viewed;
       properties[name] = { number: nextViewed };
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'season')) {
+      const name = mapped.seasonEntry?.[0] || NOTION_PROPERTIES.season;
+      properties[name] = { number: Math.max(0, Math.floor(Number(body.season) || 0)) };
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'episode')) {
+      const name = mapped.episodeEntry?.[0] || NOTION_PROPERTIES.episode;
+      properties[name] = { number: Math.max(0, Math.floor(Number(body.episode) || 0)) };
     }
 
     if (Object.prototype.hasOwnProperty.call(body, 'posterUrl')) {
@@ -2155,6 +2181,10 @@ function coreTitleData(payload) {
     status: plainTitle(payload?.status || input.status || ''),
     group: plainTitle(payload?.group || input.group || ''),
     viewed: Math.max(0, Number(payload?.viewed ?? input.viewed) || 0),
+    season: Math.max(0, Number(payload?.season ?? input.season) || 0),
+    episode: Math.max(0, Number(payload?.episode ?? input.episode) || 0),
+    hasSeason: Object.prototype.hasOwnProperty.call(payload || {}, 'season') || Object.prototype.hasOwnProperty.call(input || {}, 'season'),
+    hasEpisode: Object.prototype.hasOwnProperty.call(payload || {}, 'episode') || Object.prototype.hasOwnProperty.call(input || {}, 'episode'),
     hasViewed: Object.prototype.hasOwnProperty.call(payload || {}, 'viewed') || Object.prototype.hasOwnProperty.call(input || {}, 'viewed'),
     sourceUrl: safeHttpUrl(input.url || ''),
   };
@@ -2187,6 +2217,8 @@ function buildCoreProperties(payload, source, { includeAddedAt = true } = {}) {
   let coreViewed = Math.max(0, Number(data.viewed) || 0);
   if (isCompletedStatus(data.status) && coreViewed < 1) coreViewed = 1;
   properties[NOTION_PROPERTIES.viewed] = { number: coreViewed };
+  properties[NOTION_PROPERTIES.season] = { number: Math.max(0, Number(data.season) || 0) };
+  properties[NOTION_PROPERTIES.episode] = { number: Math.max(0, Number(data.episode) || 0) };
   if (data.cover) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(data.cover, 'core-cover', payload?.meta?.anilist_id || payload?.meta?.mal_id || '');
   if (data.banner) properties[NOTION_PROPERTIES.banner] = notionFilesValue(data.banner, 'core-banner', payload?.meta?.anilist_id || payload?.meta?.mal_id || '');
   if (data.sourceUrl) properties[NOTION_PROPERTIES.sourceUrl] = { url: data.sourceUrl };
@@ -2235,6 +2267,8 @@ async function ingestCorePayload(env, payload) {
         delete built.properties[NOTION_PROPERTIES.viewed];
       }
     }
+    if (!built.data.hasSeason) delete built.properties[NOTION_PROPERTIES.season];
+    if (!built.data.hasEpisode) delete built.properties[NOTION_PROPERTIES.episode];
   }
 
   let savedPage;
@@ -2524,7 +2558,7 @@ export default {
       if (url.pathname === '/api/discover') return await handleDiscoverApi(request, env);
       if (url.pathname === '/api/discover/prepare') return await handleDiscoverPrepareApi(request, env);
       if (url.pathname === '/api/catalog-search') return await handleCatalogSearchApi(request, env);
-      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v5.9-viewed-status-sync-2026-08-14', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, catalogs: SITE_PROPERTIES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: 'ndjson-v1', coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true, mergeTitles: true, mergeEndpoint: '/api/anime/merge', deleteTitles: true, editTitles: true, uploadEndpoint: '/api/anime/upload', extensionContext: '/api/extension/context', aliasLookupV2: true, editorMediaMode: 'url', favoriteStorage: 'notion-checkbox', likedStorage: 'notion-checkbox', viewedStorage: 'notion-number', groupSettings: '/api/groups' });
+      if (url.pathname === '/api/version') return json({ ok: true, version: 'yoru-v6.0-season-episode-2026-08-15', addTitle: true, googleSourceSearch: true, googleSearchMode: 'vercel-python-core', sourceSites: AUTHORITY_SITES, catalogs: SITE_PROPERTIES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: 'ndjson-v1', coreJsonIngest: true, ingestEndpoint: '/api/ingest', mediaRepair: true, mergeTitles: true, mergeEndpoint: '/api/anime/merge', deleteTitles: true, editTitles: true, uploadEndpoint: '/api/anime/upload', extensionContext: '/api/extension/context', aliasLookupV2: true, editorMediaMode: 'url', favoriteStorage: 'notion-checkbox', likedStorage: 'notion-checkbox', viewedStorage: 'notion-number', seasonEpisodeStorage: 'notion-number', groupSettings: '/api/groups' });
 
       if (url.pathname === '/api/health') {
         const databaseId = env.NOTION_DATABASE_ID || DEFAULT_DATABASE_ID;

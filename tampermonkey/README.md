@@ -1,10 +1,9 @@
-Anime -> Notion Collector v2.3.0
+# Anime -> Notion Collector v2.7.0
+
+Requires Yoru site v6.0 or newer.
 
 Changes:
-- resets third-party select styling to remove repeated wave/chevron backgrounds;
-- adds Notion-backed "Вибране" and "Улюблене" switches;
-- existing titles load Checkbox values from Notion;
-- Update writes status, group, Вибране and Улюблене together;
-- new titles save the two Checkbox values immediately after ingest.
-
-Requires Yoru/Cloudflare site v5.7+ with Notion Checkbox support.
+- `Сезон` and `Серія` controls are visible when status is `Дивлюсь`.
+- Values are stored in Notion and can be changed with chevrons or manual input.
+- The log UI shows only the latest line.
+- The copy button copies the full log of the current session.

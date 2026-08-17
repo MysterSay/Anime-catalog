@@ -11,6 +11,7 @@ var CORE_PROCESS_FULL_URL = "https://anime-catalog-flame.vercel.app/api/process-
 var CORE_PROCESS_STREAM_URL = "https://anime-catalog-flame.vercel.app/api/process-stream";
 var CORE_SEARCH_URL = "https://anime-catalog-flame.vercel.app/api/search";
 var TITLE_STATUS_OPTIONS = ["\u0411\u0443\u0434\u0443 \u0434\u0438\u0432\u0438\u0442\u0438\u0441\u044C", "\u0414\u0438\u0432\u043B\u044E\u0441\u044C", "\u041F\u0435\u0440\u0435\u0433\u043B\u044F\u043D\u0443\u0432", "\u0412\u0456\u0434\u043A\u043B\u0430\u0434\u0435\u043D\u043E", "\u041A\u0438\u043D\u0443\u0442\u043E"];
+var NOTION_SELECT_COLORS = ["default", "gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"];
 var CATALOG_GROUPS = {
   RU: ["jut-su.net", "ru.yummyani.me", "crunchyroll.com", "shikimori.io", "animevost.org", "jutsu.tv", "jut.su", "animego.studio", "anilibria.tv"],
   UA: ["uaserials.com", "uachan.com", "anihub.in.ua", "amanogawa.space", "animeon.club", "anidesu.net", "mikai.me", "anitube.in.ua"]
@@ -41,7 +42,12 @@ var NOTION_PROPERTIES = {
   group: "\u0413\u0440\u0443\u043F\u0430",
   sourceUrl: "\u0421\u0442\u043E\u0440\u0456\u043D\u043A\u0430-\u0434\u0436\u0435\u0440\u0435\u043B\u043E",
   key: "\u041A\u043B\u044E\u0447",
-  addedAt: "\u0414\u043E\u0434\u0430\u043D\u043E"
+  addedAt: "\u0414\u043E\u0434\u0430\u043D\u043E",
+  favorite: "\u0412\u0438\u0431\u0440\u0430\u043D\u0435",
+  liked: "\u0423\u043B\u044E\u0431\u043B\u0435\u043D\u0435",
+  viewed: "\u041F\u0435\u0440\u0435\u0433\u043B\u044F\u043D\u0443\u0442\u043E",
+  season: "\u0421\u0435\u0437\u043E\u043D",
+  episode: "\u0421\u0435\u0440\u0456\u044F"
 };
 var HttpError = class extends Error {
   static {
@@ -259,13 +265,16 @@ function getMappedEntries(page) {
     originalEntry: findProperty(entries, ["\u041E\u0440\u0438\u0433\u0456\u043D\u0430\u043B\u044C\u043D\u0430 \u043D\u0430\u0437\u0432\u0430", "Original title", "Original name", "Romaji"], ["rich_text", "title"]),
     englishEntry: findProperty(entries, ["\u0410\u043D\u0433\u043B\u0456\u0439\u0441\u044C\u043A\u0430 \u043D\u0430\u0437\u0432\u0430", "English title", "English"], ["rich_text", "title"]),
     russianEntry: findProperty(entries, ["\u0420\u043E\u0441\u0456\u0439\u0441\u044C\u043A\u0430 \u043D\u0430\u0437\u0432\u0430", "Russian title", "Russian"], ["rich_text", "title"]),
-    aliasesEntry: findProperty(entries, ["\u0410\u043B\u0456\u0430\u0441\u0438", "Aliases", "Synonyms"], ["rich_text", "title"]),
+    aliasesEntry: findProperty(entries, ["\u0410\u043B\u0456\u0430\u0441\u0438", "Aliases", "Synonyms"], ["rich_text", "title", "multi_select", "select"]),
     keyEntry: findProperty(entries, ["\u041A\u043B\u044E\u0447", "Key"], ["rich_text", "title"]),
     statusEntry: findProperty(entries, ["\u0421\u0442\u0430\u0442\u0443\u0441", "Status"], ["status", "select", "rich_text"]),
     groupEntry: findProperty(entries, ["\u0413\u0440\u0443\u043F\u0430", "Group", "\u041A\u0430\u0442\u0435\u0433\u043E\u0440\u0456\u044F", "Category"], ["select", "multi_select", "rich_text", "status"]),
     addedEntry: findProperty(entries, ["\u0414\u0430\u0442\u0430 \u0434\u043E\u0434\u0430\u0432\u0430\u043D\u043D\u044F", "Added At", "Added", "\u0414\u043E\u0434\u0430\u043D\u043E", "Created", "Created time"], ["date", "created_time", "last_edited_time"]),
     favoriteEntry: findProperty(entries, ["\u0412\u0438\u0431\u0440\u0430\u043D\u0435", "Favorite", "Bookmark"], ["checkbox", "select", "status", "rich_text"]),
-    likedEntry: findProperty(entries, ["\u0423\u043B\u044E\u0431\u043B\u0435\u043D\u0435", "Liked", "Loved", "Love"], ["checkbox", "select", "status", "rich_text"])
+    likedEntry: findProperty(entries, ["\u0423\u043B\u044E\u0431\u043B\u0435\u043D\u0435", "Liked", "Loved", "Love"], ["checkbox", "select", "status", "rich_text"]),
+    viewedEntry: findProperty(entries, ["\u041F\u0435\u0440\u0435\u0433\u043B\u044F\u043D\u0443\u0442\u043E", "Viewed", "Watch count", "Watch Count"], ["number"]),
+    seasonEntry: findProperty(entries, ["\u0421\u0435\u0437\u043E\u043D", "Season"], ["number"]),
+    episodeEntry: findProperty(entries, ["\u0421\u0435\u0440\u0456\u044F", "\u0421\u0435\u0440\u0438\u044F", "Episode", "Ep"], ["number"])
   };
 }
 __name(getMappedEntries, "getMappedEntries");
@@ -278,8 +287,11 @@ function mapPageSummary(page) {
   const statusProp = props[NOTION_PROPERTIES.status] || null;
   const groupProp = props[NOTION_PROPERTIES.group] || null;
   const addedProp = props[NOTION_PROPERTIES.addedAt] || null;
-  const favoriteProp = props["\u0412\u0438\u0431\u0440\u0430\u043D\u0435"] || props["Favorite"] || props["Bookmark"] || null;
-  const likedProp = props["\u0423\u043B\u044E\u0431\u043B\u0435\u043D\u0435"] || props["Liked"] || props["Loved"] || props["Love"] || null;
+  const favoriteProp = props[NOTION_PROPERTIES.favorite] || props["Favorite"] || props["Bookmark"] || null;
+  const likedProp = props[NOTION_PROPERTIES.liked] || props["Liked"] || props["Loved"] || props["Love"] || null;
+  const viewedProp = props[NOTION_PROPERTIES.viewed] || null;
+  const seasonProp = props[NOTION_PROPERTIES.season] || null;
+  const episodeProp = props[NOTION_PROPERTIES.episode] || null;
   const posterRaw = fileUrl(posterProp);
   const fallbackPoster = iconUrl(page) || coverUrl(page);
   return {
@@ -291,6 +303,9 @@ function mapPageSummary(page) {
     addedAt: textValue(addedProp) || page.created_time || page.last_edited_time || "",
     favorite: boolValue(favoriteProp),
     liked: boolValue(likedProp),
+    viewed: Number(viewedProp?.number || 0),
+    season: Number(seasonProp?.number || 0),
+    episode: Number(episodeProp?.number || 0),
     description: textValue(descriptionProp)
   };
 }
@@ -311,7 +326,10 @@ function mapPage(page) {
     m.groupEntry?.[0],
     m.addedEntry?.[0],
     m.favoriteEntry?.[0],
-    m.likedEntry?.[0]
+    m.likedEntry?.[0],
+    m.viewedEntry?.[0],
+    m.seasonEntry?.[0],
+    m.episodeEntry?.[0]
   ].filter(Boolean));
   const posterRaw = fileUrl(m.posterEntry?.[1]);
   const bannerRaw = fileUrl(m.bannerEntry?.[1]);
@@ -334,6 +352,9 @@ function mapPage(page) {
     addedAt: textValue(m.addedEntry?.[1]) || page.created_time || page.last_edited_time || "",
     favorite: boolValue(m.favoriteEntry?.[1]),
     liked: boolValue(m.likedEntry?.[1]),
+    viewed: Number(m.viewedEntry?.[1]?.number || 0),
+    season: Number(m.seasonEntry?.[1]?.number || 0),
+    episode: Number(m.episodeEntry?.[1]?.number || 0),
     links: extractLinks(m.entries, excludedNames),
     notionUrl: safeHttpUrl(page.url || "")
   };
@@ -382,6 +403,11 @@ async function resolveDatabaseSources(env) {
   return { databaseId, database, sources };
 }
 __name(resolveDatabaseSources, "resolveDatabaseSources");
+function isCompletedStatus(value) {
+  const key = String(value || "").trim().toLocaleLowerCase("uk-UA");
+  return key === "\u043F\u0435\u0440\u0435\u0433\u043B\u044F\u043D\u0443\u0432" || key === "\u043F\u0435\u0440\u0435\u0433\u043B\u044F\u043D\u0443\u0442\u043E" || key === "completed" || key === "watched";
+}
+__name(isCompletedStatus, "isCompletedStatus");
 function compactId(value) {
   return String(value || "").replace(/-/g, "").toLowerCase();
 }
@@ -424,18 +450,33 @@ async function queryDatabasePages(env) {
 __name(queryDatabasePages, "queryDatabasePages");
 function schemaOptionsFromSources(sources) {
   const statuses = new Set(TITLE_STATUS_OPTIONS);
-  const groups = /* @__PURE__ */ new Set();
+  const groups = /* @__PURE__ */ new Map();
   for (const source of sources || []) {
     for (const [name, prop] of Object.entries(source?.properties || {})) {
-      if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.status) && prop?.type === "status") {
-        for (const option of prop.status?.options || []) if (option?.name) statuses.add(option.name);
+      if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.status)) {
+        if (prop?.type === "status") {
+          for (const option of prop.status?.options || []) if (option?.name) statuses.add(option.name);
+        }
+        if (prop?.type === "select") {
+          for (const option of prop.select?.options || []) if (option?.name) statuses.add(option.name);
+        }
       }
-      if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.group) && prop?.type === "select") {
-        for (const option of prop.select?.options || []) if (option?.name) groups.add(option.name);
+      if (normalizeName(name) === normalizeName(NOTION_PROPERTIES.group)) {
+        const options = prop?.type === "select" ? prop.select?.options || [] : prop?.type === "multi_select" ? prop.multi_select?.options || [] : prop?.type === "status" ? prop.status?.options || [] : [];
+        for (const option of options) {
+          if (!option?.name) continue;
+          const key = normalizeName(option.name);
+          if (!groups.has(key)) groups.set(key, { id: option.id || "", name: option.name, color: option.color || "default", sourceId: source.id || "" });
+        }
       }
     }
   }
-  return { statuses: [...statuses], groups: [...groups].sort((a, b) => a.localeCompare(b, "uk")) };
+  const groupOptions = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, "uk"));
+  return {
+    statuses: [...statuses],
+    groups: groupOptions.map((option) => option.name),
+    groupOptions
+  };
 }
 __name(schemaOptionsFromSources, "schemaOptionsFromSources");
 function richTextValue(value) {
@@ -556,51 +597,172 @@ async function uploadSmallFileToNotion(env, file) {
 }
 __name(uploadSmallFileToNotion, "uploadSmallFileToNotion");
 function splitAliases(value) {
-  return String(value || "").split(/[\n|•]+/).map((x) => cleanTitle(x)).filter(Boolean);
+  return String(value || "").split(/[\n|•;]+|\s+\/\s+/).map((x) => cleanTitle(x)).filter(Boolean);
 }
 __name(splitAliases, "splitAliases");
-function aliasMatches(query, aliasesText) {
-  const wanted = exactCoreTitleKey(query);
-  if (!wanted) return false;
-  return splitAliases(aliasesText).some((alias) => exactCoreTitleKey(alias) === wanted);
+function aliasTokenSet(value) {
+  return new Set(exactCoreTitleKey(value).split(" ").filter(Boolean));
 }
-__name(aliasMatches, "aliasMatches");
+__name(aliasTokenSet, "aliasTokenSet");
+function aliasMatchScore(query, aliasesText) {
+  const wanted = exactCoreTitleKey(query);
+  if (!wanted) return 0;
+  const wantedTokens = aliasTokenSet(query);
+  let best = 0;
+  for (const alias of splitAliases(aliasesText)) {
+    const key = exactCoreTitleKey(alias);
+    if (!key) continue;
+    if (key === wanted) return 100;
+    const minLen = Math.min(key.length, wanted.length);
+    if (minLen >= 12 && (key.includes(wanted) || wanted.includes(key))) {
+      best = Math.max(best, 88 - Math.min(18, Math.abs(key.length - wanted.length) / 4));
+    }
+    const tokens = aliasTokenSet(alias);
+    if (tokens.size && wantedTokens.size) {
+      let overlap = 0;
+      for (const token of wantedTokens) if (tokens.has(token)) overlap++;
+      const union = (/* @__PURE__ */ new Set([...wantedTokens, ...tokens])).size || 1;
+      const jaccard = overlap / union;
+      const coverage = overlap / Math.min(wantedTokens.size, tokens.size);
+      if (overlap >= 3 && coverage >= 0.72) best = Math.max(best, 68 + Math.round(jaccard * 18));
+    }
+  }
+  return best;
+}
+__name(aliasMatchScore, "aliasMatchScore");
+function aliasSearchVariants(query) {
+  const q = cleanTitle(query);
+  const out = [q];
+  const withoutBrackets = cleanTitle(q.replace(/[\[(].*?[\])]/g, " "));
+  if (withoutBrackets.length >= 8) out.push(withoutBrackets);
+  for (const sep of [":", "\u2014", "\u2013"]) {
+    const part = cleanTitle(q.split(sep)[0]);
+    if (part.length >= 10) out.push(part);
+  }
+  const words = q.split(/\s+/).filter(Boolean);
+  if (words.length > 5) out.push(words.slice(0, 5).join(" "));
+  if (words.length > 7) out.push(words.slice(0, 7).join(" "));
+  return [...new Set(out.map(cleanTitle).filter((x) => x.length >= 4))].slice(0, 6);
+}
+__name(aliasSearchVariants, "aliasSearchVariants");
+function aliasesPropertyEntry(source) {
+  return Object.entries(source?.properties || {}).find(
+    ([name, prop]) => normalizeName(name) === normalizeName(NOTION_PROPERTIES.aliases) && ["rich_text", "title", "multi_select", "select"].includes(prop?.type)
+  ) || null;
+}
+__name(aliasesPropertyEntry, "aliasesPropertyEntry");
 async function queryPagesByAlias(env, source, query) {
-  const aliasesProp = Object.entries(source?.properties || {}).find(([name, prop]) => normalizeName(name) === normalizeName(NOTION_PROPERTIES.aliases) && prop?.type === "rich_text");
+  const aliasesProp = aliasesPropertyEntry(source);
   if (!aliasesProp) return [];
-  const result = await notionFetch(env, `/data_sources/${source.id}/query`, {
-    method: "POST",
-    body: JSON.stringify({
-      page_size: 25,
-      filter: {
-        property: aliasesProp[1].id || aliasesProp[0],
-        rich_text: { contains: String(query || "").trim().slice(0, 200) }
-      }
-    })
-  });
-  return (result?.results || []).filter((page) => page?.object === "page");
+  const [propName, prop] = aliasesProp;
+  const property = prop.id || propName;
+  const variants = aliasSearchVariants(query);
+  const filters = [];
+  if (prop.type === "rich_text" || prop.type === "title") {
+    for (const value of variants) filters.push({ property, [prop.type]: { contains: value.slice(0, 180) } });
+  } else if (prop.type === "multi_select") {
+    const options = prop.multi_select?.options || [];
+    const wanted = exactCoreTitleKey(query);
+    const matches = options.map((option) => ({ option, score: aliasMatchScore(query, option?.name || "") })).filter((x) => x.score >= 72).sort((a, b) => b.score - a.score).slice(0, 6);
+    if (!matches.length && wanted) {
+      const exact = options.find((option) => exactCoreTitleKey(option?.name || "") === wanted);
+      if (exact) matches.push({ option: exact, score: 100 });
+    }
+    for (const { option } of matches) filters.push({ property, multi_select: { contains: option.name } });
+  } else if (prop.type === "select") {
+    const options = prop.select?.options || [];
+    const matches = options.map((option) => ({ option, score: aliasMatchScore(query, option?.name || "") })).filter((x) => x.score >= 72).sort((a, b) => b.score - a.score).slice(0, 6);
+    for (const { option } of matches) filters.push({ property, select: { equals: option.name } });
+  }
+  if (!filters.length) return [];
+  const pages = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const filter of filters.slice(0, 6)) {
+    const result = await notionFetch(env, `/data_sources/${source.id}/query`, {
+      method: "POST",
+      body: JSON.stringify({ page_size: 25, filter })
+    });
+    for (const page of result?.results || []) {
+      if (page?.object !== "page" || seen.has(page.id)) continue;
+      seen.add(page.id);
+      pages.push(page);
+    }
+  }
+  return pages;
 }
 __name(queryPagesByAlias, "queryPagesByAlias");
+async function collectGroupValuesFromPages(env, sources, existingGroups = []) {
+  const groups = new Set(existingGroups || []);
+  if (groups.size >= 2) return [...groups].sort((a, b) => a.localeCompare(b, "uk"));
+  for (const source of sources || []) {
+    const groupEntry = Object.entries(source?.properties || {}).find(([name]) => normalizeName(name) === normalizeName(NOTION_PROPERTIES.group));
+    if (!groupEntry) continue;
+    let cursor = null;
+    let scanned = 0;
+    do {
+      const body = { page_size: 100 };
+      if (cursor) body.start_cursor = cursor;
+      const result = await notionFetch(env, `/data_sources/${source.id}/query`, { method: "POST", body: JSON.stringify(body) });
+      for (const page of result?.results || []) {
+        const mapped = getMappedEntries(page);
+        const value = textValue(mapped.groupEntry?.[1]);
+        for (const group of String(value || "").split(",").map((x) => x.trim()).filter(Boolean)) groups.add(group);
+      }
+      scanned += (result?.results || []).length;
+      cursor = result?.has_more && scanned < 300 ? result.next_cursor : null;
+    } while (cursor);
+  }
+  return [...groups].sort((a, b) => a.localeCompare(b, "uk"));
+}
+__name(collectGroupValuesFromPages, "collectGroupValuesFromPages");
 async function handleExtensionContextApi(request, env) {
   if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { allow: "GET" });
   const url = new URL(request.url);
-  const q = cleanTitle(url.searchParams.get("title") || url.searchParams.get("q") || "");
+  const primary = cleanTitle(url.searchParams.get("title") || url.searchParams.get("q") || "");
+  let extraTitles = [];
+  try {
+    const parsed = JSON.parse(url.searchParams.get("titles") || "[]");
+    if (Array.isArray(parsed)) extraTitles = parsed.map(cleanTitle).filter(Boolean);
+  } catch {
+  }
+  const queries = [...new Set([primary, ...extraTitles].map(cleanTitle).filter(Boolean))].slice(0, 5);
+  const q = queries[0] || "";
   const resolved = await resolveDatabaseSources(env);
   const options = schemaOptionsFromSources(resolved.sources);
-  if (!q) return json({ ok: true, exists: false, query: "", item: null, options });
+  options.groups = await collectGroupValuesFromPages(env, resolved.sources, options.groups);
+  if (!q) return json({ ok: true, exists: false, query: "", queries: [], item: null, options });
   const candidates = [];
+  const seen = /* @__PURE__ */ new Set();
   for (const source of resolved.sources) {
-    const pages = await queryPagesByAlias(env, source, q);
-    for (const page of pages) candidates.push(page);
+    for (const query of queries) {
+      const pages = await queryPagesByAlias(env, source, query);
+      for (const page of pages) {
+        if (!page?.id || seen.has(page.id)) continue;
+        seen.add(page.id);
+        candidates.push(page);
+      }
+    }
   }
-  let matched = candidates.find((page) => aliasMatches(q, textValue(getMappedEntries(page).aliasesEntry?.[1]))) || null;
-  if (!matched && candidates.length === 1) matched = candidates[0];
+  const ranked = candidates.map((page) => {
+    const aliases = textValue(getMappedEntries(page).aliasesEntry?.[1]);
+    const scores = queries.map((query) => ({ query, score: aliasMatchScore(query, aliases) }));
+    scores.sort((a, b) => b.score - a.score);
+    return { page, aliases, query: scores[0]?.query || q, score: scores[0]?.score || 0 };
+  }).sort((a, b) => b.score - a.score);
+  const best = ranked.find((x) => x.score >= 72) || null;
+  const matched = best?.page || null;
   return json({
     ok: true,
     exists: Boolean(matched),
     query: q,
+    queries,
+    matchedBy: best?.query || "",
     item: matched ? mapPage(matched) : null,
-    options
+    options,
+    debug: {
+      variants: queries.flatMap(aliasSearchVariants).filter((value, index, array) => array.indexOf(value) === index).slice(0, 20),
+      candidates: ranked.slice(0, 5).map((x) => ({ id: x.page?.id, score: x.score, matchedBy: x.query, aliases: x.aliases.slice(0, 240) }))
+    }
   });
 }
 __name(handleExtensionContextApi, "handleExtensionContextApi");
@@ -644,7 +806,12 @@ async function ensureWritableSchema(env, source) {
     [NOTION_PROPERTIES.group]: { select: { options: [] } },
     [NOTION_PROPERTIES.sourceUrl]: { url: {} },
     [NOTION_PROPERTIES.key]: { rich_text: {} },
-    [NOTION_PROPERTIES.addedAt]: { date: {} }
+    [NOTION_PROPERTIES.addedAt]: { date: {} },
+    [NOTION_PROPERTIES.favorite]: { checkbox: {} },
+    [NOTION_PROPERTIES.liked]: { checkbox: {} },
+    [NOTION_PROPERTIES.viewed]: { number: { format: "number" } },
+    [NOTION_PROPERTIES.season]: { number: { format: "number" } },
+    [NOTION_PROPERTIES.episode]: { number: { format: "number" } }
   };
   for (const [name, config] of Object.entries(required)) if (!properties[name]) additions[name] = config;
   for (const domain of SITE_PROPERTIES) if (!properties[domain]) additions[domain] = { rich_text: {} };
@@ -676,6 +843,134 @@ async function ensureGroupOption(env, source, groupName) {
   return notionFetch(env, `/data_sources/${current.id}`);
 }
 __name(ensureGroupOption, "ensureGroupOption");
+function groupSelectProperty(source) {
+  return Object.entries(source?.properties || {}).find(([name, prop]) => normalizeName(name) === normalizeName(NOTION_PROPERTIES.group) && prop?.type === "select") || null;
+}
+__name(groupSelectProperty, "groupSelectProperty");
+async function patchSelectSchema(env, source, prop, options) {
+  await notionFetch(env, `/data_sources/${source.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      properties: {
+        [prop.id || NOTION_PROPERTIES.group]: { select: { options } }
+      }
+    })
+  });
+  return notionFetch(env, `/data_sources/${source.id}`);
+}
+__name(patchSelectSchema, "patchSelectSchema");
+async function queryPagesWithGroup(env, sourceId, propertyName, groupName) {
+  const pages = [];
+  let cursor = null;
+  do {
+    const body = {
+      page_size: 100,
+      filter: { property: propertyName, select: { equals: groupName } }
+    };
+    if (cursor) body.start_cursor = cursor;
+    const result = await notionFetch(env, `/data_sources/${sourceId}/query`, { method: "POST", body: JSON.stringify(body) });
+    pages.push(...(result.results || []).filter((item) => item?.object === "page"));
+    cursor = result.has_more ? result.next_cursor : null;
+  } while (cursor && pages.length < 1e4);
+  return pages;
+}
+__name(queryPagesWithGroup, "queryPagesWithGroup");
+async function migratePagesGroup(env, pages, propertyName, targetName) {
+  const queue = [...pages];
+  const workers = Array.from({ length: Math.min(5, queue.length || 1) }, async () => {
+    while (queue.length) {
+      const page = queue.shift();
+      if (!page?.id) continue;
+      await notionFetch(env, `/pages/${page.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ properties: { [propertyName]: { select: targetName ? { name: targetName } : null } } })
+      });
+    }
+  });
+  await Promise.all(workers);
+}
+__name(migratePagesGroup, "migratePagesGroup");
+async function updateGroupOption(env, source, requested) {
+  let current = await ensureWritableSchema(env, source);
+  let entry = groupSelectProperty(current);
+  if (!entry) throw new HttpError(400, "\u041F\u043E\u043B\u0435 \xAB\u0413\u0440\u0443\u043F\u0430\xBB \u043C\u0430\u0454 \u0431\u0443\u0442\u0438 \u0442\u0438\u043F\u0443 Select.", "", "", "group_schema");
+  let [propertyName, prop] = entry;
+  const options = prop.select?.options || [];
+  const old = options.find((option) => requested.id && option.id === requested.id || !requested.id && normalizeName(option.name) === normalizeName(requested.oldName || ""));
+  if (!old) throw new HttpError(404, "\u0413\u0440\u0443\u043F\u0443 \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E \u0432 \u0441\u0445\u0435\u043C\u0456 Notion.", "", "", "group_not_found");
+  const targetName = String(requested.name || "").trim();
+  const targetColor = NOTION_SELECT_COLORS.includes(requested.color) ? requested.color : old.color || "default";
+  if (!targetName) throw new HttpError(400, "\u041D\u0430\u0437\u0432\u0430 \u0433\u0440\u0443\u043F\u0438 \u043D\u0435 \u043C\u043E\u0436\u0435 \u0431\u0443\u0442\u0438 \u043F\u043E\u0440\u043E\u0436\u043D\u044C\u043E\u044E.", "", "", "group_name");
+  const duplicate = options.find((option) => option.id !== old.id && normalizeName(option.name) === normalizeName(targetName));
+  if (duplicate) throw new HttpError(409, `\u0413\u0440\u0443\u043F\u0430 \xAB${targetName}\xBB \u0443\u0436\u0435 \u0456\u0441\u043D\u0443\u0454.`, "", "", "group_duplicate");
+  if (targetName === old.name && targetColor === (old.color || "default")) return { source: current, migrated: 0 };
+  const pages = await queryPagesWithGroup(env, current.id, propertyName, old.name);
+  let migrated = pages.length;
+  if (normalizeName(targetName) !== normalizeName(old.name)) {
+    current = await patchSelectSchema(env, current, prop, [
+      ...options.map((option) => ({ id: option.id })),
+      { name: targetName, color: targetColor }
+    ]);
+    await migratePagesGroup(env, pages, propertyName, targetName);
+    entry = groupSelectProperty(current);
+    prop = entry[1];
+    current = await patchSelectSchema(env, current, prop, (prop.select?.options || []).filter((option) => option.id !== old.id).map((option) => ({ id: option.id })));
+    return { source: current, migrated };
+  }
+  const tempName = `__YORU_${Date.now().toString(36)}__`;
+  current = await patchSelectSchema(env, current, prop, [
+    ...options.map((option) => ({ id: option.id })),
+    { name: tempName, color: targetColor }
+  ]);
+  await migratePagesGroup(env, pages, propertyName, tempName);
+  entry = groupSelectProperty(current);
+  prop = entry[1];
+  current = await patchSelectSchema(env, current, prop, (prop.select?.options || []).filter((option) => option.id !== old.id).map((option) => ({ id: option.id })));
+  entry = groupSelectProperty(current);
+  prop = entry[1];
+  current = await patchSelectSchema(env, current, prop, [
+    ...(prop.select?.options || []).map((option) => ({ id: option.id })),
+    { name: targetName, color: targetColor }
+  ]);
+  await migratePagesGroup(env, pages, propertyName, targetName);
+  entry = groupSelectProperty(current);
+  prop = entry[1];
+  const temp = (prop.select?.options || []).find((option) => option.name === tempName);
+  if (temp) current = await patchSelectSchema(env, current, prop, (prop.select?.options || []).filter((option) => option.id !== temp.id).map((option) => ({ id: option.id })));
+  return { source: current, migrated };
+}
+__name(updateGroupOption, "updateGroupOption");
+async function handleGroupsApi(request, env) {
+  const resolved = await resolveDatabaseSources(env);
+  let source = await getWriteSource(env, resolved);
+  source = await ensureWritableSchema(env, source);
+  if (request.method === "GET") return json({ ok: true, ...schemaOptionsFromSources([source]) });
+  if (request.method !== "PATCH") return json({ error: "Method not allowed" }, 405, { allow: "GET, PATCH" });
+  const body = await request.json().catch(() => ({}));
+  const result = await updateGroupOption(env, source, body);
+  return json({ ok: true, migrated: result.migrated, ...schemaOptionsFromSources([result.source]) });
+}
+__name(handleGroupsApi, "handleGroupsApi");
+async function handleViewedApi(request, env) {
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { allow: "POST" });
+  const url = new URL(request.url);
+  const requestedId = url.searchParams.get("id");
+  if (!requestedId) return json({ error: "\u041D\u0435 \u043F\u0435\u0440\u0435\u0434\u0430\u043D\u043E id \u0442\u0430\u0439\u0442\u043B\u0443." }, 400);
+  const page = await notionFetch(env, `/pages/${requestedId}`);
+  const mapped = getMappedEntries(page);
+  const sourceId = page?.parent?.data_source_id;
+  let source = sourceId ? await notionFetch(env, `/data_sources/${sourceId}`) : await getWriteSource(env);
+  source = await ensureWritableSchema(env, source);
+  const name = mapped.viewedEntry?.[0] || NOTION_PROPERTIES.viewed;
+  const current = Number(mapped.viewedEntry?.[1]?.number || 0);
+  const next = Math.max(1, current + 1);
+  const updated = await notionFetch(env, `/pages/${requestedId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ properties: { [name]: { number: next } } })
+  });
+  return json({ ok: true, viewed: next, item: mapPage(updated), options: schemaOptionsFromSources([source]) });
+}
+__name(handleViewedApi, "handleViewedApi");
 async function aniListRequest(query, variables) {
   const response = await fetch(ANILIST_ENDPOINT, {
     method: "POST",
@@ -1214,6 +1509,11 @@ function buildCreateProperties(media, payload, translated, siteLinks, source) {
   };
   if (payload.status && payload.status !== "\u0411\u0435\u0437 \u0441\u0442\u0430\u0442\u0443\u0441\u0443") properties[NOTION_PROPERTIES.status] = { status: { name: payload.status } };
   if (payload.group && payload.group !== "\u0411\u0435\u0437 \u0433\u0440\u0443\u043F\u0438") properties[NOTION_PROPERTIES.group] = { select: { name: payload.group } };
+  let initialViewed = Math.max(0, Number(payload.viewed) || 0);
+  if (isCompletedStatus(payload.status) && initialViewed < 1) initialViewed = 1;
+  properties[NOTION_PROPERTIES.viewed] = { number: initialViewed };
+  properties[NOTION_PROPERTIES.season] = { number: Math.max(0, Number(payload.season) || 0) };
+  properties[NOTION_PROPERTIES.episode] = { number: Math.max(0, Number(payload.episode) || 0) };
   const cover = safeHttpUrl(media?.coverImage?.extraLarge || media?.coverImage?.large || media?.coverImage?.medium || "");
   const banner = safeHttpUrl(media?.bannerImage || "");
   if (cover) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(cover, `${media?.provider || "anime"}-cover`, mediaProviderId(media));
@@ -1326,7 +1626,12 @@ async function handleMergeAnimeApi(request, env) {
     [NOTION_PROPERTIES.aliases]: richTextChunksValue(mergedAliases),
     [NOTION_PROPERTIES.key]: richTextValue(exactCoreTitleKey(mergedOriginal || mergedTitle)),
     [NOTION_PROPERTIES.status]: markItem.status && markItem.status !== "\u0411\u0435\u0437 \u0441\u0442\u0430\u0442\u0443\u0441\u0443" ? { status: { name: markItem.status } } : { status: null },
-    [NOTION_PROPERTIES.group]: markItem.group && markItem.group !== "\u0411\u0435\u0437 \u0433\u0440\u0443\u043F\u0438" ? { select: { name: markItem.group } } : { select: null }
+    [NOTION_PROPERTIES.group]: markItem.group && markItem.group !== "\u0411\u0435\u0437 \u0433\u0440\u0443\u043F\u0438" ? { select: { name: markItem.group } } : { select: null },
+    [NOTION_PROPERTIES.favorite]: { checkbox: Boolean(markItem.favorite) },
+    [NOTION_PROPERTIES.liked]: { checkbox: Boolean(markItem.liked) },
+    [NOTION_PROPERTIES.viewed]: { number: Math.max(0, Number(markItem.viewed) || 0) },
+    [NOTION_PROPERTIES.season]: { number: Math.max(0, Number(markItem.season) || 0) },
+    [NOTION_PROPERTIES.episode]: { number: Math.max(0, Number(markItem.episode) || 0) }
   };
   if (mergedPoster) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(mergedPoster, "merged-cover");
   if (mergedBanner) properties[NOTION_PROPERTIES.banner] = notionFilesValue(mergedBanner, "merged-banner");
@@ -1364,11 +1669,22 @@ async function handleAnimeApi(request, env) {
         resolveDatabaseSources(env)
       ]);
       if (!page?.id) return json({ error: "\u0422\u0430\u0439\u0442\u043B \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E." }, 404);
-      return json({ item: mapPage(page), count: 1, options: schemaOptionsFromSources(resolved.sources) });
+      let optionSources2 = resolved.sources;
+      const pageSource = resolved.sources.find((source) => source.id === page?.parent?.data_source_id) || resolved.sources[0];
+      if (pageSource) {
+        const ensured = await ensureWritableSchema(env, pageSource);
+        optionSources2 = resolved.sources.map((source) => source.id === ensured.id ? ensured : source);
+      }
+      return json({ item: mapPage(page), count: 1, options: schemaOptionsFromSources(optionSources2) });
     }
     const queried = await queryDatabasePages(env);
+    let optionSources = queried.sources;
+    if (queried.sources[0]) {
+      const ensured = await ensureWritableSchema(env, queried.sources[0]);
+      optionSources = queried.sources.map((source) => source.id === ensured.id ? ensured : source);
+    }
     const items = queried.pages.map(mapPageSummary);
-    const options = schemaOptionsFromSources(queried.sources);
+    const options = schemaOptionsFromSources(optionSources);
     return json({ items, count: items.length, databaseId: queried.databaseId, sources: queried.sourceStats, options });
   }
   if (request.method === "PATCH") {
@@ -1404,8 +1720,10 @@ async function handleAnimeApi(request, env) {
       const name = mapped.aliasesEntry?.[0] || NOTION_PROPERTIES.aliases;
       properties[name] = richTextChunksValue(body.aliases || "");
     }
+    let requestedStatus = null;
     if (Object.prototype.hasOwnProperty.call(body, "status")) {
       const statusName = String(body.status || "").trim();
+      requestedStatus = statusName;
       const name = mapped.statusEntry?.[0] || NOTION_PROPERTIES.status;
       properties[name] = statusName && statusName !== "\u0411\u0435\u0437 \u0441\u0442\u0430\u0442\u0443\u0441\u0443" ? { status: { name: statusName } } : { status: null };
     }
@@ -1417,17 +1735,35 @@ async function handleAnimeApi(request, env) {
     }
     if (Object.prototype.hasOwnProperty.call(body, "favorite")) {
       const entry = mapped.favoriteEntry;
-      if (entry) {
-        const value = booleanPropertyValue(entry[1], body.favorite);
-        if (value) properties[entry[0]] = value;
-      }
+      const name = entry?.[0] || NOTION_PROPERTIES.favorite;
+      const prop = entry?.[1] || source?.properties?.[name] || { type: "checkbox" };
+      const value = booleanPropertyValue(prop, body.favorite);
+      if (value) properties[name] = value;
     }
     if (Object.prototype.hasOwnProperty.call(body, "liked")) {
       const entry = mapped.likedEntry;
-      if (entry) {
-        const value = booleanPropertyValue(entry[1], body.liked);
-        if (value) properties[entry[0]] = value;
-      }
+      const name = entry?.[0] || NOTION_PROPERTIES.liked;
+      const prop = entry?.[1] || source?.properties?.[name] || { type: "checkbox" };
+      const value = booleanPropertyValue(prop, body.liked);
+      if (value) properties[name] = value;
+    }
+    const currentViewed = Math.max(0, Number(mapped.viewedEntry?.[1]?.number || 0));
+    let nextViewed = Object.prototype.hasOwnProperty.call(body, "viewed") ? Math.max(0, Number(body.viewed) || 0) : null;
+    if (requestedStatus !== null && isCompletedStatus(requestedStatus)) {
+      const effectiveViewed = nextViewed === null ? currentViewed : nextViewed;
+      if (effectiveViewed < 1) nextViewed = 1;
+    }
+    if (nextViewed !== null) {
+      const name = mapped.viewedEntry?.[0] || NOTION_PROPERTIES.viewed;
+      properties[name] = { number: nextViewed };
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "season")) {
+      const name = mapped.seasonEntry?.[0] || NOTION_PROPERTIES.season;
+      properties[name] = { number: Math.max(0, Math.floor(Number(body.season) || 0)) };
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "episode")) {
+      const name = mapped.episodeEntry?.[0] || NOTION_PROPERTIES.episode;
+      properties[name] = { number: Math.max(0, Math.floor(Number(body.episode) || 0)) };
     }
     if (Object.prototype.hasOwnProperty.call(body, "posterUrl")) {
       const rawPoster = String(body.posterUrl || "").trim();
@@ -1691,6 +2027,12 @@ function coreTitleData(payload) {
     banner: safeHttpUrl(payload?.banner?.url || ""),
     status: plainTitle(payload?.status || input.status || ""),
     group: plainTitle(payload?.group || input.group || ""),
+    viewed: Math.max(0, Number(payload?.viewed ?? input.viewed) || 0),
+    season: Math.max(0, Number(payload?.season ?? input.season) || 0),
+    episode: Math.max(0, Number(payload?.episode ?? input.episode) || 0),
+    hasSeason: Object.prototype.hasOwnProperty.call(payload || {}, "season") || Object.prototype.hasOwnProperty.call(input || {}, "season"),
+    hasEpisode: Object.prototype.hasOwnProperty.call(payload || {}, "episode") || Object.prototype.hasOwnProperty.call(input || {}, "episode"),
+    hasViewed: Object.prototype.hasOwnProperty.call(payload || {}, "viewed") || Object.prototype.hasOwnProperty.call(input || {}, "viewed"),
     sourceUrl: safeHttpUrl(input.url || "")
   };
 }
@@ -1718,6 +2060,11 @@ function buildCoreProperties(payload, source, { includeAddedAt = true } = {}) {
   if (includeAddedAt) properties[NOTION_PROPERTIES.addedAt] = { date: { start: (/* @__PURE__ */ new Date()).toISOString() } };
   if (data.status && data.status !== "\u0411\u0435\u0437 \u0441\u0442\u0430\u0442\u0443\u0441\u0443") properties[NOTION_PROPERTIES.status] = { status: { name: data.status } };
   if (data.group && data.group !== "\u0411\u0435\u0437 \u0433\u0440\u0443\u043F\u0438") properties[NOTION_PROPERTIES.group] = { select: { name: data.group } };
+  let coreViewed = Math.max(0, Number(data.viewed) || 0);
+  if (isCompletedStatus(data.status) && coreViewed < 1) coreViewed = 1;
+  properties[NOTION_PROPERTIES.viewed] = { number: coreViewed };
+  properties[NOTION_PROPERTIES.season] = { number: Math.max(0, Number(data.season) || 0) };
+  properties[NOTION_PROPERTIES.episode] = { number: Math.max(0, Number(data.episode) || 0) };
   if (data.cover) properties[NOTION_PROPERTIES.coverImage] = notionFilesValue(data.cover, "core-cover", payload?.meta?.anilist_id || payload?.meta?.mal_id || "");
   if (data.banner) properties[NOTION_PROPERTIES.banner] = notionFilesValue(data.banner, "core-banner", payload?.meta?.anilist_id || payload?.meta?.mal_id || "");
   if (data.sourceUrl) properties[NOTION_PROPERTIES.sourceUrl] = { url: data.sourceUrl };
@@ -1750,6 +2097,21 @@ async function ingestCorePayload(env, payload) {
   const titleData = coreTitleData(payload);
   if (titleData.group) source = await ensureGroupOption(env, source, titleData.group);
   const built = buildCoreProperties(payload, source, { includeAddedAt: !existing });
+  if (existing && existingPage) {
+    const existingMapped = getMappedEntries(existingPage);
+    const currentViewed = Math.max(0, Number(existingMapped.viewedEntry?.[1]?.number || 0));
+    if (!built.data.hasViewed) {
+      if (isCompletedStatus(built.data.status) && currentViewed < 1) {
+        const viewedName = existingMapped.viewedEntry?.[0] || NOTION_PROPERTIES.viewed;
+        delete built.properties[NOTION_PROPERTIES.viewed];
+        built.properties[viewedName] = { number: 1 };
+      } else {
+        delete built.properties[NOTION_PROPERTIES.viewed];
+      }
+    }
+    if (!built.data.hasSeason) delete built.properties[NOTION_PROPERTIES.season];
+    if (!built.data.hasEpisode) delete built.properties[NOTION_PROPERTIES.episode];
+  }
   let savedPage;
   if (existing) {
     savedPage = await notionFetch(env, `/pages/${existing.id}`, { method: "PATCH", body: JSON.stringify({ properties: built.properties }) });
@@ -2023,6 +2385,8 @@ var worker_default = {
       if (url.pathname === "/api/ingest" || url.pathname === "/api/anime/import") return await handleIngestApi(request, env);
       if (request.method === "POST" && url.pathname === "/" && (request.headers.get("content-type") || "").includes("application/json")) return await handleIngestApi(request, env);
       if (url.pathname === "/api/anime/merge") return await handleMergeAnimeApi(request, env);
+      if (url.pathname === "/api/anime/viewed") return await handleViewedApi(request, env);
+      if (url.pathname === "/api/groups") return await handleGroupsApi(request, env);
       if (url.pathname === "/api/anime/upload") return await handleAnimeUploadApi(request, env);
       if (url.pathname === "/api/extension/context") return await handleExtensionContextApi(request, env);
       if (url.pathname === "/api/anime") return await handleAnimeApi(request, env);
@@ -2030,7 +2394,7 @@ var worker_default = {
       if (url.pathname === "/api/discover") return await handleDiscoverApi(request, env);
       if (url.pathname === "/api/discover/prepare") return await handleDiscoverPrepareApi(request, env);
       if (url.pathname === "/api/catalog-search") return await handleCatalogSearchApi(request, env);
-      if (url.pathname === "/api/version") return json({ ok: true, version: "yoru-v5.5-editor-extension-2026-08-13", addTitle: true, googleSourceSearch: true, googleSearchMode: "vercel-python-core", sourceSites: AUTHORITY_SITES, catalogs: SITE_PROPERTIES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: "ndjson-v1", coreJsonIngest: true, ingestEndpoint: "/api/ingest", mediaRepair: true, mergeTitles: true, mergeEndpoint: "/api/anime/merge", deleteTitles: true, editTitles: true, uploadEndpoint: "/api/anime/upload", extensionContext: "/api/extension/context" });
+      if (url.pathname === "/api/version") return json({ ok: true, version: "yoru-v6.0-season-episode-2026-08-15", addTitle: true, googleSourceSearch: true, googleSearchMode: "vercel-python-core", sourceSites: AUTHORITY_SITES, catalogs: SITE_PROPERTIES, pythonCoreSearch: env.CORE_SEARCH_URL || CORE_SEARCH_URL, pythonCoreProcessStream: env.CORE_PROCESS_STREAM_URL || CORE_PROCESS_STREAM_URL, pythonCoreProcessFull: env.CORE_PROCESS_FULL_URL || CORE_PROCESS_FULL_URL, pythonCoreProcess: env.CORE_PROCESS_URL || CORE_PROCESS_URL, progressProtocol: "ndjson-v1", coreJsonIngest: true, ingestEndpoint: "/api/ingest", mediaRepair: true, mergeTitles: true, mergeEndpoint: "/api/anime/merge", deleteTitles: true, editTitles: true, uploadEndpoint: "/api/anime/upload", extensionContext: "/api/extension/context", aliasLookupV2: true, editorMediaMode: "url", favoriteStorage: "notion-checkbox", likedStorage: "notion-checkbox", viewedStorage: "notion-number", seasonEpisodeStorage: "notion-number", groupSettings: "/api/groups" });
       if (url.pathname === "/api/health") {
         const databaseId = env.NOTION_DATABASE_ID || DEFAULT_DATABASE_ID;
         if (!env.NOTION_TOKEN) return json({ ok: false, notion: false, tokenConfigured: false, databaseId, step: "cloudflare_secret", error: "\u0423 Cloudflare \u043D\u0435 \u0437\u0430\u0434\u0430\u043D\u043E NOTION_TOKEN." }, 500);
@@ -2054,4 +2418,4 @@ var worker_default = {
 export {
   worker_default as default
 };
-//# sourceMappingURL=bundledWorker-0.5156338387433945.mjs.map
+//# sourceMappingURL=bundledWorker-0.606498847430932.mjs.map
