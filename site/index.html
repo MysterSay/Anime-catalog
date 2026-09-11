@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#090b12" />
+  <meta name="robots" content="noindex, nofollow, noarchive" />
+  <title>Yoru — Anime Catalog</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=7.2" />
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+  <div class="noise"></div>
+
+  <header class="topbar">
+    <a class="brand" href="index.html" aria-label="На головну">
+      <span class="brand-mark">夜</span>
+      <span class="brand-text">YORU</span>
+    </a>
+
+    <nav class="top-actions">
+      <button class="chip-btn active" data-quick="all">
+        <span>Усі</span><strong id="countAll">0</strong>
+      </button>
+      <button class="chip-btn" data-quick="favorite">
+        <span>Вибране</span><strong id="countFavorite">0</strong>
+      </button>
+      <button class="chip-btn" data-quick="liked">
+        <span>Улюблене</span><strong id="countLiked">0</strong>
+      </button>
+      <button id="openAddTitle" class="chip-btn add-title-chip" type="button">
+        <span>＋ Додати тайтл</span>
+      </button>
+      <button id="openSettings" class="chip-btn settings-chip" type="button">
+        <span>⚙ Налаштувати</span>
+      </button>
+    </nav>
+  </header>
+
+  <main class="page-shell">
+    <section class="hero">
+      <div class="hero-copy reveal">
+        <span class="eyebrow">PERSONAL ANIME LIBRARY</span>
+        <h1>Каталог, який <span>живе</span> разом із твоєю колекцією.</h1>
+        <p>Шукай, сортуй, групуй і відкривай тайтли без зайвих переходів.</p>
+      </div>
+      <div class="hero-stat reveal delay-1">
+        <span>У колекції</span>
+        <strong id="heroTotal">0</strong>
+        <small>тайтлів</small>
+      </div>
+    </section>
+
+    <section class="controls-panel reveal delay-2">
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.3-4.3m2.3-5.2a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="searchInput" type="search" placeholder="Пошук за назвою, групою, статусом, #тегом, жанром або темою…" autocomplete="off" />
+        <kbd>/</kbd>
+      </div>
+
+      <div class="filters-row compact-controls-row">
+        <div class="custom-select select-wrap group-select" data-custom-select="groupFilter">
+          <select id="groupFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Усі групи</option></select>
+          <button class="icon-control custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-tooltip="Група: Усі групи">
+            <span class="control-symbol control-symbol-group" aria-hidden="true"></span>
+          </button>
+          <div class="custom-select-menu hidden" role="listbox"></div>
+        </div>
+
+        <div class="custom-select select-wrap status-select" data-custom-select="statusFilter">
+          <select id="statusFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Усі статуси</option></select>
+          <button class="icon-control custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-tooltip="Статус: Усі статуси">
+            <span class="control-symbol control-symbol-status" aria-hidden="true"></span>
+          </button>
+          <div class="custom-select-menu hidden" role="listbox"></div>
+        </div>
+
+        <div class="custom-select select-wrap taxonomy-select" data-custom-select="genreFilter">
+          <select id="genreFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Усі жанри</option></select>
+          <button class="icon-control custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-tooltip="Жанр: Усі жанри">
+            <span class="taxonomy-control-glyph" aria-hidden="true">Ж</span>
+          </button>
+          <div class="custom-select-menu hidden" role="listbox"></div>
+        </div>
+
+        <div class="custom-select select-wrap taxonomy-select" data-custom-select="themeFilter">
+          <select id="themeFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Усі теми</option></select>
+          <button class="icon-control custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-tooltip="Тема: Усі теми">
+            <span class="taxonomy-control-glyph" aria-hidden="true">Т</span>
+          </button>
+          <div class="custom-select-menu hidden" role="listbox"></div>
+        </div>
+
+        <div class="custom-select select-wrap sort-select" data-custom-select="sortSelect">
+          <select id="sortSelect" class="custom-native-select" aria-hidden="true" tabindex="-1">
+            <option value="added-desc">Спочатку нові</option>
+            <option value="added-asc">Спочатку старі</option>
+            <option value="title-asc">За алфавітом A–Я</option>
+            <option value="title-desc">За алфавітом Я–A</option>
+            <option value="status">За статусом</option>
+            <option value="genre-asc">За жанром A–Я</option>
+            <option value="genre-desc">За жанром Я–A</option>
+            <option value="theme-asc">За темою A–Я</option>
+            <option value="theme-desc">За темою Я–A</option>
+          </select>
+          <button class="icon-control custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-tooltip="Сортування: Спочатку нові">
+            <span class="control-symbol control-symbol-sort" aria-hidden="true"></span>
+          </button>
+          <div class="custom-select-menu hidden" role="listbox"></div>
+        </div>
+
+        <div class="filter-menu" id="excludeFilterMenu">
+          <button id="excludeFilterBtn" class="icon-control filter-toggle" type="button" aria-expanded="false" aria-controls="excludeFilterPanel" data-tooltip="Фільтр: нічого не приховується">
+            <span class="filter-toggle-icon" aria-hidden="true"></span>
+            <strong id="excludeFilterCount">0</strong>
+          </button>
+          <div id="excludeFilterPanel" class="filter-panel hidden">
+            <div class="filter-field">
+              <span>Не показувати статус</span>
+              <div class="custom-select nested-select" data-custom-select="excludeStatusFilter">
+                <select id="excludeStatusFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Нічого не приховувати</option></select>
+                <button class="nested-select-trigger custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="nested-select-value">Нічого не приховувати</span><span class="nested-select-caret">⌄</span>
+                </button>
+                <div class="custom-select-menu hidden" role="listbox"></div>
+              </div>
+            </div>
+            <div class="filter-field">
+              <span>Не показувати групу</span>
+              <div class="custom-select nested-select" data-custom-select="excludeGroupFilter">
+                <select id="excludeGroupFilter" class="custom-native-select" aria-hidden="true" tabindex="-1"><option value="all">Нічого не приховувати</option></select>
+                <button class="nested-select-trigger custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="nested-select-value">Нічого не приховувати</span><span class="nested-select-caret">⌄</span>
+                </button>
+                <div class="custom-select-menu hidden" role="listbox"></div>
+              </div>
+            </div>
+            <label class="filter-check">
+              <input id="hideFavoriteFilter" type="checkbox" />
+              <span>Не показувати вибране</span>
+            </label>
+            <label class="filter-check">
+              <input id="hideLikedFilter" type="checkbox" />
+              <span>Не показувати улюблене</span>
+            </label>
+            <button id="clearExcludeFilters" class="ghost-filter-btn" type="button">Очистити фільтр</button>
+          </div>
+        </div>
+
+        <div class="view-switch" role="group" aria-label="Режим відображення">
+          <button id="gridViewBtn" class="view-btn icon-control active" data-tooltip="Галерея" title="" aria-label="Галерея">
+            <svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z" fill="currentColor"/></svg>
+          </button>
+          <button id="listViewBtn" class="view-btn icon-control" data-tooltip="Список" title="" aria-label="Список">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <section class="catalog-head reveal delay-3">
+      <div>
+        <span class="section-kicker">КАТАЛОГ</span>
+        <h2 id="catalogTitle">Усі тайтли</h2>
+      </div>
+      <div class="result-count"><strong id="resultCount">0</strong> результатів</div>
+    </section>
+
+    <section id="catalog" class="catalog-grid" aria-live="polite"></section>
+    <div id="emptyState" class="empty-state hidden">
+      <div class="empty-icon">◇</div>
+      <h3>Нічого не знайдено</h3>
+      <p>Спробуй змінити пошук або фільтри.</p>
+    </div>
+  </main>
+
+  <div id="discoverModal" class="modal-shell hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-discover-close></div>
+    <section class="modal-card discover-card" role="dialog" aria-modal="true" aria-labelledby="discoverTitle">
+      <button class="modal-x" type="button" data-discover-close aria-label="Закрити">×</button>
+      <div class="modal-head">
+        <span class="section-kicker">ANIME → NOTION</span>
+        <h2 id="discoverTitle">Знайти та додати тайтл</h2>
+        <p>Пошук через Google окремо в MyAnimeList, AniList і Shikimori виконує Python core. Обери правильну сторінку — решту ядро обробить автоматично.</p>
+      </div>
+      <form id="discoverSearchForm" class="discover-search">
+        <input id="discoverSearchInput" type="search" placeholder="Введи назву аніме…" autocomplete="off" />
+        <button class="primary-btn" type="submit">Знайти</button>
+      </form>
+      <div id="discoverStatus" class="discover-status"></div>
+      <div id="discoverProgress" class="discover-progress hidden" aria-live="polite">
+        <div class="discover-progress-track"><div id="discoverProgressBar" class="discover-progress-bar"></div></div>
+        <div class="discover-progress-meta">
+          <strong id="discoverProgressPercent">0%</strong>
+          <span id="discoverProgressText">Очікую запуск…</span>
+        </div>
+      </div>
+      <div id="discoverResults" class="discover-results"></div>
+      <div id="discoverSetup" class="discover-setup hidden"></div>
+    </section>
+  </div>
+
+
+  <div id="settingsModal" class="modal-shell hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-settings-close></div>
+    <section class="modal-card settings-modal-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <button class="modal-x" type="button" data-settings-close aria-label="Закрити">×</button>
+      <div class="modal-head">
+        <span class="section-kicker">НАЛАШТУВАННЯ</span>
+        <h2 id="settingsTitle">Каталог</h2>
+        <p>Налаштування зберігаються в Turso і підтягуються сайтом та розширенням.</p>
+      </div>
+      <div class="settings-layout">
+        <aside class="settings-nav">
+          <button class="settings-nav-item active" type="button" data-settings-tab="groups">Групи</button>
+          <button class="settings-nav-item" type="button" data-settings-tab="statuses">Статус</button>
+        </aside>
+        <section class="settings-content">
+          <div id="settingsStatus" class="discover-status"></div>
+          <section data-settings-panel="groups">
+            <div class="settings-section-head"><div><span class="section-kicker">ГРУПИ</span><h3>Назви, кольори та пріоритет</h3><p>Зірочка закріплює групу на початку всіх списків. На сайті й у розширенні сама зірочка не показується.</p></div></div>
+            <div id="settingsGroupsList" class="settings-groups-list"></div>
+          </section>
+          <section data-settings-panel="statuses" class="hidden">
+            <div class="settings-section-head"><div><span class="section-kicker">СТАТУС</span><h3>Групи для статусів</h3><p>До одного статусу можна прив’язати кілька груп. Група може належати кільком статусам. Неприв’язані групи залишаються доступними всюди.</p></div></div>
+            <div id="settingsStatusesList" class="settings-statuses-list"></div>
+          </section>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
+
+  <script src="app.js?v=7.2"></script>
+</body>
+</html>

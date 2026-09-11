@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.10.0"
+APP_VERSION = "2.11.0"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -198,6 +198,8 @@ class AuthorityData:
     cover: str = ""
     cover_source: str = ""
     banner: str = ""
+    genres: dict[str, list[str]] = field(default_factory=lambda: {site: [] for site in AUTHORITY_SITES})
+    themes: dict[str, list[str]] = field(default_factory=lambda: {site: [] for site in ["myanimelist.net", "shikimori.io"]})
     anilist_id: int | None = None
     mal_id: int | None = None
 
@@ -1024,6 +1026,7 @@ class Core:
             id idMal
             title { romaji english native }
             synonyms
+            genres
             description(asHtml: false)
             bannerImage
             coverImage { extraLarge large medium }
@@ -1050,6 +1053,7 @@ class Core:
               id idMal
               title { romaji english native }
               synonyms
+              genres
               description(asHtml: false)
               bannerImage
               coverImage { extraLarge large medium }
@@ -1088,6 +1092,7 @@ class Core:
             id idMal
             title { romaji english native }
             synonyms
+            genres
             description(asHtml: false)
             bannerImage
             coverImage { extraLarge large medium }
@@ -1232,6 +1237,81 @@ class Core:
         return unique_strings([
             item.get("name"), item.get("russian"), *english, *japanese, *synonyms,
         ], limit=30)
+
+    def taxonomy_names(self, values: Any, *, limit: int = 40) -> list[str]:
+        if not isinstance(values, list):
+            values = [] if values is None else [values]
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in values:
+            if isinstance(raw, dict):
+                raw = raw.get("name") or raw.get("english") or raw.get("russian") or raw.get("title") or ""
+            value = clean_text(raw)
+            if not value:
+                continue
+            key = value.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(value)
+            if len(out) >= limit:
+                break
+        return out
+
+    def shikimori_taxonomy(self, item: dict[str, Any] | None) -> tuple[list[str], list[str]]:
+        genres: list[str] = []
+        themes: list[str] = []
+        if not isinstance(item, dict):
+            return genres, themes
+        for raw in item.get("genres") or []:
+            if not isinstance(raw, dict):
+                continue
+            name = clean_text(raw.get("name") or raw.get("english") or raw.get("russian"))
+            if not name:
+                continue
+            kind = clean_text(raw.get("kind") or raw.get("genre_kind") or "").casefold()
+            if kind == "theme":
+                themes.append(name)
+            elif kind in {"genre", "", "genres"}:
+                genres.append(name)
+        return self.taxonomy_names(genres), self.taxonomy_names(themes)
+
+    async def myanimelist_taxonomy(self, mal_id: int | None) -> tuple[list[str], list[str]]:
+        if not mal_id:
+            return [], []
+        soup, _ = await self.fetch_soup(f"https://myanimelist.net/anime/{int(mal_id)}")
+        if not soup:
+            return [], []
+        genres: list[str] = []
+        themes: list[str] = []
+        # MAL desktop pages group taxonomy in .spaceit_pad rows headed by
+        # “Genres:” / “Themes:”. This keeps the two concepts separate even
+        # though both link through /anime/genre/... URLs.
+        for row in soup.select("div.spaceit_pad, tr"):
+            label_node = row.select_one("span.dark_text, th")
+            if not label_node:
+                continue
+            label = clean_text(label_node.get_text(" ", strip=True)).rstrip(":").casefold()
+            if label not in {"genre", "genres", "theme", "themes"}:
+                continue
+            names = [
+                clean_text(a.get_text(" ", strip=True))
+                for a in row.select('a[href*="/anime/genre/"]')
+            ]
+            if label.startswith("genre"):
+                genres.extend(names)
+            else:
+                themes.extend(names)
+        return self.taxonomy_names(genres), self.taxonomy_names(themes)
+
+    def taxonomy_payload(self, sources: dict[str, list[str]], allowed_sources: list[str]) -> dict[str, Any]:
+        clean_sources: dict[str, list[str]] = {}
+        merged: list[str] = []
+        for site in allowed_sources:
+            names = self.taxonomy_names((sources or {}).get(site) or [])
+            clean_sources[site] = names
+            merged.extend(names)
+        return {"all": self.taxonomy_names(merged, limit=80), "sources": clean_sources}
 
     async def resolve_authorities(self, payload: InputPayload, extra_queries: list[str] | None = None) -> AuthorityData:
         """Resolve one anime identity before catalog search.
@@ -1424,9 +1504,12 @@ class Core:
 
         chosen = candidates[0] if candidates else None
         chosen_names: list[str] = []
+        resolved_anilist_media: dict[str, Any] | None = None
+        resolved_shikimori: dict[str, Any] | None = None
 
         if chosen and chosen["kind"] == "shikimori":
             item = chosen["item"]
+            resolved_shikimori = item
             mal_id = int(item.get("id")) if item.get("id") else None
             # Shikimori's `name` is the canonical Romaji title. This is trusted even if AniList is down.
             data.original = clean_title(item.get("name") or payload.title)
@@ -1454,6 +1537,7 @@ class Core:
             if mal_id:
                 media = await self.anilist_by_mal_id(mal_id)
                 if media:
+                    resolved_anilist_media = media
                     titles = media.get("title") or {}
                     data.anilist_id = media.get("id")
                     data.mal_id = media.get("idMal") or mal_id
@@ -1472,6 +1556,7 @@ class Core:
 
         elif chosen and chosen["kind"] == "anilist":
             media = chosen["media"]
+            resolved_anilist_media = media
             titles = media.get("title") or {}
             data.anilist_id = media.get("id")
             data.mal_id = media.get("idMal")
@@ -1507,6 +1592,7 @@ class Core:
             # Shikimori uses the MAL anime id. Fetch its localized names as trusted aliases and canonical link.
             shiki = await self.shikimori_details(int(data.mal_id))
             if shiki:
+                resolved_shikimori = shiki
                 shiki_names = self.shikimori_names(shiki)
                 if not chosen_names or any(titles_related(a, b, 0.72) for a in shiki_names for b in chosen_names):
                     data.aliases.extend(shiki_names)
@@ -1523,6 +1609,25 @@ class Core:
                         if image_url:
                             data.cover = urljoin("https://shikimori.io", image_url)
                             data.cover_source = "shikimori.io"
+
+        # Collect classification from every requested authority source. AniList
+        # exposes genres directly. Shikimori exposes MAL taxonomy entries with
+        # kind=genre/theme. MyAnimeList is parsed from the selected anime page so
+        # Genres and Themes stay source-specific instead of being guessed.
+        if data.anilist_id and not resolved_anilist_media:
+            resolved_anilist_media = await self.anilist_by_id(int(data.anilist_id))
+        if resolved_anilist_media:
+            data.genres["anilist.co"] = self.taxonomy_names(resolved_anilist_media.get("genres") or [])
+
+        if data.mal_id and not resolved_shikimori:
+            resolved_shikimori = await self.shikimori_details(int(data.mal_id))
+        shiki_genres, shiki_themes = self.shikimori_taxonomy(resolved_shikimori)
+        data.genres["shikimori.io"] = shiki_genres
+        data.themes["shikimori.io"] = shiki_themes
+
+        mal_genres, mal_themes = await self.myanimelist_taxonomy(data.mal_id)
+        data.genres["myanimelist.net"] = mal_genres
+        data.themes["myanimelist.net"] = mal_themes
 
         # Do not merge neighbouring franchise/season search hits into aliases.
         # They are useful for discovery UIs, but they are NOT names of the selected
@@ -2849,7 +2954,7 @@ class Core:
         }
 
         result: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "input": {
                 "title": clean_title(payload.title),
                 "url": clean_text(payload.url),
@@ -2874,6 +2979,8 @@ class Core:
                 "source": "anilist.co" if authority.banner else "",
             },
             "authority": authority.links,
+            "genres": self.taxonomy_payload(authority.genres, ["myanimelist.net", "shikimori.io", "anilist.co"]),
+            "themes": self.taxonomy_payload(authority.themes, ["myanimelist.net", "shikimori.io"]),
             "catalogs": public_catalogs,
             "status": clean_text(payload.status),
             "group": clean_text(payload.group),
@@ -2932,12 +3039,12 @@ app.add_middleware(
 
 @app.get("/")
 async def root() -> dict[str, Any]:
-    return {"service": "anime-title-core", "version": APP_VERSION, "endpoints": ["/api/search", "/api/process-stream", "/api/process-full", "/api/process"]}
+    return {"service": "anime-title-core", "version": APP_VERSION, "endpoints": ["/api/search", "/api/taxonomy", "/api/process-stream", "/api/process-full", "/api/process"]}
 
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": APP_VERSION, "search": "/api/search", "process_stream": "/api/process-stream", "process_full": "/api/process-full", "process": "/api/process", "progress_protocol": "ndjson-v1"}
+    return {"ok": True, "version": APP_VERSION, "search": "/api/search", "taxonomy": "/api/taxonomy", "process_stream": "/api/process-stream", "process_full": "/api/process-full", "process": "/api/process", "progress_protocol": "ndjson-v1", "result_schema": 3}
 
 
 @app.post("/api/search")
@@ -2949,6 +3056,36 @@ async def search_endpoint(payload: SearchPayload, x_api_key: str | None = Header
     core = Core()
     try:
         return await core.search_authority_pages(payload.title, payload.limit)
+    finally:
+        await core.close()
+
+
+@app.post("/api/taxonomy")
+async def taxonomy_endpoint(payload: InputPayload, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    """Resolve only authority metadata used for Genre/Theme backfill.
+
+    This intentionally skips the slow catalog crawl. It is safe to call for old
+    Turso records after upgrading from schema-v2.
+    """
+    expected = clean_text(os.getenv("CORE_API_KEY"))
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid X-API-Key")
+    core = Core()
+    try:
+        authority = await core.resolve_authorities(payload)
+        return {
+            "ok": True,
+            "core_version": APP_VERSION,
+            "title": {
+                "original": authority.original,
+                "english": authority.english,
+                "native": authority.native,
+            },
+            "ids": {"anilist": authority.anilist_id, "mal": authority.mal_id},
+            "genres": core.taxonomy_payload(authority.genres, ["myanimelist.net", "shikimori.io", "anilist.co"]),
+            "themes": core.taxonomy_payload(authority.themes, ["myanimelist.net", "shikimori.io"]),
+            "authority": authority.links,
+        }
     finally:
         await core.close()
 
@@ -3061,7 +3198,7 @@ async def process_full_endpoint(payload: InputPayload, x_api_key: str | None = H
 
     This endpoint is intended for the website flow: authority selection happens via
     /api/search, then /api/process-full performs the asynchronous all-catalog search,
-    and Cloudflare ingests the returned JSON into Notion exactly once.
+    and Cloudflare ingests the returned JSON into Turso exactly once.
     """
     expected = clean_text(os.getenv("CORE_API_KEY"))
     if expected and x_api_key != expected:

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>Yoru Stream Bridge</title>
+</head>
+<body>
+<script>
+(() => {
+  'use strict';
+  const SOURCE = 'yoru-stream-bridge';
+  const CLIENT_SOURCE = 'anime-to-yoru-extension';
+  let running = false;
+
+  const send = payload => parent.postMessage({ source: SOURCE, ...payload }, '*');
+
+  async function consume(requestId, payload) {
+    if (running) {
+      send({ type: 'error', requestId, message: 'Bridge вже виконує інший запит.' });
+      return;
+    }
+    running = true;
+    try {
+      const response = await fetch('/api/process-title-stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/x-ndjson',
+        },
+        body: JSON.stringify(payload || {}),
+        cache: 'no-store',
+        credentials: 'same-origin',
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`HTTP ${response.status}: ${text.slice(0, 700)}`);
+      }
+      if (!response.body) throw new Error('Streaming body відсутній.');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let terminal = false;
+
+      const handleLine = line => {
+        if (!line.trim()) return;
+        let packet;
+        try { packet = JSON.parse(line); }
+        catch { return; }
+        send({ type: 'packet', requestId, packet });
+        if (packet.type === 'result' || packet.type === 'error') terminal = true;
+      };
+
+      while (!terminal) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          handleLine(line);
+          if (terminal) break;
+        }
+      }
+      buffer += decoder.decode();
+      if (!terminal && buffer.trim()) handleLine(buffer);
+      try { await reader.cancel(); } catch {}
+      if (!terminal) send({ type: 'done', requestId });
+    } catch (error) {
+      send({ type: 'error', requestId, message: String(error?.message || error) });
+    } finally {
+      running = false;
+    }
+  }
+
+  addEventListener('message', event => {
+    const data = event.data || {};
+    if (data.source !== CLIENT_SOURCE || data.type !== 'start' || !data.requestId) return;
+    consume(String(data.requestId), data.payload || {});
+  });
+
+  send({ type: 'ready' });
+})();
+</script>
+</body>
+</html>
