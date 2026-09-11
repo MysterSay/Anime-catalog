@@ -1,4 +1,4 @@
-# YORU Turso v7.2 + Anime Title Core v2.11.0
+# YORU Turso v7.2.2.2 hotfix + Anime Title Core v2.11.1
 
 Поточний стек:
 
@@ -7,7 +7,7 @@
 - Vercel — Python Core пошуку та метаданих.
 - Tampermonkey — Anime → YORU Collector v3.1.0.
 
-## v7.2
+## v7.2.2
 
 - Жанри: MyAnimeList + Shikimori + AniList.
 - Теми: MyAnimeList + Shikimori.
@@ -22,9 +22,13 @@
 ## Порядок оновлення
 
 1. Задеплой `python-core/` у Vercel.
-2. Перевір `/api/health`: версія `2.11.0`, `result_schema: 3`.
+2. Перевір `/api/health`: версія `2.11.1`, `result_schema: 3`.
 3. Задеплой `site/` у Cloudflare Pages.
-4. Перевір `/api/version`: `yoru-v7.2-genres-themes-2026-09-11`.
+4. Перевір `/api/version`: `yoru-v7.2.2-genres-themes-2026-09-11`.
 5. Запусти `migration/backfill_taxonomy.py`, щоб жанри/теми з’явилися у вже перенесених тайтлів.
 
-Розширення v3.1.0 міняти не потрібно: воно передає результат Core через існуючий ingest, а Worker v7.2 сам зберігає нові поля.
+Розширення v3.1.0 міняти не потрібно: воно передає результат Core через існуючий ingest, а Worker v7.2.2 сам зберігає нові поля.
+
+
+## AniList serverless 403 fallback
+Core 2.11.2 can skip AniList during taxonomy backfill (`prefer_client_anilist`). Backfill 1.2 queries AniList directly from the local Windows connection. The site and Tampermonkey v3.1.1 also enrich missing AniList genres client-side before Turso ingest.

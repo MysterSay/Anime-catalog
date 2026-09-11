@@ -1,7 +1,7 @@
-# Anime -> YORU Collector v3.1.0
+# Anime -> YORU Collector v3.1.1
 
-Tampermonkey-клієнт для YORU Turso edition.
+Turso edition with schema-v3 Genre/Theme support.
 
-Усі операції з базою йдуть через `https://myster-anime.pages.dev/api/*`. `TURSO_AUTH_TOKEN` у userscript НЕ зберігається.
+AniList genres use a client-side fallback: if the Vercel core cannot read AniList from shared serverless egress, Tampermonkey queries `https://graphql.anilist.co` directly from the user's connection before sending the final JSON to `/api/ingest`.
 
-Поточні функції збережені: пошук існуючих тайтлів по aliases, статус/група/теги, Вибране/Улюблене, Переглянуто, Сезон/Серія, Firefox stream bridge, додавання через Python Core та оновлення існуючого запису.
+Firefox stream bridge behavior is unchanged.

@@ -74,6 +74,12 @@ class MockAuthorityCore(Core):
             ]
         return []
 
+    async def shikimori_page_taxonomy(self, anime_id: int | None):
+        return ["Action", "Fantasy"], ["Isekai"], True, ""
+
+    async def myanimelist_taxonomy(self, mal_id: int | None):
+        return ["Action", "Fantasy"], ["Isekai"]
+
     async def shikimori_details(self, anime_id: int):
         if anime_id != 36882:
             return None

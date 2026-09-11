@@ -328,21 +328,115 @@ function syncMarksFromItem(item) {
   persistState();
 }
 
+const TAXONOMY_UK = Object.freeze({
+  'action': 'Екшен',
+  'adventure': 'Пригоди',
+  'avant garde': 'Авангард',
+  'award winning': 'Відзначене нагородами',
+  'boys love': 'Хлопчаче кохання',
+  'comedy': 'Комедія',
+  'drama': 'Драма',
+  'fantasy': 'Фентезі',
+  'girls love': 'Дівоче кохання',
+  'gourmet': 'Гурманське',
+  'horror': 'Жахи',
+  'mystery': 'Таємниці',
+  'romance': 'Романтика',
+  'sci fi': 'Наукова фантастика',
+  'science fiction': 'Наукова фантастика',
+  'slice of life': 'Повсякденність',
+  'sports': 'Спорт',
+  'supernatural': 'Надприродне',
+  'suspense': 'Трилер',
+  'thriller': 'Трилер',
+  'ecchi': 'Етті',
+  'erotica': 'Еротика',
+  'hentai': 'Хентай',
+  'josei': 'Дзьосей',
+  'kids': 'Для дітей',
+  'seinen': 'Сейнен',
+  'shoujo': 'Сьодзьо',
+  'shojo': 'Сьодзьо',
+  'shounen': 'Сьонен',
+  'shonen': 'Сьонен',
+  'adult cast': 'Дорослі персонажі',
+  'anthropomorphic': 'Антропоморфізм',
+  'cgdct': 'Милі дівчата роблять милі речі',
+  'childcare': 'Догляд за дітьми',
+  'combat sports': 'Бойові види спорту',
+  'crossdressing': 'Кросдресинг',
+  'delinquents': 'Хулігани',
+  'detective': 'Детектив',
+  'educational': 'Освітнє',
+  'gag humor': 'Гег-гумор',
+  'gore': 'Криваві сцени',
+  'harem': 'Гарем',
+  'high stakes game': 'Гра з високими ставками',
+  'historical': 'Історичне',
+  'idols female': 'Жіночі айдоли',
+  'idols male': 'Чоловічі айдоли',
+  'isekai': 'Ісекай',
+  'iyashikei': 'Іяшікеї',
+  'love polygon': 'Любовний багатокутник',
+  'magical sex shift': 'Магічна зміна статі',
+  'mahou shoujo': 'Дівчата-чарівниці',
+  'maho shojo': 'Дівчата-чарівниці',
+  'martial arts': 'Бойові мистецтва',
+  'mecha': 'Меха',
+  'medical': 'Медицина',
+  'military': 'Військове',
+  'music': 'Музика',
+  'mythology': 'Міфологія',
+  'organized crime': 'Організована злочинність',
+  'otaku culture': 'Отаку-культура',
+  'parody': 'Пародія',
+  'performing arts': 'Сценічне мистецтво',
+  'pets': 'Домашні тварини',
+  'psychological': 'Психологічне',
+  'racing': 'Перегони',
+  'reincarnation': 'Реінкарнація',
+  'reverse harem': 'Зворотний гарем',
+  'romantic subtext': 'Романтичний підтекст',
+  'samurai': 'Самураї',
+  'school': 'Школа',
+  'showbiz': 'Шоу-бізнес',
+  'space': 'Космос',
+  'strategy game': 'Стратегічна гра',
+  'super power': 'Надздібності',
+  'survival': 'Виживання',
+  'team sports': 'Командний спорт',
+  'time travel': 'Подорожі в часі',
+  'vampire': 'Вампіри',
+  'video game': 'Відеоігри',
+  'visual arts': 'Образотворче мистецтво',
+  'workplace': 'Робота',
+});
+function taxonomyUkName(value) {
+  const text = String(value ?? '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s"'«»“”„]+|[\s"'«»“”„]+$/g, '')
+    .trim();
+  if (!text) return '';
+  const key = text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/g, ' ').trim();
+  return TAXONOMY_UK[key] || text;
+}
+
 function taxonomyAll(value) {
-  if (Array.isArray(value)) return [...new Set(value.map(x => String(x || '').trim()).filter(Boolean))];
+  if (Array.isArray(value)) return [...new Set(value.map(taxonomyUkName).filter(Boolean))];
   if (value && typeof value === 'object') {
-    if (Array.isArray(value.all)) return [...new Set(value.all.map(x => String(x || '').trim()).filter(Boolean))];
+    if (Array.isArray(value.all)) return [...new Set(value.all.map(taxonomyUkName).filter(Boolean))];
     const sourceRoot = value.sources && typeof value.sources === 'object' ? value.sources : value;
-    return [...new Set(Object.values(sourceRoot).flatMap(v => Array.isArray(v) ? v : []).map(x => String(x || '').trim()).filter(Boolean))];
+    return [...new Set(Object.values(sourceRoot).flatMap(v => Array.isArray(v) ? v : []).map(taxonomyUkName).filter(Boolean))];
   }
   return [];
 }
 function taxonomySourceNames(value, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
   const sourceRoot = value.sources && typeof value.sources === 'object' ? value.sources : value;
-  const key = String(name || '').trim().toLocaleLowerCase('uk-UA');
+  const key = taxonomyUkName(name).toLocaleLowerCase('uk-UA');
   const labels = {'myanimelist.net':'MAL','shikimori.io':'Shikimori','anilist.co':'AniList'};
-  return Object.entries(sourceRoot).filter(([,items]) => Array.isArray(items) && items.some(x => String(x || '').trim().toLocaleLowerCase('uk-UA') === key)).map(([site]) => labels[site] || site);
+  return Object.entries(sourceRoot).filter(([,items]) => Array.isArray(items) && items.some(x => taxonomyUkName(x).toLocaleLowerCase('uk-UA') === key)).map(([site]) => labels[site] || site);
 }
 function taxonomyRow(label, value, kind) {
   const values = taxonomyAll(value);

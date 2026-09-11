@@ -58,11 +58,100 @@ function normalizeTags(value = []) {
 }
 const GENRE_SOURCES = ['myanimelist.net','shikimori.io','anilist.co'];
 const THEME_SOURCES = ['myanimelist.net','shikimori.io'];
+const TAXONOMY_UK = Object.freeze({
+  'action': 'Екшен',
+  'adventure': 'Пригоди',
+  'avant garde': 'Авангард',
+  'award winning': 'Відзначене нагородами',
+  'boys love': 'Хлопчаче кохання',
+  'comedy': 'Комедія',
+  'drama': 'Драма',
+  'fantasy': 'Фентезі',
+  'girls love': 'Дівоче кохання',
+  'gourmet': 'Гурманське',
+  'horror': 'Жахи',
+  'mystery': 'Таємниці',
+  'romance': 'Романтика',
+  'sci fi': 'Наукова фантастика',
+  'science fiction': 'Наукова фантастика',
+  'slice of life': 'Повсякденність',
+  'sports': 'Спорт',
+  'supernatural': 'Надприродне',
+  'suspense': 'Трилер',
+  'thriller': 'Трилер',
+  'ecchi': 'Етті',
+  'erotica': 'Еротика',
+  'hentai': 'Хентай',
+  'josei': 'Дзьосей',
+  'kids': 'Для дітей',
+  'seinen': 'Сейнен',
+  'shoujo': 'Сьодзьо',
+  'shojo': 'Сьодзьо',
+  'shounen': 'Сьонен',
+  'shonen': 'Сьонен',
+  'adult cast': 'Дорослі персонажі',
+  'anthropomorphic': 'Антропоморфізм',
+  'cgdct': 'Милі дівчата роблять милі речі',
+  'childcare': 'Догляд за дітьми',
+  'combat sports': 'Бойові види спорту',
+  'crossdressing': 'Кросдресинг',
+  'delinquents': 'Хулігани',
+  'detective': 'Детектив',
+  'educational': 'Освітнє',
+  'gag humor': 'Гег-гумор',
+  'gore': 'Криваві сцени',
+  'harem': 'Гарем',
+  'high stakes game': 'Гра з високими ставками',
+  'historical': 'Історичне',
+  'idols female': 'Жіночі айдоли',
+  'idols male': 'Чоловічі айдоли',
+  'isekai': 'Ісекай',
+  'iyashikei': 'Іяшікеї',
+  'love polygon': 'Любовний багатокутник',
+  'magical sex shift': 'Магічна зміна статі',
+  'mahou shoujo': 'Дівчата-чарівниці',
+  'maho shojo': 'Дівчата-чарівниці',
+  'martial arts': 'Бойові мистецтва',
+  'mecha': 'Меха',
+  'medical': 'Медицина',
+  'military': 'Військове',
+  'music': 'Музика',
+  'mythology': 'Міфологія',
+  'organized crime': 'Організована злочинність',
+  'otaku culture': 'Отаку-культура',
+  'parody': 'Пародія',
+  'performing arts': 'Сценічне мистецтво',
+  'pets': 'Домашні тварини',
+  'psychological': 'Психологічне',
+  'racing': 'Перегони',
+  'reincarnation': 'Реінкарнація',
+  'reverse harem': 'Зворотний гарем',
+  'romantic subtext': 'Романтичний підтекст',
+  'samurai': 'Самураї',
+  'school': 'Школа',
+  'showbiz': 'Шоу-бізнес',
+  'space': 'Космос',
+  'strategy game': 'Стратегічна гра',
+  'super power': 'Надздібності',
+  'survival': 'Виживання',
+  'team sports': 'Командний спорт',
+  'time travel': 'Подорожі в часі',
+  'vampire': 'Вампіри',
+  'video game': 'Відеоігри',
+  'visual arts': 'Образотворче мистецтво',
+  'workplace': 'Робота',
+});
+function taxonomyUkName(value) {
+  const text = plainTitle(value);
+  if (!text) return "";
+  const key = text.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("en-US").replace(/[^a-z0-9]+/g, " " ).trim();
+  return TAXONOMY_UK[key] || text;
+}
 function normalizeTaxonomyNames(value = []) {
   const raw = Array.isArray(value) ? value : [value];
   const seen = new Set(), out = [];
   for (const item of raw) {
-    const name = plainTitle(item && typeof item === 'object' ? (item.name || item.title || item.english || item.russian || '') : item);
+    const name = taxonomyUkName(item && typeof item === 'object' ? (item.name || item.title || item.english || item.russian || '') : item);
     const key = normalizeName(name);
     if (!name || !key || seen.has(key)) continue;
     seen.add(key); out.push(name);
@@ -359,8 +448,8 @@ async function tursoIngestCorePayload(env,payload){
   return{ok:true,existing:Boolean(existing),item:tursoPublicAnime(item),imported:{schemaVersion:payload.schema_version??null,coreVersion:payload?.meta?.core_version||'',sites:Object.fromEntries(Object.entries(links).map(([d,x])=>[d,x.length]))}};
 }
 
-async function tursoHandleAnimeApi(request,env){const url=new URL(request.url),id=url.searchParams.get('id')||'';if(request.method==='GET'){if(id){const[raw,state]=await Promise.all([tursoGetRaw(env,id),tursoLoadState(env)]);if(!raw||raw.entity!=='anime')return json({error:'Тайтл не знайдено.'},404);return json({item:tursoPublicAnime(raw),count:1,options:state.options})}const state=await tursoLoadState(env),items=state.anime.map(tursoSummaryAnime).sort((a,b)=>String(b.addedAt).localeCompare(String(a.addedAt)));return json({items,count:items.length,databaseId:'yoru-turso',sources:[{id:'yoru-turso',name:'Turso',count:items.length}],options:state.options,storage:'turso-libsql'})}
-if(request.method==='PATCH'){if(!id)return json({error:'Не передано id тайтлу.'},400);const raw=await tursoGetRaw(env,id);if(!raw||raw.entity!=='anime')return json({error:'Тайтл не знайдено.'},404);const body=await request.json().catch(()=>({})),item=tursoNormalizeAnime(raw);for(const k of ['title','description','originalTitle','englishTitle','russianTitle','aliases','notes'])if(Object.prototype.hasOwnProperty.call(body,k))item[k]=String(body[k]??'').trim();if('tags'in body)item.tags=normalizeTags(body.tags);if('genres'in body)item.genres=normalizeTaxonomy(body.genres,GENRE_SOURCES);if('themes'in body)item.themes=normalizeTaxonomy(body.themes,THEME_SOURCES);if('status'in body)item.status=plainTitle(body.status||'')||'Без статусу';if('group'in body)item.group=plainTitle(body.group||'')||'Без групи';if('favorite'in body)item.favorite=Boolean(body.favorite);if('liked'in body)item.liked=Boolean(body.liked);if('viewed'in body)item.viewed=Math.max(0,Math.floor(Number(body.viewed)||0));if('season'in body)item.season=Math.max(0,Math.floor(Number(body.season)||0));if('episode'in body)item.episode=Math.max(0,Math.floor(Number(body.episode)||0));if(isCompletedStatus(item.status)&&item.viewed<1)item.viewed=1;if('posterUrl'in body){const v=String(body.posterUrl||'').trim();if(v&&!safeHttpUrl(v))return json({error:'Некоректний URL постера.'},400);item.poster=safeHttpUrl(v)}if('bannerUrl'in body){const v=String(body.bannerUrl||'').trim();if(v&&!safeHttpUrl(v))return json({error:'Некоректний URL банера.'},400);item.banner=safeHttpUrl(v)}if(body.siteLinks&&typeof body.siteLinks==='object'){const links=[];for(const[d,vals]of Object.entries(body.siteLinks)){if(!SITE_PROPERTIES.includes(d))continue;for(const v of Array.isArray(vals)?vals:[])links.push({name:plainTitle(v?.title||v?.name||'')||d,url:v?.url||''})}item.links=tursoNormalizeLinks(links)}item.key=exactCoreTitleKey(item.originalTitle||item.title);item.updatedAt=new Date().toISOString();await tursoPutRaw(env,item);let state=await tursoLoadState(env);if(item.group&&item.group!=='Без групи'&&!state.config.groupOptions.some(g=>normalizeName(g.name)===normalizeName(item.group))){state.config.groupOptions.push({id:`group-${crypto.randomUUID()}`,name:item.group,color:'default'});state.config=await tursoSaveConfig(env,state.config);state.options=tursoBuildOptions(state.anime.map(x=>x.id===item.id?item:x),state.config)}return json({ok:true,item:tursoPublicAnime(item),options:state.options})}
+async function tursoHandleAnimeApi(request,env){const url=new URL(request.url),id=url.searchParams.get('id')||'',compact=['1','true','yes'].includes(String(url.searchParams.get('compact')||'').toLowerCase());if(request.method==='GET'){if(id){const raw=await tursoGetRaw(env,id);if(!raw||raw.entity!=='anime')return json({error:'Тайтл не знайдено.'},404);if(compact)return json({item:tursoPublicAnime(raw),count:1,storage:'turso-libsql',compact:true});const state=await tursoLoadState(env);return json({item:tursoPublicAnime(raw),count:1,options:state.options})}const state=await tursoLoadState(env),items=state.anime.map(tursoSummaryAnime).sort((a,b)=>String(b.addedAt).localeCompare(String(a.addedAt)));return json({items,count:items.length,databaseId:'yoru-turso',sources:[{id:'yoru-turso',name:'Turso',count:items.length}],options:state.options,storage:'turso-libsql'})}
+if(request.method==='PATCH'){if(!id)return json({error:'Не передано id тайтлу.'},400);const raw=await tursoGetRaw(env,id);if(!raw||raw.entity!=='anime')return json({error:'Тайтл не знайдено.'},404);const body=await request.json().catch(()=>({})),item=tursoNormalizeAnime(raw);for(const k of ['title','description','originalTitle','englishTitle','russianTitle','aliases','notes'])if(Object.prototype.hasOwnProperty.call(body,k))item[k]=String(body[k]??'').trim();if('tags'in body)item.tags=normalizeTags(body.tags);if('genres'in body)item.genres=normalizeTaxonomy(body.genres,GENRE_SOURCES);if('themes'in body)item.themes=normalizeTaxonomy(body.themes,THEME_SOURCES);if('status'in body)item.status=plainTitle(body.status||'')||'Без статусу';if('group'in body)item.group=plainTitle(body.group||'')||'Без групи';if('favorite'in body)item.favorite=Boolean(body.favorite);if('liked'in body)item.liked=Boolean(body.liked);if('viewed'in body)item.viewed=Math.max(0,Math.floor(Number(body.viewed)||0));if('season'in body)item.season=Math.max(0,Math.floor(Number(body.season)||0));if('episode'in body)item.episode=Math.max(0,Math.floor(Number(body.episode)||0));if(isCompletedStatus(item.status)&&item.viewed<1)item.viewed=1;if('posterUrl'in body){const v=String(body.posterUrl||'').trim();if(v&&!safeHttpUrl(v))return json({error:'Некоректний URL постера.'},400);item.poster=safeHttpUrl(v)}if('bannerUrl'in body){const v=String(body.bannerUrl||'').trim();if(v&&!safeHttpUrl(v))return json({error:'Некоректний URL банера.'},400);item.banner=safeHttpUrl(v)}if(body.siteLinks&&typeof body.siteLinks==='object'){const links=[];for(const[d,vals]of Object.entries(body.siteLinks)){if(!SITE_PROPERTIES.includes(d))continue;for(const v of Array.isArray(vals)?vals:[])links.push({name:plainTitle(v?.title||v?.name||'')||d,url:v?.url||''})}item.links=tursoNormalizeLinks(links)}item.key=exactCoreTitleKey(item.originalTitle||item.title);item.updatedAt=new Date().toISOString();await tursoPutRaw(env,item);if(compact)return json({ok:true,item:tursoPublicAnime(item),storage:'turso-libsql',compact:true});let state=await tursoLoadState(env);if(item.group&&item.group!=='Без групи'&&!state.config.groupOptions.some(g=>normalizeName(g.name)===normalizeName(item.group))){state.config.groupOptions.push({id:`group-${crypto.randomUUID()}`,name:item.group,color:'default'});state.config=await tursoSaveConfig(env,state.config);state.options=tursoBuildOptions(state.anime.map(x=>x.id===item.id?item:x),state.config)}return json({ok:true,item:tursoPublicAnime(item),options:state.options})}
 if(request.method==='DELETE'){if(!id)return json({error:'Не передано id тайтлу.'},400);await tursoDeleteRaw(env,id);return json({ok:true,id,deleted:true})}return json({error:'Method not allowed'},405)}
 async function tursoHandleViewedApi(request,env){if(request.method!=='POST')return json({error:'Method not allowed'},405);const id=new URL(request.url).searchParams.get('id')||'',raw=await tursoGetRaw(env,id);if(!raw||raw.entity!=='anime')return json({error:'Тайтл не знайдено.'},404);const item=tursoNormalizeAnime(raw);item.viewed=Math.max(1,item.viewed+1);item.updatedAt=new Date().toISOString();await tursoPutRaw(env,item);const state=await tursoLoadState(env);return json({ok:true,viewed:item.viewed,item:tursoPublicAnime(item),options:state.options})}
 async function tursoHandleOptionsApi(request,env){if(request.method!=='GET')return json({error:'Method not allowed'},405);return json((await tursoLoadState(env)).options)}
@@ -407,7 +496,7 @@ export default {
       if (url.pathname === '/api/anime') return tursoHandleAnimeApi(request,env);
       if (url.pathname === '/api/options') return tursoHandleOptionsApi(request,env);
       if (url.pathname === '/api/discover') return handleDiscoverApi(request);
-      if (url.pathname === '/api/version') return json({ok:true,version:'yoru-v7.2-genres-themes-2026-09-11',storage:'turso-libsql',pythonCoreSearch:env.CORE_SEARCH_URL||CORE_SEARCH_URL,pythonCoreProcessStream:env.CORE_PROCESS_STREAM_URL||CORE_PROCESS_STREAM_URL,pythonCoreProcessFull:env.CORE_PROCESS_FULL_URL||CORE_PROCESS_FULL_URL,progressProtocol:'ndjson-v1',coreJsonIngest:true,mergeTitles:true,deleteTitles:true,editTitles:true,extensionContext:'/api/extension/context',favoriteStorage:'turso-libsql',likedStorage:'turso-libsql',viewedStorage:'turso-libsql',seasonEpisodeStorage:'turso-libsql',groupSettings:'/api/groups',catalogSettings:'/api/catalog-settings',tagDelimiter:'dot',taxonomy:true,genreSources:GENRE_SOURCES,themeSources:THEME_SOURCES,coreTaxonomy:'/api/core-taxonomy'});
+      if (url.pathname === '/api/version') return json({ok:true,version:'yoru-v7.2.5-taxonomy-browser-hotfix-2026-09-11',storage:'turso-libsql',pythonCoreSearch:env.CORE_SEARCH_URL||CORE_SEARCH_URL,pythonCoreProcessStream:env.CORE_PROCESS_STREAM_URL||CORE_PROCESS_STREAM_URL,pythonCoreProcessFull:env.CORE_PROCESS_FULL_URL||CORE_PROCESS_FULL_URL,progressProtocol:'ndjson-v1',coreJsonIngest:true,mergeTitles:true,deleteTitles:true,editTitles:true,extensionContext:'/api/extension/context',favoriteStorage:'turso-libsql',likedStorage:'turso-libsql',viewedStorage:'turso-libsql',seasonEpisodeStorage:'turso-libsql',groupSettings:'/api/groups',catalogSettings:'/api/catalog-settings',tagDelimiter:'dot',taxonomy:true,genreSources:GENRE_SOURCES,themeSources:THEME_SOURCES,coreTaxonomy:'/api/core-taxonomy'});
       if (url.pathname === '/api/health') return tursoHandleHealthApi(env);
       return env.ASSETS.fetch(request);
     } catch (error) {

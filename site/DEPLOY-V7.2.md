@@ -1,25 +1,31 @@
-# YORU site v7.2 — Genre / Theme
+# YORU site v7.2.2 — Genre / Theme + AniList client fallback
 
-## Deploy
+AniList may return HTTP 403 to shared cloud/serverless egress. The add-title flow now keeps MAL and Shikimori in Core and, when AniList genres are missing, performs the public `Media(idMal: ...)` GraphQL query directly from the user's browser before `/api/ingest`.
+
+Deploy:
 
 ```powershell
-cd site
+cd "D:\РСтіл\anime\Anime-catalog\site"
 npx --yes wrangler@4.120.0 pages deploy . --project-name myster-anime
 ```
 
-## Verify
+Expected `/api/version`: `yoru-v7.2.2-anilist-client-fallback-2026-09-11`.
 
-```powershell
-Invoke-RestMethod "https://myster-anime.pages.dev/api/version" | ConvertTo-Json -Depth 10
-```
 
-Expected: `yoru-v7.2-genres-themes-2026-09-11`.
+## v7.2.3 migration compact mode
 
-Після деплою Core 2.11.0 + site 7.2 виконай taxonomy backfill:
+`GET /api/anime?id=<id>&compact=1` and `PATCH /api/anime?id=<id>&compact=1` skip the expensive full catalogue/options rebuild. This mode is used by taxonomy backfill 1.7 and leaves ordinary frontend API responses unchanged.
 
-```powershell
-cd ..\migration
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python .\backfill_taxonomy.py
-```
+Expected `/api/version`: `yoru-v7.2.3-compact-anime-api-2026-09-11`.
+
+## v7.2.4 Ukrainian Genre / Theme labels
+
+All taxonomy values are normalized to Ukrainian on both read and write. Existing rows therefore display Ukrainian labels immediately after deployment, even before a database rewrite.
+
+Examples:
+- `Action` -> `Екшен`
+- `Supernatural` -> `Надприродне`
+- `Shounen` -> `Сьонен`
+- `Historical` -> `Історичне`
+
+Expected `/api/version`: `yoru-v7.2.4-uk-taxonomy-2026-09-11`.

@@ -830,6 +830,183 @@ async function searchGoogleSources(queryText) {
   return payload;
 }
 
+const ANILIST_GRAPHQL_BROWSER = 'https://graphql.anilist.co';
+
+const TAXONOMY_UK = Object.freeze({
+  'action': 'Екшен',
+  'adventure': 'Пригоди',
+  'avant garde': 'Авангард',
+  'award winning': 'Відзначене нагородами',
+  'boys love': 'Хлопчаче кохання',
+  'comedy': 'Комедія',
+  'drama': 'Драма',
+  'fantasy': 'Фентезі',
+  'girls love': 'Дівоче кохання',
+  'gourmet': 'Гурманське',
+  'horror': 'Жахи',
+  'mystery': 'Таємниці',
+  'romance': 'Романтика',
+  'sci fi': 'Наукова фантастика',
+  'science fiction': 'Наукова фантастика',
+  'slice of life': 'Повсякденність',
+  'sports': 'Спорт',
+  'supernatural': 'Надприродне',
+  'suspense': 'Трилер',
+  'thriller': 'Трилер',
+  'ecchi': 'Етті',
+  'erotica': 'Еротика',
+  'hentai': 'Хентай',
+  'josei': 'Дзьосей',
+  'kids': 'Для дітей',
+  'seinen': 'Сейнен',
+  'shoujo': 'Сьодзьо',
+  'shojo': 'Сьодзьо',
+  'shounen': 'Сьонен',
+  'shonen': 'Сьонен',
+  'adult cast': 'Дорослі персонажі',
+  'anthropomorphic': 'Антропоморфізм',
+  'cgdct': 'Милі дівчата роблять милі речі',
+  'childcare': 'Догляд за дітьми',
+  'combat sports': 'Бойові види спорту',
+  'crossdressing': 'Кросдресинг',
+  'delinquents': 'Хулігани',
+  'detective': 'Детектив',
+  'educational': 'Освітнє',
+  'gag humor': 'Гег-гумор',
+  'gore': 'Криваві сцени',
+  'harem': 'Гарем',
+  'high stakes game': 'Гра з високими ставками',
+  'historical': 'Історичне',
+  'idols female': 'Жіночі айдоли',
+  'idols male': 'Чоловічі айдоли',
+  'isekai': 'Ісекай',
+  'iyashikei': 'Іяшікеї',
+  'love polygon': 'Любовний багатокутник',
+  'magical sex shift': 'Магічна зміна статі',
+  'mahou shoujo': 'Дівчата-чарівниці',
+  'maho shojo': 'Дівчата-чарівниці',
+  'martial arts': 'Бойові мистецтва',
+  'mecha': 'Меха',
+  'medical': 'Медицина',
+  'military': 'Військове',
+  'music': 'Музика',
+  'mythology': 'Міфологія',
+  'organized crime': 'Організована злочинність',
+  'otaku culture': 'Отаку-культура',
+  'parody': 'Пародія',
+  'performing arts': 'Сценічне мистецтво',
+  'pets': 'Домашні тварини',
+  'psychological': 'Психологічне',
+  'racing': 'Перегони',
+  'reincarnation': 'Реінкарнація',
+  'reverse harem': 'Зворотний гарем',
+  'romantic subtext': 'Романтичний підтекст',
+  'samurai': 'Самураї',
+  'school': 'Школа',
+  'showbiz': 'Шоу-бізнес',
+  'space': 'Космос',
+  'strategy game': 'Стратегічна гра',
+  'super power': 'Надздібності',
+  'survival': 'Виживання',
+  'team sports': 'Командний спорт',
+  'time travel': 'Подорожі в часі',
+  'vampire': 'Вампіри',
+  'video game': 'Відеоігри',
+  'visual arts': 'Образотворче мистецтво',
+  'workplace': 'Робота',
+});
+function taxonomyUkName(value) {
+  const text = String(value ?? '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s"'«»“”„]+|[\s"'«»“”„]+$/g, '')
+    .trim();
+  if (!text) return '';
+  const key = text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/g, ' ').trim();
+  return TAXONOMY_UK[key] || text;
+}
+
+function taxonomyUnique(values) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of values || []) {
+    const value = taxonomyUkName(raw);
+    const key = value.toLocaleLowerCase('uk-UA');
+    if (value && !seen.has(key)) {
+      seen.add(key);
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+function coreMalId(result) {
+  const direct = Number(result?.meta?.mal_id || 0);
+  if (Number.isInteger(direct) && direct > 0) return direct;
+  for (const item of result?.authority?.['myanimelist.net'] || []) {
+    const match = String(item?.url || '').match(/myanimelist\.net\/anime\/(\d+)/i);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+async function enrichAniListGenresInBrowser(result) {
+  const existing = result?.genres?.sources?.['anilist.co'];
+  if (Array.isArray(existing) && existing.length) return { used: false, count: existing.length };
+
+  const malId = coreMalId(result);
+  if (!malId) throw new Error('AniList browser fallback: MAL ID відсутній.');
+  const query = `query($idMal:Int!){Media(idMal:$idMal,type:ANIME){id idMal genres title{romaji english native}}}`;
+  const response = await fetch(ANILIST_GRAPHQL_BROWSER, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ query, variables: { idMal: malId } }),
+    cache: 'no-store',
+    credentials: 'omit',
+    referrerPolicy: 'no-referrer',
+  });
+  const payload = await response.json().catch(() => ({}));
+  const graphError = Array.isArray(payload?.errors) && payload.errors.length
+    ? String(payload.errors[0]?.message || payload.errors[0] || '').trim()
+    : '';
+  if (!response.ok) throw new Error(`AniList browser HTTP ${response.status}${graphError ? `: ${graphError}` : ''}`);
+  if (graphError && !payload?.data?.Media) throw new Error(`AniList GraphQL: ${graphError}`);
+  const media = payload?.data?.Media;
+  if (!media) throw new Error(`AniList: не знайдено Media для MAL ${malId}.`);
+
+  const genres = taxonomyUnique(media.genres || []);
+  if (!result.genres || typeof result.genres !== 'object' || Array.isArray(result.genres)) result.genres = { all: [], sources: {} };
+  if (!result.genres.sources || typeof result.genres.sources !== 'object') result.genres.sources = {};
+  result.genres.sources['anilist.co'] = genres;
+  result.genres.all = taxonomyUnique([
+    ...(result.genres.sources['myanimelist.net'] || []),
+    ...(result.genres.sources['shikimori.io'] || []),
+    ...genres,
+  ]);
+  if (!result.meta || typeof result.meta !== 'object') result.meta = {};
+  result.meta.anilist_id = Number(media.id || result.meta.anilist_id || 0) || null;
+  result.meta.anilist_taxonomy_transport = 'browser-direct';
+  if (Array.isArray(result.meta.taxonomy_pending_sources)) {
+    result.meta.taxonomy_pending_sources = result.meta.taxonomy_pending_sources.filter(x => x !== 'anilist.co');
+  }
+  if (!result.authority || typeof result.authority !== 'object') result.authority = {};
+  if (media.id) {
+    result.authority['anilist.co'] = [{
+      url: `https://anilist.co/anime/${media.id}`,
+      title: media.title?.romaji || media.title?.english || result.title?.original || result.input?.title || 'AniList',
+    }];
+  }
+  return { used: true, count: genres.length, id: media.id || null };
+}
+
+function markAniListTaxonomyPending(result, error) {
+  if (!result.meta || typeof result.meta !== 'object') result.meta = {};
+  const pending = new Set(Array.isArray(result.meta.taxonomy_pending_sources) ? result.meta.taxonomy_pending_sources : []);
+  pending.add('anilist.co');
+  result.meta.taxonomy_pending_sources = [...pending];
+  result.meta.anilist_taxonomy_error = String(error?.message || error || 'AniList unavailable').slice(0, 500);
+}
+
 async function processSelectedSource(item, button) {
   if (discoverSelected) return;
   discoverSelected = item;
@@ -865,6 +1042,16 @@ async function processSelectedSource(item, button) {
       }
     });
     if (!coreResult?.title) throw new Error('Python core завершив stream без фінального JSON.');
+
+    try {
+      updateDiscoverProgress({ percent: 98, stage: 'anilist_client', message: 'AniList: перевіряю жанри напряму з браузера…' });
+      const ani = await enrichAniListGenresInBrowser(coreResult);
+      if (ani.used) setDiscoverStatus(`AniList жанри отримано напряму (${ani.count}). Записую у Turso…`, 'loading');
+    } catch (aniError) {
+      console.warn('[YORU] AniList browser taxonomy fallback failed', aniError);
+      markAniListTaxonomyPending(coreResult, aniError);
+      setDiscoverStatus(`AniList тимчасово недоступний (${aniError.message}). Інші дані буде збережено.`, 'loading');
+    }
 
     updateDiscoverProgress({ percent: 99, stage: 'storage', message: 'JSON готовий. Записую у Turso…' });
     setDiscoverStatus('Повний JSON отримано. Записую у Turso…', 'loading');

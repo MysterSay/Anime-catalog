@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -20,8 +21,101 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.11.0"
+APP_VERSION = "2.11.4"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
+
+TAXONOMY_UK = {
+    'action': 'Екшен',
+    'adventure': 'Пригоди',
+    'avant garde': 'Авангард',
+    'award winning': 'Відзначене нагородами',
+    'boys love': 'Хлопчаче кохання',
+    'comedy': 'Комедія',
+    'drama': 'Драма',
+    'fantasy': 'Фентезі',
+    'girls love': 'Дівоче кохання',
+    'gourmet': 'Гурманське',
+    'horror': 'Жахи',
+    'mystery': 'Таємниці',
+    'romance': 'Романтика',
+    'sci fi': 'Наукова фантастика',
+    'science fiction': 'Наукова фантастика',
+    'slice of life': 'Повсякденність',
+    'sports': 'Спорт',
+    'supernatural': 'Надприродне',
+    'suspense': 'Трилер',
+    'thriller': 'Трилер',
+    'ecchi': 'Етті',
+    'erotica': 'Еротика',
+    'hentai': 'Хентай',
+    'josei': 'Дзьосей',
+    'kids': 'Для дітей',
+    'seinen': 'Сейнен',
+    'shoujo': 'Сьодзьо',
+    'shojo': 'Сьодзьо',
+    'shounen': 'Сьонен',
+    'shonen': 'Сьонен',
+    'adult cast': 'Дорослі персонажі',
+    'anthropomorphic': 'Антропоморфізм',
+    'cgdct': 'Милі дівчата роблять милі речі',
+    'childcare': 'Догляд за дітьми',
+    'combat sports': 'Бойові види спорту',
+    'crossdressing': 'Кросдресинг',
+    'delinquents': 'Хулігани',
+    'detective': 'Детектив',
+    'educational': 'Освітнє',
+    'gag humor': 'Гег-гумор',
+    'gore': 'Криваві сцени',
+    'harem': 'Гарем',
+    'high stakes game': 'Гра з високими ставками',
+    'historical': 'Історичне',
+    'idols female': 'Жіночі айдоли',
+    'idols male': 'Чоловічі айдоли',
+    'isekai': 'Ісекай',
+    'iyashikei': 'Іяшікеї',
+    'love polygon': 'Любовний багатокутник',
+    'magical sex shift': 'Магічна зміна статі',
+    'mahou shoujo': 'Дівчата-чарівниці',
+    'maho shojo': 'Дівчата-чарівниці',
+    'martial arts': 'Бойові мистецтва',
+    'mecha': 'Меха',
+    'medical': 'Медицина',
+    'military': 'Військове',
+    'music': 'Музика',
+    'mythology': 'Міфологія',
+    'organized crime': 'Організована злочинність',
+    'otaku culture': 'Отаку-культура',
+    'parody': 'Пародія',
+    'performing arts': 'Сценічне мистецтво',
+    'pets': 'Домашні тварини',
+    'psychological': 'Психологічне',
+    'racing': 'Перегони',
+    'reincarnation': 'Реінкарнація',
+    'reverse harem': 'Зворотний гарем',
+    'romantic subtext': 'Романтичний підтекст',
+    'samurai': 'Самураї',
+    'school': 'Школа',
+    'showbiz': 'Шоу-бізнес',
+    'space': 'Космос',
+    'strategy game': 'Стратегічна гра',
+    'super power': 'Надздібності',
+    'survival': 'Виживання',
+    'team sports': 'Командний спорт',
+    'time travel': 'Подорожі в часі',
+    'vampire': 'Вампіри',
+    'video game': 'Відеоігри',
+    'visual arts': 'Образотворче мистецтво',
+    'workplace': 'Робота',
+}
+
+
+def taxonomy_uk_name(value: Any) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    latin = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").casefold()
+    key = re.sub(r"[^a-z0-9]+", " ", latin).strip()
+    return TAXONOMY_UK.get(key, text)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -180,6 +274,11 @@ class InputPayload(BaseModel):
     url: str | None = ""
     status: str | None = ""
     group: str | None = ""
+    # Backfill/site clients may ask the serverless core to skip AniList GraphQL
+    # and perform that one hop from the user's own network instead.  AniList can
+    # return HTTP 403 to shared cloud/serverless egress while the same public
+    # query works from a normal client connection.
+    prefer_client_anilist: bool = False
 
 
 class SearchPayload(BaseModel):
@@ -762,6 +861,37 @@ class Core:
         async with self.http_sem:
             return await self.client.request(method, url, **kwargs)
 
+    async def authority_request(
+        self, method: str, url: str, *, retries: int = 4, base_delay: float = 0.7, **kwargs: Any
+    ) -> httpx.Response:
+        """Request an authority API/page with bounded retry for transient failures.
+
+        AniList, MAL and Shikimori occasionally answer 429/502/503/504 from shared
+        serverless IPs.  A taxonomy miss caused by one such response should not be
+        cached as an empty source, so retry those statuses before giving up.
+        """
+        last: httpx.Response | None = None
+        retryable = {429, 500, 502, 503, 504}
+        for attempt in range(max(1, retries)):
+            try:
+                response = await self.request(method, url, **kwargs)
+                last = response
+            except (httpx.TimeoutException, httpx.NetworkError):
+                if attempt + 1 >= retries:
+                    raise
+                await asyncio.sleep(min(6.0, base_delay * (2 ** attempt)))
+                continue
+            if response.status_code not in retryable or attempt + 1 >= retries:
+                return response
+            retry_after = clean_text(response.headers.get("Retry-After"))
+            try:
+                wait = float(retry_after) if retry_after else base_delay * (2 ** attempt)
+            except ValueError:
+                wait = base_delay * (2 ** attempt)
+            await asyncio.sleep(max(0.15, min(8.0, wait)))
+        assert last is not None
+        return last
+
     async def google_site_search_detailed(
         self, domain: str, title: str, limit: int = 12
     ) -> tuple[list[dict[str, str]], str]:
@@ -1019,7 +1149,45 @@ class Core:
         except Exception:
             return None, url
 
-    async def anilist_by_id(self, media_id: int) -> dict[str, Any] | None:
+    async def anilist_graphql(
+        self, query: str, variables: dict[str, Any], *, retries: int = 4
+    ) -> tuple[dict[str, Any], bool, str]:
+        """Execute AniList GraphQL and distinguish an empty result from a failed request."""
+        try:
+            response = await self.authority_request(
+                "POST",
+                "https://graphql.anilist.co",
+                retries=retries,
+                json={"query": query, "variables": variables},
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+            )
+            if response.status_code >= 400:
+                # AniList uses 403 both for temporary API shutdowns and manual
+                # blocking. Surface the GraphQL message instead of discarding it;
+                # callers can then decide whether to use the client-side fallback.
+                detail = ""
+                try:
+                    error_payload = response.json()
+                    errors = error_payload.get("errors") if isinstance(error_payload, dict) else None
+                    if isinstance(errors, list) and errors:
+                        first = errors[0]
+                        detail = clean_text(first.get("message")) if isinstance(first, dict) else clean_text(first)
+                except Exception:
+                    detail = ""
+                suffix = f": {detail}" if detail else ""
+                return {}, False, f"HTTP {response.status_code}{suffix}"
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return {}, False, "invalid JSON payload"
+            errors = payload.get("errors") or []
+            if errors and not payload.get("data"):
+                message = clean_text((errors[0] or {}).get("message")) if isinstance(errors[0], dict) else clean_text(errors[0])
+                return payload, False, message or "GraphQL error"
+            return payload, True, ""
+        except Exception as error:
+            return {}, False, clean_text(error) or error.__class__.__name__
+
+    async def anilist_by_id_result(self, media_id: int) -> tuple[dict[str, Any] | None, bool, str]:
         query = """
         query ($id: Int!) {
           Media(id: $id, type: ANIME) {
@@ -1033,17 +1201,17 @@ class Core:
           }
         }
         """
-        try:
-            response = await self.request(
-                "POST",
-                "https://graphql.anilist.co",
-                json={"query": query, "variables": {"id": media_id}},
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-            )
-            response.raise_for_status()
-            return response.json().get("data", {}).get("Media")
-        except Exception:
-            return None
+        payload, ok, error = await self.anilist_graphql(query, {"id": media_id}, retries=4)
+        if not ok:
+            return None, False, error
+        media = payload.get("data", {}).get("Media")
+        if not isinstance(media, dict):
+            return None, False, f"no media for AniList id {media_id}"
+        return media, True, ""
+
+    async def anilist_by_id(self, media_id: int) -> dict[str, Any] | None:
+        media, _, _ = await self.anilist_by_id_result(media_id)
+        return media
 
     async def anilist_search(self, title: str) -> list[dict[str, Any]]:
         query = """
@@ -1061,17 +1229,11 @@ class Core:
           }
         }
         """
-        try:
-            response = await self.request(
-                "POST",
-                "https://graphql.anilist.co",
-                json={"query": query, "variables": {"search": title}},
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-            )
-            response.raise_for_status()
-            return response.json().get("data", {}).get("Page", {}).get("media", []) or []
-        except Exception:
+        payload, ok, _ = await self.anilist_graphql(query, {"search": title}, retries=3)
+        if not ok:
             return []
+        media = payload.get("data", {}).get("Page", {}).get("media", [])
+        return media if isinstance(media, list) else []
 
     def parse_anilist_id(self, url: str) -> int | None:
         match = re.search(r"anilist\.co/anime/(\d+)", url)
@@ -1085,7 +1247,7 @@ class Core:
         match = re.search(r"shikimori\.(?:io|one)/(?:animes?/)?(?:[a-z])?(\d+)", url, re.I)
         return int(match.group(1)) if match else None
 
-    async def anilist_by_mal_id(self, mal_id: int) -> dict[str, Any] | None:
+    async def anilist_by_mal_id_result(self, mal_id: int) -> tuple[dict[str, Any] | None, bool, str]:
         query = """
         query ($idMal: Int!) {
           Media(idMal: $idMal, type: ANIME) {
@@ -1099,17 +1261,17 @@ class Core:
           }
         }
         """
-        try:
-            response = await self.request(
-                "POST",
-                "https://graphql.anilist.co",
-                json={"query": query, "variables": {"idMal": mal_id}},
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-            )
-            response.raise_for_status()
-            return response.json().get("data", {}).get("Media")
-        except Exception:
-            return None
+        payload, ok, error = await self.anilist_graphql(query, {"idMal": mal_id}, retries=5)
+        if not ok:
+            return None, False, error
+        media = payload.get("data", {}).get("Media")
+        if not isinstance(media, dict):
+            return None, False, f"no media for MAL id {mal_id}"
+        return media, True, ""
+
+    async def anilist_by_mal_id(self, mal_id: int) -> dict[str, Any] | None:
+        media, _, _ = await self.anilist_by_mal_id_result(mal_id)
+        return media
 
     def media_names(self, media: dict[str, Any]) -> list[str]:
         titles = media.get("title") or {}
@@ -1126,9 +1288,10 @@ class Core:
 
     async def shikimori_authority_search(self, query: str) -> list[dict[str, Any]]:
         try:
-            response = await self.request(
+            response = await self.authority_request(
                 "GET",
                 "https://shikimori.io/api/animes",
+                retries=3,
                 params={"search": query, "limit": 10},
                 headers={"Accept": "application/json"},
             )
@@ -1212,9 +1375,10 @@ class Core:
 
     async def shikimori_details(self, anime_id: int) -> dict[str, Any] | None:
         try:
-            response = await self.request(
+            response = await self.authority_request(
                 "GET",
                 f"https://shikimori.io/api/animes/{anime_id}",
+                retries=4,
                 headers={"Accept": "application/json"},
             )
             if response.status_code >= 400:
@@ -1246,7 +1410,7 @@ class Core:
         for raw in values:
             if isinstance(raw, dict):
                 raw = raw.get("name") or raw.get("english") or raw.get("russian") or raw.get("title") or ""
-            value = clean_text(raw)
+            value = taxonomy_uk_name(raw)
             if not value:
                 continue
             key = value.casefold()
@@ -1259,6 +1423,12 @@ class Core:
         return out
 
     def shikimori_taxonomy(self, item: dict[str, Any] | None) -> tuple[list[str], list[str]]:
+        """REST fallback for older Shikimori payloads.
+
+        Current Shikimori pages split genres and themes via genres_v2.  Some REST
+        payloads flatten that distinction, so the HTML page parser below is the
+        preferred source; this method remains a compatibility fallback.
+        """
         genres: list[str] = []
         themes: list[str] = []
         if not isinstance(item, dict):
@@ -1276,17 +1446,68 @@ class Core:
                 genres.append(name)
         return self.taxonomy_names(genres), self.taxonomy_names(themes)
 
-    async def myanimelist_taxonomy(self, mal_id: int | None) -> tuple[list[str], list[str]]:
-        if not mal_id:
-            return [], []
-        soup, _ = await self.fetch_soup(f"https://myanimelist.net/anime/{int(mal_id)}")
+    def shikimori_taxonomy_from_soup(self, soup: BeautifulSoup | None) -> tuple[list[str], list[str], bool]:
+        """Read Shikimori's visible Genre/Theme rows exactly as the title page shows them."""
         if not soup:
-            return [], []
+            return [], [], False
+        root = soup.select_one(".b-entry-info")
+        if not root:
+            return [], [], False
         genres: list[str] = []
         themes: list[str] = []
-        # MAL desktop pages group taxonomy in .spaceit_pad rows headed by
-        # “Genres:” / “Themes:”. This keeps the two concepts separate even
-        # though both link through /anime/genre/... URLs.
+        saw_taxonomy = False
+        for row in root.select(".line-container"):
+            key_node = row.select_one(".key")
+            if not key_node:
+                continue
+            label = clean_text(key_node.get_text(" ", strip=True)).rstrip(":").casefold()
+            is_genre = label.startswith(("жанр", "genre"))
+            is_theme = label.startswith(("тем", "theme"))
+            if not (is_genre or is_theme):
+                continue
+            saw_taxonomy = True
+            names: list[str] = []
+            for anchor in row.select('a.b-tag[href], a[href*="/animes/genre/"]'):
+                href = clean_text(anchor.get("href"))
+                match = re.search(r"/animes/genre/\d+-([^/?#]+)", href, re.I)
+                if match:
+                    # The route slug is the stable English taxonomy name, e.g.
+                    # /animes/genre/114-Award-Winning -> Award Winning.
+                    name = unquote(match.group(1)).replace("-", " ")
+                else:
+                    name = clean_text(anchor.get_text(" ", strip=True))
+                if name:
+                    names.append(name)
+            if is_genre:
+                genres.extend(names)
+            else:
+                themes.extend(names)
+        return self.taxonomy_names(genres), self.taxonomy_names(themes), saw_taxonomy
+
+    async def shikimori_page_taxonomy(self, anime_id: int | None) -> tuple[list[str], list[str], bool, str]:
+        if not anime_id:
+            return [], [], False, "missing MAL/Shikimori id"
+        url = f"https://shikimori.io/animes/{int(anime_id)}"
+        try:
+            response = await self.authority_request(
+                "GET", url, retries=4, headers={"Accept": "text/html,application/xhtml+xml"}
+            )
+            if response.status_code >= 400:
+                return [], [], False, f"HTTP {response.status_code}"
+            soup = BeautifulSoup(response.text, "html.parser")
+            genres, themes, parsed = self.shikimori_taxonomy_from_soup(soup)
+            if not parsed:
+                return genres, themes, False, "taxonomy rows not found"
+            return genres, themes, True, ""
+        except Exception as error:
+            return [], [], False, clean_text(error) or error.__class__.__name__
+
+    def _parse_mal_taxonomy_soup(self, soup: BeautifulSoup | None) -> tuple[list[str], list[str], bool]:
+        if not soup:
+            return [], [], False
+        genres: list[str] = []
+        themes: list[str] = []
+        saw_taxonomy = False
         for row in soup.select("div.spaceit_pad, tr"):
             label_node = row.select_one("span.dark_text, th")
             if not label_node:
@@ -1294,15 +1515,37 @@ class Core:
             label = clean_text(label_node.get_text(" ", strip=True)).rstrip(":").casefold()
             if label not in {"genre", "genres", "theme", "themes"}:
                 continue
-            names = [
-                clean_text(a.get_text(" ", strip=True))
-                for a in row.select('a[href*="/anime/genre/"]')
-            ]
+            saw_taxonomy = True
+            names = [clean_text(a.get_text(" ", strip=True)) for a in row.select('a[href*="/anime/genre/"]')]
             if label.startswith("genre"):
                 genres.extend(names)
             else:
                 themes.extend(names)
-        return self.taxonomy_names(genres), self.taxonomy_names(themes)
+        return self.taxonomy_names(genres), self.taxonomy_names(themes), saw_taxonomy
+
+    async def myanimelist_taxonomy_result(self, mal_id: int | None) -> tuple[list[str], list[str], bool, str]:
+        if not mal_id:
+            return [], [], False, "missing MAL id"
+        try:
+            response = await self.authority_request(
+                "GET",
+                f"https://myanimelist.net/anime/{int(mal_id)}",
+                retries=4,
+                headers={"Accept": "text/html,application/xhtml+xml"},
+            )
+            if response.status_code >= 400:
+                return [], [], False, f"HTTP {response.status_code}"
+            soup = BeautifulSoup(response.text, "html.parser")
+            genres, themes, parsed = self._parse_mal_taxonomy_soup(soup)
+            if not parsed:
+                return genres, themes, False, "taxonomy rows not found"
+            return genres, themes, True, ""
+        except Exception as error:
+            return [], [], False, clean_text(error) or error.__class__.__name__
+
+    async def myanimelist_taxonomy(self, mal_id: int | None) -> tuple[list[str], list[str]]:
+        genres, themes, _, _ = await self.myanimelist_taxonomy_result(mal_id)
+        return genres, themes
 
     def taxonomy_payload(self, sources: dict[str, list[str]], allowed_sources: list[str]) -> dict[str, Any]:
         clean_sources: dict[str, list[str]] = {}
@@ -1322,7 +1565,11 @@ class Core:
         corresponding Romaji ``name`` even when AniList is temporarily unavailable.
         """
         extra_queries = unique_strings(extra_queries or [], limit=12)
-        cache_key = normalize_title(payload.title) + "|" + "|".join(normalize_title(x) for x in extra_queries[:6])
+        authority_url_key = ""
+        source_for_cache = source_domain(payload.url)
+        if payload.url and any(same_host(source_for_cache, d) for d in AUTHORITY_SITES):
+            authority_url_key = compact_url(payload.url).casefold()
+        cache_key = normalize_title(payload.title) + "|" + authority_url_key + "|" + "|".join(normalize_title(x) for x in extra_queries[:6])
         cached = TITLE_CACHE.get(cache_key)
         if cached:
             result = AuthorityData(**json.loads(json.dumps(cached)))
@@ -1621,7 +1868,9 @@ class Core:
 
         if data.mal_id and not resolved_shikimori:
             resolved_shikimori = await self.shikimori_details(int(data.mal_id))
-        shiki_genres, shiki_themes = self.shikimori_taxonomy(resolved_shikimori)
+        shiki_genres, shiki_themes, shiki_page_ok, _ = await self.shikimori_page_taxonomy(data.mal_id)
+        if not shiki_page_ok:
+            shiki_genres, shiki_themes = self.shikimori_taxonomy(resolved_shikimori)
         data.genres["shikimori.io"] = shiki_genres
         data.themes["shikimori.io"] = shiki_themes
 
@@ -1661,6 +1910,177 @@ class Core:
 
         TITLE_CACHE.set(cache_key, data.__dict__)
         return data
+
+    async def resolve_taxonomy_authorities(self, payload: InputPayload) -> tuple[AuthorityData, dict[str, dict[str, Any]]]:
+        """Resolve taxonomy with a direct authority-id path whenever possible.
+
+        Backfill records already contain a MAL/Shikimori/AniList URL.  Using that
+        canonical id avoids the broad title search and makes 167-item backfills both
+        faster and much less likely to hit serverless/API throttling.
+        """
+        source = source_domain(payload.url)
+        mal_id: int | None = None
+        anilist_id: int | None = None
+        media: dict[str, Any] | None = None
+        fallback: AuthorityData | None = None
+        anilist_ok = False
+        anilist_error = ""
+
+        if payload.url and same_host(source, "myanimelist.net") and is_authority_title_url("myanimelist.net", payload.url):
+            mal_id = self.parse_mal_id(payload.url)
+        elif payload.url and same_host(source, "shikimori.io") and is_authority_title_url("shikimori.io", payload.url):
+            mal_id = self.parse_shikimori_id(payload.url)
+        elif payload.url and same_host(source, "anilist.co") and is_authority_title_url("anilist.co", payload.url):
+            anilist_id = self.parse_anilist_id(payload.url)
+            if anilist_id:
+                media, anilist_ok, anilist_error = await self.anilist_by_id_result(anilist_id)
+                if media and media.get("idMal"):
+                    mal_id = int(media["idMal"])
+
+        if mal_id and media is None:
+            if payload.prefer_client_anilist:
+                # Used by the local backfill/client. Avoid a guaranteed 403 from
+                # shared serverless egress and let the caller query AniList directly.
+                anilist_ok = False
+                anilist_error = "client fallback requested"
+            else:
+                media, anilist_ok, anilist_error = await self.anilist_by_mal_id_result(mal_id)
+                if media and media.get("id"):
+                    anilist_id = int(media["id"])
+
+        # Only title-search when the caller did not provide a usable authority id.
+        if mal_id is None and media is None:
+            fallback = await self.resolve_authorities(payload)
+            mal_id = fallback.mal_id
+            anilist_id = fallback.anilist_id
+            if anilist_id:
+                media, anilist_ok, anilist_error = await self.anilist_by_id_result(int(anilist_id))
+            elif mal_id:
+                media, anilist_ok, anilist_error = await self.anilist_by_mal_id_result(int(mal_id))
+                if media and media.get("id"):
+                    anilist_id = int(media["id"])
+
+        data = fallback or AuthorityData()
+        data.mal_id = int(mal_id) if mal_id else data.mal_id
+        data.anilist_id = int(anilist_id) if anilist_id else data.anilist_id
+
+        shiki_details: dict[str, Any] | None = None
+        shiki_ok = False
+        shiki_error = ""
+        if data.mal_id:
+            try:
+                shiki_details = await self.shikimori_details(int(data.mal_id))
+                shiki_ok = shiki_details is not None
+                if not shiki_ok:
+                    shiki_error = "REST details unavailable"
+            except Exception as error:
+                shiki_error = clean_text(error) or error.__class__.__name__
+
+        # Run the three source-specific taxonomy reads concurrently after identity is known.
+        mal_task = asyncio.create_task(self.myanimelist_taxonomy_result(data.mal_id))
+        shiki_page_task = asyncio.create_task(self.shikimori_page_taxonomy(data.mal_id))
+        mal_genres, mal_themes, mal_ok, mal_error = await mal_task
+        shiki_genres, shiki_themes, shiki_page_ok, shiki_page_error = await shiki_page_task
+
+        if shiki_page_ok:
+            shiki_ok = True
+            shiki_error = ""
+        elif shiki_details:
+            # Page parse failed, keep REST as data fallback but report the page
+            # failure so backfill can retry instead of silently persisting a flattened split.
+            fallback_genres, fallback_themes = self.shikimori_taxonomy(shiki_details)
+            shiki_genres = fallback_genres
+            shiki_themes = fallback_themes
+            shiki_error = shiki_page_error or shiki_error
+
+        if media:
+            titles = media.get("title") or {}
+            data.original = clean_title(titles.get("romaji") or data.original or payload.title)
+            data.english = clean_title(titles.get("english") or data.english or "")
+            data.native = clean_title(titles.get("native") or data.native or "")
+            data.aliases = unique_strings([*self.media_names(media), *data.aliases, payload.title], limit=60)
+            data.genres["anilist.co"] = self.taxonomy_names(media.get("genres") or [])
+            if media.get("id"):
+                data.anilist_id = int(media["id"])
+            if media.get("idMal"):
+                data.mal_id = int(media["idMal"])
+        else:
+            data.genres["anilist.co"] = []
+
+        if shiki_details:
+            names = self.shikimori_names(shiki_details)
+            if not data.original:
+                data.original = clean_title(shiki_details.get("name") or payload.title)
+            data.aliases = unique_strings([*data.aliases, *names, payload.title], limit=60)
+            if not data.english:
+                english_values = shiki_details.get("english") or []
+                if isinstance(english_values, str):
+                    english_values = [english_values]
+                data.english = clean_title(next((x for x in english_values if clean_title(x)), ""))
+            if not data.native:
+                japanese_values = shiki_details.get("japanese") or []
+                if isinstance(japanese_values, str):
+                    japanese_values = [japanese_values]
+                data.native = clean_title(next((x for x in japanese_values if clean_title(x)), ""))
+
+        data.genres["myanimelist.net"] = self.taxonomy_names(mal_genres)
+        data.themes["myanimelist.net"] = self.taxonomy_names(mal_themes)
+        data.genres["shikimori.io"] = self.taxonomy_names(shiki_genres)
+        data.themes["shikimori.io"] = self.taxonomy_names(shiki_themes)
+
+        if data.mal_id:
+            data.links["myanimelist.net"] = [{"url": f"https://myanimelist.net/anime/{data.mal_id}", "title": data.english or data.original or payload.title}]
+            data.links["shikimori.io"] = [{"url": f"https://shikimori.io/animes/{data.mal_id}", "title": data.original or payload.title}]
+        if data.anilist_id:
+            data.links["anilist.co"] = [{"url": f"https://anilist.co/anime/{data.anilist_id}", "title": data.original or payload.title}]
+
+        # Distinguish a definite catalogue absence from a temporary source failure.
+        # This matters for backfill: NOT_FOUND must be considered a completed check,
+        # while 403/429/5xx/timeouts/parsing failures remain retriable.
+        identity_has_anilist_without_mal = bool(data.anilist_id and not data.mal_id)
+        mal_not_found = bool(
+            "http 404" in clean_text(mal_error).casefold()
+            or identity_has_anilist_without_mal
+        )
+        shiki_final_error = shiki_page_error or ("" if shiki_page_ok else shiki_error)
+        shiki_not_found = bool(
+            "http 404" in clean_text(shiki_final_error).casefold()
+            or identity_has_anilist_without_mal
+        )
+        anilist_error_key = clean_text(anilist_error).casefold()
+        anilist_not_found = bool(
+            "no media for mal id" in anilist_error_key
+            or "no media for anilist id" in anilist_error_key
+        )
+
+        status = {
+            "myanimelist.net": {
+                "ok": bool(mal_ok),
+                "notFound": mal_not_found,
+                "error": "title has no MAL id" if identity_has_anilist_without_mal and not mal_ok else mal_error,
+                "id": data.mal_id,
+                "genres": len(mal_genres),
+                "themes": len(mal_themes),
+            },
+            "shikimori.io": {
+                "ok": bool(shiki_page_ok),
+                "notFound": shiki_not_found,
+                "error": "title has no MAL/Shikimori id" if identity_has_anilist_without_mal and not shiki_page_ok else shiki_final_error,
+                "id": data.mal_id,
+                "genres": len(shiki_genres),
+                "themes": len(shiki_themes),
+                "pageSplit": bool(shiki_page_ok),
+            },
+            "anilist.co": {
+                "ok": bool(anilist_ok),
+                "notFound": anilist_not_found,
+                "error": anilist_error,
+                "id": data.anilist_id,
+                "genres": len(data.genres.get("anilist.co") or []),
+                "clientFallback": bool(payload.prefer_client_anilist or (not anilist_ok and "HTTP 403" in (anilist_error or ""))),
+            },
+        }
+        return data, status
 
     async def discover_search_requests(self, domain: str, query: str) -> list[tuple[str, str, dict[str, Any]]]:
         cache_key = f"forms:{domain}"
@@ -3072,7 +3492,7 @@ async def taxonomy_endpoint(payload: InputPayload, x_api_key: str | None = Heade
         raise HTTPException(status_code=401, detail="Invalid X-API-Key")
     core = Core()
     try:
-        authority = await core.resolve_authorities(payload)
+        authority, source_status = await core.resolve_taxonomy_authorities(payload)
         return {
             "ok": True,
             "core_version": APP_VERSION,
@@ -3085,6 +3505,11 @@ async def taxonomy_endpoint(payload: InputPayload, x_api_key: str | None = Heade
             "genres": core.taxonomy_payload(authority.genres, ["myanimelist.net", "shikimori.io", "anilist.co"]),
             "themes": core.taxonomy_payload(authority.themes, ["myanimelist.net", "shikimori.io"]),
             "authority": authority.links,
+            "source_status": source_status,
+            "client_fallback": {
+                "anilist": bool((source_status.get("anilist.co") or {}).get("clientFallback")),
+            },
+            "complete": all(bool(v.get("ok")) or bool(v.get("notFound")) for v in source_status.values()),
         }
     finally:
         await core.close()

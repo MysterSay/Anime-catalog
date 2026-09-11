@@ -1,24 +1,33 @@
-# Anime Title Core v2.11.0
+# Anime Title Core v2.11.3
 
-## Нове
+## Taxonomy source-absence hotfix
 
-- Жанри збираються окремо з MyAnimeList, Shikimori та AniList.
-- Теми збираються окремо з MyAnimeList та Shikimori.
-- schema-v3 додає `genres` і `themes` у форматі `{all, sources}`.
-- Новий швидкий endpoint `POST /api/taxonomy` для дозаповнення старих записів без повного пошуку каталогів.
-- Попередній порядок пошуку каталогів та Firefox stream protocol не змінені.
+- Every taxonomy authority now exposes `notFound` separately from temporary failures.
+- AniList GraphQL `Media: null` is now `NOT_FOUND`, not `ok=true` with an empty genre list.
+- An AniList identity with no MAL linkage marks MAL/Shikimori as absent instead of endlessly retriable.
+- HTTP 404 remains a definite source absence.
+- HTTP 403/429/5xx, timeout and parser failures remain retriable.
+- Taxonomy `complete` now means every authority is either `ok` or definitively `notFound`.
+- Existing AniList client fallback behaviour is preserved.
 
 ## Deploy
 
+Run from the repository root when Vercel Root Directory is `vercel`:
+
 ```powershell
-npx vercel link --yes --project anime-catalog
 npx vercel deploy --prod
 ```
 
-Перевірка:
+Verify:
 
 ```powershell
 Invoke-RestMethod "https://anime-catalog-flame.vercel.app/api/health" | ConvertTo-Json -Depth 10
 ```
 
-Очікувана версія: `2.11.0`, `result_schema: 3`.
+Expected version: `2.11.3`.
+
+## Core v2.11.4 — Ukrainian taxonomy
+
+Genre/theme values from MAL, Shikimori and AniList are normalized to Ukrainian before Core returns taxonomy payloads. Source identity/status remains unchanged.
+
+Expected `/api/health` version: `2.11.4`.

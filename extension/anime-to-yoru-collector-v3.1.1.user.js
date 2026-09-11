@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Anime -> YORU Collector
 // @namespace    myster.anime.yoru
-// @version      3.1.0
-// @description  Thin client for Anime Title Core: streams progress packets, runs full catalog search on Vercel, then imports schema-v2 JSON into Turso through YORU.
+// @version      3.1.1
+// @description  Thin client for Anime Title Core: streams progress packets, runs full catalog search on Vercel, then imports schema-v3 JSON into Turso through YORU.
 // @author       Myster
 //
 // @match        *://myanimelist.net/*
@@ -52,6 +52,7 @@
 // @match        *://*.anitube.in.ua/*
 //
 // @connect      myster-anime.pages.dev
+// @connect      graphql.anilist.co
 //
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
@@ -65,7 +66,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '3.1.0';
+  const VERSION = '3.1.1';
   const BASE = 'https://myster-anime.pages.dev';
   const STREAM_URL = `${BASE}/api/process-title-stream`;
   const BRIDGE_URL = `${BASE}/stream-bridge.html?v=7.0`;
@@ -1020,6 +1021,78 @@
     return saved;
   }
 
+  function taxonomyUnique(values) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of values || []) {
+      const value = String(raw || '').trim();
+      const key = value.toLocaleLowerCase('en-US');
+      if (value && !seen.has(key)) {
+        seen.add(key);
+        out.push(value);
+      }
+    }
+    return out;
+  }
+
+  function resultMalId(result) {
+    const direct = Number(result?.meta?.mal_id || 0);
+    if (Number.isInteger(direct) && direct > 0) return direct;
+    for (const item of result?.authority?.['myanimelist.net'] || []) {
+      const match = String(item?.url || '').match(/myanimelist\.net\/anime\/(\d+)/i);
+      if (match) return Number(match[1]);
+    }
+    return null;
+  }
+
+  async function enrichAniListGenresClient(result) {
+    const existing = result?.genres?.sources?.['anilist.co'];
+    if (Array.isArray(existing) && existing.length) return { used: false, count: existing.length };
+    const malId = resultMalId(result);
+    if (!malId) throw new Error('AniList client fallback: MAL ID відсутній.');
+
+    const query = `query($idMal:Int!){Media(idMal:$idMal,type:ANIME){id idMal genres title{romaji english native}}}`;
+    const payload = await gmJson('POST', 'https://graphql.anilist.co', {
+      query,
+      variables: { idMal: malId },
+    });
+    const graphError = Array.isArray(payload?.errors) && payload.errors.length
+      ? String(payload.errors[0]?.message || payload.errors[0] || '').trim()
+      : '';
+    if (graphError && !payload?.data?.Media) throw new Error(`AniList GraphQL: ${graphError}`);
+    const media = payload?.data?.Media;
+    if (!media) throw new Error(`AniList: не знайдено Media для MAL ${malId}.`);
+
+    const genres = taxonomyUnique(media.genres || []);
+    if (!result.genres || typeof result.genres !== 'object' || Array.isArray(result.genres)) result.genres = { all: [], sources: {} };
+    if (!result.genres.sources || typeof result.genres.sources !== 'object') result.genres.sources = {};
+    result.genres.sources['anilist.co'] = genres;
+    result.genres.all = taxonomyUnique([
+      ...(result.genres.sources['myanimelist.net'] || []),
+      ...(result.genres.sources['shikimori.io'] || []),
+      ...genres,
+    ]);
+    if (!result.meta || typeof result.meta !== 'object') result.meta = {};
+    result.meta.anilist_id = Number(media.id || result.meta.anilist_id || 0) || null;
+    result.meta.anilist_taxonomy_transport = 'tampermonkey-direct';
+    if (!result.authority || typeof result.authority !== 'object') result.authority = {};
+    if (media.id) {
+      result.authority['anilist.co'] = [{
+        url: `https://anilist.co/anime/${media.id}`,
+        title: media.title?.romaji || media.title?.english || result.title?.original || result.input?.title || 'AniList',
+      }];
+    }
+    return { used: true, count: genres.length, id: media.id || null };
+  }
+
+  function markAniListPending(result, error) {
+    if (!result.meta || typeof result.meta !== 'object') result.meta = {};
+    const pending = new Set(Array.isArray(result.meta.taxonomy_pending_sources) ? result.meta.taxonomy_pending_sources : []);
+    pending.add('anilist.co');
+    result.meta.taxonomy_pending_sources = [...pending];
+    result.meta.anilist_taxonomy_error = String(error?.message || error || 'AniList unavailable').slice(0, 500);
+  }
+
   async function createNew() {
     const title = cleanTitle(state.titleInput?.value || extractTitle());
     if (!title) return alert('Не вдалося визначити назву. Введи її вручну в полі панелі.');
@@ -1064,6 +1137,14 @@
         await runNonStreamFallback(requestPayload);
         return;
       }
+      try {
+        setProgress(98, 'AniList: беру жанри напряму з браузера…');
+        const ani = await enrichAniListGenresClient(result);
+        if (ani.used) addLog(`AniList genres (direct): ${ani.count}`, 'ok');
+      } catch (aniError) {
+        markAniListPending(result, aniError);
+        addLog(`AniList direct недоступний: ${aniError.message}`, 'warn');
+      }
       setProgress(99, 'JSON готовий. Відправляю в YORU / Turso…');
       const saved = await gmJson('POST', INGEST_URL, result);
       if (!saved?.item?.id) throw new Error('Yoru ingest не повернув ID тайтлу.');
@@ -1075,7 +1156,7 @@
       notify('Anime → YORU', `${saved.existing ? 'Оновлено' : 'Додано'}: ${saved.item.title || title}`);
       await refreshContext();
     } catch (error) {
-      console.error('[Anime -> YORU v3.1.0]', error);
+      console.error('[Anime -> YORU v3.1.1]', error);
       const msg = String(error?.message || error).replace(/^CORE:/, '');
       setProgress(Number(state.progressPercent?.textContent?.replace('%', '')) || 0, `Помилка: ${msg}`, 'error');
       addLog(msg, 'error');
