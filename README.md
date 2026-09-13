@@ -5,7 +5,7 @@
 
 ## Підтримка
 
-[Підтримай проект]([https://send.monobank.ua/jar/3rqmBsdneV])
+[Підтримай проект](https://send.monobank.ua/jar/3rqmBsdneV)
 
 ## Структура
 
