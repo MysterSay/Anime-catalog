@@ -1,9 +1,9 @@
 # YORU Anime Catalog
 
 Актуальний мінімальний склад проєкту без міграційних і окремих deploy-скриптів.
-## Підтримка 
+ 
 
-`https://send.monobank.ua/jar/3rqmBsdneV`
+## [Підтримка]([https://github.com](https://send.monobank.ua/jar/3rqmBsdneV))
 
 ## Структура
 
