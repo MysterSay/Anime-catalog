@@ -3,7 +3,9 @@
 Актуальний мінімальний склад проєкту без міграційних і окремих deploy-скриптів.
  
 
-## [Підтримка]([https://github.com](https://send.monobank.ua/jar/3rqmBsdneV))
+## Підтримка
+
+[Підтримай проект]([https://send.monobank.ua/jar/3rqmBsdneV])
 
 ## Структура
 
