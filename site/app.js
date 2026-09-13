@@ -69,6 +69,200 @@ const GROUP_COLOR_THEME = {
 };
 const GROUP_COLOR_ORDER = ['default','gray','brown','orange','yellow','green','blue','purple','pink','red'];
 
+const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+const VIRTUAL_PAGE_MARGIN = 1600;
+const virtualCatalog = {
+  observer: null,
+  imageObserver: null,
+  pages: [],
+  items: [],
+  generation: 0,
+  resizeTimer: null,
+  lastWidth: window.innerWidth,
+};
+
+function virtualLayout() {
+  const width = window.innerWidth || document.documentElement.clientWidth || 1280;
+  if (state.view === 'list') {
+    return { columns: 1, rowsPerPage: 10, pageSize: 10, gap: 10 };
+  }
+  const columns = width <= 720 ? 2 : width <= 1000 ? 3 : width <= 1250 ? 4 : 5;
+  const gap = width <= 720 ? 10 : 18;
+  const rowsPerPage = 5;
+  return { columns, rowsPerPage, pageSize: columns * rowsPerPage, gap };
+}
+
+function estimateVirtualPageHeight(itemCount, layout) {
+  if (!itemCount) return 1;
+  if (state.view === 'list') {
+    const rowHeight = window.innerWidth <= 720 ? 116 : 138;
+    return Math.ceil(itemCount * rowHeight + Math.max(0, itemCount - 1) * layout.gap);
+  }
+  const width = Math.max(280, catalog.clientWidth || document.documentElement.clientWidth - 48);
+  const cardWidth = Math.max(120, (width - layout.gap * (layout.columns - 1)) / layout.columns);
+  const cardPadding = window.innerWidth <= 720 ? 10 : 16;
+  const posterWidth = Math.max(80, cardWidth - cardPadding);
+  const bodyHeight = window.innerWidth <= 720 ? 92 : 122;
+  const cardHeight = posterWidth / 0.7 + bodyHeight + cardPadding;
+  const rows = Math.ceil(itemCount / layout.columns);
+  return Math.ceil(rows * cardHeight + Math.max(0, rows - 1) * layout.gap);
+}
+
+function disposeVirtualCatalog() {
+  virtualCatalog.generation += 1;
+  virtualCatalog.observer?.disconnect();
+  virtualCatalog.observer = null;
+  virtualCatalog.imageObserver?.disconnect();
+  virtualCatalog.imageObserver = null;
+  for (const page of virtualCatalog.pages) {
+    if (page._unmountTimer) clearTimeout(page._unmountTimer);
+  }
+  virtualCatalog.pages = [];
+  virtualCatalog.items = [];
+}
+
+function loadPosterImage(img) {
+  const source = img?.dataset?.src;
+  if (!img || !source) return;
+  img.src = source;
+  img.removeAttribute('data-src');
+  virtualCatalog.imageObserver?.unobserve(img);
+}
+
+function ensurePosterObserver() {
+  if (virtualCatalog.imageObserver) return virtualCatalog.imageObserver;
+  if (!('IntersectionObserver' in window)) return null;
+  virtualCatalog.imageObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) if (entry.isIntersecting) loadPosterImage(entry.target);
+  }, { root: null, rootMargin: '850px 0px 850px 0px', threshold: 0.01 });
+  return virtualCatalog.imageObserver;
+}
+
+function hydratePosterImages(root) {
+  const images = [...root.querySelectorAll('img.poster[data-src]')];
+  const observer = ensurePosterObserver();
+  if (!observer) {
+    images.forEach(loadPosterImage);
+    return;
+  }
+  images.forEach(img => observer.observe(img));
+}
+
+function mountVirtualPage(page) {
+  if (!page) return;
+  if (page._unmountTimer) {
+    clearTimeout(page._unmountTimer);
+    page._unmountTimer = null;
+  }
+  if (page.dataset.mounted === '1') return;
+  const generation = virtualCatalog.generation;
+  const start = Number(page.dataset.start || 0);
+  const end = Number(page.dataset.end || 0);
+  const layout = virtualLayout();
+  const oldHeight = Math.max(1, page.getBoundingClientRect().height || Number(page.dataset.height || 1));
+  const before = page.getBoundingClientRect();
+  const slice = virtualCatalog.items.slice(start, end);
+
+  page.dataset.mounted = '1';
+  page.classList.remove('is-placeholder');
+  page.classList.add('is-mounted', state.view === 'grid' ? 'is-grid' : 'is-list');
+  page.style.height = '';
+  page.style.setProperty('--virtual-columns', String(layout.columns));
+  page.style.setProperty('--virtual-gap', `${layout.gap}px`);
+  page.innerHTML = slice.map((item, index) => cardTemplate(item, start + index)).join('');
+  hydratePosterImages(page);
+
+  requestAnimationFrame(() => {
+    if (generation !== virtualCatalog.generation || page.dataset.mounted !== '1') return;
+    page.querySelectorAll('.anime-card').forEach(card => card.classList.add('show'));
+    const height = Math.max(1, page.getBoundingClientRect().height);
+    page.dataset.height = String(Math.ceil(height));
+    // Якщо сторінка вже повністю вище viewport, компенсуємо уточнення її висоти,
+    // щоб скрол не стрибав після заміни placeholder на реальний контент.
+    if (before.bottom < 0 && Math.abs(height - oldHeight) > 1) window.scrollBy(0, height - oldHeight);
+  });
+}
+
+function unmountVirtualPage(page) {
+  if (!page || page.dataset.mounted !== '1') return;
+  if (document.activeElement && page.contains(document.activeElement)) return;
+  const height = Math.max(1, page.getBoundingClientRect().height || Number(page.dataset.height || 1));
+  page.querySelectorAll('img.poster[data-src]').forEach(img => virtualCatalog.imageObserver?.unobserve(img));
+  page.querySelectorAll('img.poster').forEach(img => {
+    try { img.removeAttribute('src'); } catch {}
+  });
+  page.innerHTML = '';
+  page.dataset.mounted = '0';
+  page.dataset.height = String(Math.ceil(height));
+  page.classList.remove('is-mounted', 'is-grid', 'is-list');
+  page.classList.add('is-placeholder');
+  page.style.height = `${Math.ceil(height)}px`;
+}
+
+function scheduleVirtualPageUnmount(page) {
+  if (!page || page.dataset.mounted !== '1') return;
+  if (page._unmountTimer) clearTimeout(page._unmountTimer);
+  page._unmountTimer = setTimeout(() => {
+    page._unmountTimer = null;
+    unmountVirtualPage(page);
+  }, 650);
+}
+
+function mountVirtualPagesNearViewport() {
+  const h = window.innerHeight || document.documentElement.clientHeight || 800;
+  for (const page of virtualCatalog.pages) {
+    const rect = page.getBoundingClientRect();
+    if (rect.bottom >= -VIRTUAL_PAGE_MARGIN && rect.top <= h + VIRTUAL_PAGE_MARGIN) mountVirtualPage(page);
+  }
+}
+
+function renderVirtualCatalog(items) {
+  disposeVirtualCatalog();
+  virtualCatalog.items = items;
+  const generation = virtualCatalog.generation;
+  const layout = virtualLayout();
+  catalog.className = `${state.view === 'grid' ? 'catalog-grid' : 'catalog-list'} catalog-virtualized`;
+  catalog.style.setProperty('--virtual-page-gap', `${layout.gap}px`);
+  catalog.innerHTML = '';
+  if (!items.length) return;
+
+  const fragment = document.createDocumentFragment();
+  for (let start = 0, pageIndex = 0; start < items.length; start += layout.pageSize, pageIndex += 1) {
+    const end = Math.min(items.length, start + layout.pageSize);
+    const page = document.createElement('div');
+    const estimate = estimateVirtualPageHeight(end - start, layout);
+    page.className = 'virtual-page is-placeholder';
+    page.dataset.virtualPage = String(pageIndex);
+    page.dataset.start = String(start);
+    page.dataset.end = String(end);
+    page.dataset.mounted = '0';
+    page.dataset.height = String(estimate);
+    page.style.height = `${estimate}px`;
+    fragment.appendChild(page);
+    virtualCatalog.pages.push(page);
+  }
+  catalog.appendChild(fragment);
+
+  if ('IntersectionObserver' in window) {
+    virtualCatalog.observer = new IntersectionObserver(entries => {
+      if (generation !== virtualCatalog.generation) return;
+      for (const entry of entries) {
+        const page = entry.target;
+        if (entry.isIntersecting) mountVirtualPage(page);
+        else scheduleVirtualPageUnmount(page);
+      }
+    }, { root: null, rootMargin: `${VIRTUAL_PAGE_MARGIN}px 0px ${VIRTUAL_PAGE_MARGIN}px 0px`, threshold: 0 });
+    virtualCatalog.pages.forEach(page => virtualCatalog.observer.observe(page));
+  } else {
+    // Старі браузери без IntersectionObserver отримують звичайний повний каталог.
+    virtualCatalog.pages.forEach(mountVirtualPage);
+    return;
+  }
+
+  // Перший екран малюємо одразу, щоб не чекати callback IntersectionObserver.
+  mountVirtualPagesNearViewport();
+}
+
 
 const mergeFirstId = new URLSearchParams(location.search).get('merge') || '';
 const mergeMode = Boolean(mergeFirstId);
@@ -391,7 +585,7 @@ function cardTemplate(item, index) {
     <article class="anime-card ${mergeMode ? 'merge-candidate-card' : ''}" style="--delay:${Math.min(index * 35, 280)}ms; --status-accent:${theme.solid}; --status-accent-glow:${theme.glow}; --status-accent-border:${theme.border}" data-id="${escapeHtml(item.id)}">
       <a class="card-link" href="${href}" aria-label="${mergeMode ? 'Обрати для об’єднання' : 'Відкрити'} ${escapeHtml(item.title)}"></a>
       <div class="poster-wrap">
-        <img class="poster" src="${escapeHtml(item.poster || FALLBACK_IMAGE)}" alt="${escapeHtml(item.title)}" loading="lazy" />
+        <img class="poster" ${item.poster ? `src="${TRANSPARENT_PIXEL}" data-src="${escapeHtml(item.poster)}"` : `src="${FALLBACK_IMAGE}"`} alt="${escapeHtml(item.title)}" loading="lazy" decoding="async" fetchpriority="low" width="700" height="1000" />
         <div class="poster-shade"></div>
         <span class="status-badge ${statusClass(item.status)}">${escapeHtml(item.status || 'Без статусу')}</span>
         <div class="card-actions">
@@ -434,8 +628,7 @@ function renderMergeDock() {
 
 function render() {
   const items = getFiltered();
-  catalog.className = state.view === 'grid' ? 'catalog-grid' : 'catalog-list';
-  catalog.innerHTML = items.map(cardTemplate).join('');
+  renderVirtualCatalog(items);
 
   if (items.length === 0) {
     emptyState.classList.remove('hidden');
@@ -469,8 +662,6 @@ function render() {
   catalogTitle.textContent = mergeMode ? 'Обери тайтл для об’єднання' : (state.quick === 'favorite' ? 'Вибране' : state.quick === 'liked' ? 'Улюблене' : 'Усі тайтли');
   gridViewBtn.classList.toggle('active', state.view === 'grid');
   listViewBtn.classList.toggle('active', state.view === 'list');
-
-  [...catalog.querySelectorAll('.anime-card')].forEach(card => requestAnimationFrame(() => card.classList.add('show')));
 }
 
 function showToast(message) {
@@ -481,12 +672,14 @@ function showToast(message) {
 }
 
 function showLoading() {
+  disposeVirtualCatalog();
   emptyState.classList.add('hidden');
   catalog.className = 'catalog-grid loading-grid';
   catalog.innerHTML = Array.from({ length: 10 }, () => '<div class="skeleton-card"><div class="skeleton-poster"></div><div class="skeleton-line"></div><div class="skeleton-line short"></div></div>').join('');
 }
 
 function showLoadError(message) {
+  disposeVirtualCatalog();
   catalog.innerHTML = '';
   emptyState.classList.remove('hidden');
   emptyState.innerHTML = `<div class="empty-icon">!</div><h3>Не вдалося завантажити Turso</h3><p>${escapeHtml(message)}</p>`;
@@ -540,7 +733,7 @@ catalog.addEventListener('click', async e => {
   if (next) set.add(id); else set.delete(id);
   render();
   try {
-    const response = await fetch(`/api/anime?id=${encodeURIComponent(id)}`, {
+    const response = await fetch(`/api/anime?id=${encodeURIComponent(id)}&compact=1`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ [kind]: next }),
@@ -563,7 +756,12 @@ catalog.addEventListener('click', async e => {
   }
 });
 
-searchInput.addEventListener('input', () => { state.search = searchInput.value.trim(); render(); });
+let searchRenderTimer = null;
+searchInput.addEventListener('input', () => {
+  state.search = searchInput.value.trim();
+  clearTimeout(searchRenderTimer);
+  searchRenderTimer = setTimeout(render, 90);
+});
 groupFilter.addEventListener('change', () => { state.group = groupFilter.value; render(); });
 statusFilter.addEventListener('change', () => { state.status = statusFilter.value; render(); });
 genreFilter.addEventListener('change', () => { state.genre = genreFilter.value; saveState(); render(); });
@@ -628,6 +826,36 @@ document.addEventListener('click', e => {
 
   if (!e.target.closest('.custom-select')) closeCustomSelects();
   if (excludeFilterMenu && !excludeFilterMenu.contains(e.target)) toggleExcludePanel(false);
+});
+
+
+catalog.addEventListener('error', event => {
+  const img = event.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('poster')) return;
+  if (img.dataset.fallbackApplied === '1') return;
+  img.dataset.fallbackApplied = '1';
+  img.removeAttribute('data-src');
+  img.src = FALLBACK_IMAGE;
+}, true);
+
+window.addEventListener('resize', () => {
+  clearTimeout(virtualCatalog.resizeTimer);
+  virtualCatalog.resizeTimer = setTimeout(() => {
+    const width = window.innerWidth;
+    if (Math.abs(width - virtualCatalog.lastWidth) < 24) return;
+    virtualCatalog.lastWidth = width;
+    const y = window.scrollY;
+    render();
+    requestAnimationFrame(() => window.scrollTo(0, Math.min(y, Math.max(0, document.documentElement.scrollHeight - window.innerHeight))));
+  }, 160);
+}, { passive: true });
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    virtualCatalog.pages.forEach(unmountVirtualPage);
+  } else {
+    requestAnimationFrame(mountVirtualPagesNearViewport);
+  }
 });
 
 const SOURCE_LABELS = {

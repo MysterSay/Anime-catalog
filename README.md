@@ -1,34 +1,76 @@
-# YORU Turso v7.2.2.2 hotfix + Anime Title Core v2.11.1
+# YORU Anime Catalog
 
-Поточний стек:
+Актуальний мінімальний склад проєкту без міграційних і окремих deploy-скриптів.
 
-- Cloudflare Pages/Worker — сайт та API.
-- Turso/libSQL — база каталогу.
-- Vercel — Python Core пошуку та метаданих.
-- Tampermonkey — Anime → YORU Collector v3.1.0.
+## Структура
 
-## v7.2.2
+```text
+Anime-catalog/
+├─ core/       # Python/FastAPI ядро для Vercel
+├─ site/       # Cloudflare Pages сайт + Worker
+├─ extension/  # Tampermonkey userscript
+├─ install/    # Windows GUI Installer
+└─ README.md
+```
 
-- Жанри: MyAnimeList + Shikimori + AniList.
-- Теми: MyAnimeList + Shikimori.
-- На сторінці тайтлу жанри/теми показуються під назвою із підказкою джерел.
-- На головній картки не захаращуються жанрами/темами.
-- Додані окремі фільтри «Жанр» і «Тема».
-- Додане сортування за жанром/темою A–Я та Я–A.
-- Пошук також враховує жанри й теми.
-- Core schema v3 зберігає taxonomy як `{all, sources}`.
-- `/api/taxonomy` у Core та `/api/core-taxonomy` у Cloudflare дозволяють швидко дозаповнити старі 167 записів без повторного обходу каталогів.
+## Рекомендований запуск
 
-## Порядок оновлення
+На Windows запускайте:
 
-1. Задеплой `python-core/` у Vercel.
-2. Перевір `/api/health`: версія `2.11.1`, `result_schema: 3`.
-3. Задеплой `site/` у Cloudflare Pages.
-4. Перевір `/api/version`: `yoru-v7.2.2-genres-themes-2026-09-11`.
-5. Запусти `migration/backfill_taxonomy.py`, щоб жанри/теми з’явилися у вже перенесених тайтлів.
+```text
+install\YoruInstaller.exe
+```
 
-Розширення v3.1.0 міняти не потрібно: воно передає результат Core через існуючий ingest, а Worker v7.2.2 сам зберігає нові поля.
+Installer сам проводить повне розгортання:
 
+1. знаходить поточний проєкт або клонує `MysterSay/Anime-catalog`, якщо проєкту поруч немає;
+2. перевіряє Node.js, WSL та потрібні CLI;
+3. показує активний акаунт Cloudflare, Vercel, Turso і просить підтвердження кожного;
+4. просить одну власну назву проєкту — вона використовується для Cloudflare Pages, Vercel Core та Turso DB;
+5. генерує новий `CORE_API_KEY` для чистого встановлення;
+6. створює/отримує нові URL і токени;
+7. записує актуальні secrets/env між Cloudflare, Vercel і Turso;
+8. робить фінальний deploy;
+9. перевіряє Site -> Core wiring, health та version endpoints;
+10. відкриває Tampermonkey і папку `extension`.
 
-## AniList serverless 403 fallback
-Core 2.11.2 can skip AniList during taxonomy backfill (`prefer_client_anilist`). Backfill 1.2 queries AniList directly from the local Windows connection. The site and Tampermonkey v3.1.1 also enrich missing AniList genres client-side before Turso ingest.
+Старі URL/ключі не повинні використовуватись при чистому встановленні. Для resume Installer використовує свій state і прямо запитує, чи продовжувати попереднє встановлення.
+
+## Компоненти
+
+### `core/`
+
+Python/FastAPI backend, який розгортається на Vercel. Містить тільки файли, потрібні для роботи/збірки ядра: `app.py`, `vercel.json`, `pyproject.toml`, `requirements.txt` та приклади schema/env.
+
+### `site/`
+
+Cloudflare Pages frontend + `_worker.js`. Каталог використовує virtual scrolling та lazy loading, щоб не тримати всі картки і постери в DOM одночасно.
+
+### `extension/`
+
+Tampermonkey userscript для додавання/обробки тайтлів із зовнішніх джерел.
+
+### `install/`
+
+`YoruInstaller.exe` — основний спосіб встановлення. Вихідний код installer-а є в `install/src/`.
+
+## Збірка Installer
+
+Потрібен Go 1.23+.
+
+```powershell
+cd install\src
+go build -trimpath -ldflags="-s -w -H windowsgui" -o ..\YoruInstaller.exe .
+```
+
+## Що навмисно не входить у цей архів
+
+- `migration/`;
+- taxonomy/backfill/migration scripts;
+- `git-dep.ps1`;
+- `deploy.cmd`;
+- локальні `.env.local`, `.vercel`, `.wrangler`, `.venv`;
+- installer state/logs/cache;
+- backup/checkpoint файли.
+
+Усі необхідні deploy-кроки виконує Installer.

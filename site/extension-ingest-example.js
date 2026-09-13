@@ -4,7 +4,7 @@ async function sendCoreJsonToYoru(coreJson, ingestKey = '') {
   const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
   if (ingestKey) headers['X-Ingest-Key'] = ingestKey;
 
-  const response = await fetch('https://myster-anime.pages.dev/api/ingest', {
+  const response = await fetch('https://YOUR-SITE.pages.dev/api/ingest', {
     method: 'POST',
     headers,
     body: JSON.stringify(coreJson),

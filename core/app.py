@@ -7,7 +7,6 @@ import os
 import re
 import sys
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -21,101 +20,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.11.4"
+APP_VERSION = "2.11.3"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
-
-TAXONOMY_UK = {
-    'action': 'Екшен',
-    'adventure': 'Пригоди',
-    'avant garde': 'Авангард',
-    'award winning': 'Відзначене нагородами',
-    'boys love': 'Хлопчаче кохання',
-    'comedy': 'Комедія',
-    'drama': 'Драма',
-    'fantasy': 'Фентезі',
-    'girls love': 'Дівоче кохання',
-    'gourmet': 'Гурманське',
-    'horror': 'Жахи',
-    'mystery': 'Таємниці',
-    'romance': 'Романтика',
-    'sci fi': 'Наукова фантастика',
-    'science fiction': 'Наукова фантастика',
-    'slice of life': 'Повсякденність',
-    'sports': 'Спорт',
-    'supernatural': 'Надприродне',
-    'suspense': 'Трилер',
-    'thriller': 'Трилер',
-    'ecchi': 'Етті',
-    'erotica': 'Еротика',
-    'hentai': 'Хентай',
-    'josei': 'Дзьосей',
-    'kids': 'Для дітей',
-    'seinen': 'Сейнен',
-    'shoujo': 'Сьодзьо',
-    'shojo': 'Сьодзьо',
-    'shounen': 'Сьонен',
-    'shonen': 'Сьонен',
-    'adult cast': 'Дорослі персонажі',
-    'anthropomorphic': 'Антропоморфізм',
-    'cgdct': 'Милі дівчата роблять милі речі',
-    'childcare': 'Догляд за дітьми',
-    'combat sports': 'Бойові види спорту',
-    'crossdressing': 'Кросдресинг',
-    'delinquents': 'Хулігани',
-    'detective': 'Детектив',
-    'educational': 'Освітнє',
-    'gag humor': 'Гег-гумор',
-    'gore': 'Криваві сцени',
-    'harem': 'Гарем',
-    'high stakes game': 'Гра з високими ставками',
-    'historical': 'Історичне',
-    'idols female': 'Жіночі айдоли',
-    'idols male': 'Чоловічі айдоли',
-    'isekai': 'Ісекай',
-    'iyashikei': 'Іяшікеї',
-    'love polygon': 'Любовний багатокутник',
-    'magical sex shift': 'Магічна зміна статі',
-    'mahou shoujo': 'Дівчата-чарівниці',
-    'maho shojo': 'Дівчата-чарівниці',
-    'martial arts': 'Бойові мистецтва',
-    'mecha': 'Меха',
-    'medical': 'Медицина',
-    'military': 'Військове',
-    'music': 'Музика',
-    'mythology': 'Міфологія',
-    'organized crime': 'Організована злочинність',
-    'otaku culture': 'Отаку-культура',
-    'parody': 'Пародія',
-    'performing arts': 'Сценічне мистецтво',
-    'pets': 'Домашні тварини',
-    'psychological': 'Психологічне',
-    'racing': 'Перегони',
-    'reincarnation': 'Реінкарнація',
-    'reverse harem': 'Зворотний гарем',
-    'romantic subtext': 'Романтичний підтекст',
-    'samurai': 'Самураї',
-    'school': 'Школа',
-    'showbiz': 'Шоу-бізнес',
-    'space': 'Космос',
-    'strategy game': 'Стратегічна гра',
-    'super power': 'Надздібності',
-    'survival': 'Виживання',
-    'team sports': 'Командний спорт',
-    'time travel': 'Подорожі в часі',
-    'vampire': 'Вампіри',
-    'video game': 'Відеоігри',
-    'visual arts': 'Образотворче мистецтво',
-    'workplace': 'Робота',
-}
-
-
-def taxonomy_uk_name(value: Any) -> str:
-    text = clean_text(value)
-    if not text:
-        return ""
-    latin = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").casefold()
-    key = re.sub(r"[^a-z0-9]+", " ", latin).strip()
-    return TAXONOMY_UK.get(key, text)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1410,7 +1316,7 @@ class Core:
         for raw in values:
             if isinstance(raw, dict):
                 raw = raw.get("name") or raw.get("english") or raw.get("russian") or raw.get("title") or ""
-            value = taxonomy_uk_name(raw)
+            value = clean_text(raw)
             if not value:
                 continue
             key = value.casefold()
@@ -2023,10 +1929,10 @@ class Core:
                     japanese_values = [japanese_values]
                 data.native = clean_title(next((x for x in japanese_values if clean_title(x)), ""))
 
-        data.genres["myanimelist.net"] = self.taxonomy_names(mal_genres)
-        data.themes["myanimelist.net"] = self.taxonomy_names(mal_themes)
-        data.genres["shikimori.io"] = self.taxonomy_names(shiki_genres)
-        data.themes["shikimori.io"] = self.taxonomy_names(shiki_themes)
+        data.genres["myanimelist.net"] = mal_genres
+        data.themes["myanimelist.net"] = mal_themes
+        data.genres["shikimori.io"] = shiki_genres
+        data.themes["shikimori.io"] = shiki_themes
 
         if data.mal_id:
             data.links["myanimelist.net"] = [{"url": f"https://myanimelist.net/anime/{data.mal_id}", "title": data.english or data.original or payload.title}]

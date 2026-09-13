@@ -2183,3 +2183,45 @@ body.modal-open { overflow:hidden; }
   .title-taxonomy-label { flex-basis:45px; font-size:8px; }
   .title-taxonomy-chip { min-height:24px; padding:0 8px; font-size:9px; }
 }
+
+/* v7.3 — virtualized catalog: keep only nearby cards in DOM */
+.catalog-grid.catalog-virtualized,
+.catalog-list.catalog-virtualized {
+  display:block;
+  min-height:1px;
+}
+.catalog-virtualized .virtual-page {
+  position:relative;
+  width:100%;
+  box-sizing:border-box;
+}
+.catalog-virtualized .virtual-page + .virtual-page {
+  margin-top:var(--virtual-page-gap,18px);
+}
+.catalog-virtualized .virtual-page.is-placeholder {
+  display:block;
+  pointer-events:none;
+  contain:layout style size;
+}
+.catalog-virtualized .virtual-page.is-grid.is-mounted {
+  display:grid;
+  grid-template-columns:repeat(var(--virtual-columns,5),minmax(0,1fr));
+  gap:var(--virtual-gap,18px);
+  contain:layout style;
+}
+.catalog-virtualized .virtual-page.is-list.is-mounted {
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  contain:layout style;
+}
+.catalog-virtualized .poster {
+  background:#171b27;
+}
+@media (max-width:720px) {
+  .catalog-virtualized .virtual-page + .virtual-page { margin-top:10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .catalog-virtualized .anime-card,
+  .catalog-virtualized .poster { transition:none !important; }
+}
