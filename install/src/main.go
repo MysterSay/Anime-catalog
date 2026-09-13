@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	appVersion       = "1.1.8"
+	appVersion       = "1.1.9"
 	vercelCLIVersion = "59.16.0"
 
 	WM_DESTROY = 0x0002
@@ -1707,9 +1707,62 @@ func stepFinalDeploy(ctx context.Context) error {
 	return nil
 }
 
+func patchExtensionSiteURL(siteURL string) (int, error) {
+	base := strings.TrimRight(strings.TrimSpace(siteURL), "/")
+	if base == "" {
+		return 0, errors.New("Site URL порожній")
+	}
+	extDir := filepath.Join(appRoot, "extension")
+	files, err := filepath.Glob(filepath.Join(extDir, "anime-to-yoru-collector-*.user.js"))
+	if err != nil {
+		return 0, err
+	}
+	if len(files) == 0 {
+		return 0, errors.New("не знайдено anime-to-yoru-collector-*.user.js")
+	}
+
+	reDefault := regexp.MustCompile(`(?m)^(\s*const\s+DEFAULT_BASE\s*=\s*)['"][^'"]+['"]\s*;`)
+	reLegacy := regexp.MustCompile(`(?m)^(\s*const\s+BASE\s*=\s*)['"][^'"]+['"]\s*;`)
+	patched := 0
+	quoted := strconv.Quote(base)
+	for _, path := range files {
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return patched, readErr
+		}
+		text := string(raw)
+		updated := reDefault.ReplaceAllString(text, `${1}`+quoted+`;`)
+		if updated == text {
+			updated = reLegacy.ReplaceAllString(text, `${1}`+quoted+`;`)
+		}
+		if updated == text {
+			continue
+		}
+		info, statErr := os.Stat(path)
+		mode := os.FileMode(0644)
+		if statErr == nil {
+			mode = info.Mode()
+		}
+		if writeErr := os.WriteFile(path, []byte(updated), mode); writeErr != nil {
+			return patched, writeErr
+		}
+		patched++
+	}
+	return patched, nil
+}
+
 func stepExtension(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if current.SiteURL != "" {
+		patched, patchErr := patchExtensionSiteURL(current.SiteURL)
+		if patchErr != nil {
+			appendLog("УВАГА: не вдалося автоматично прописати Site URL у userscript: " + patchErr.Error())
+			appendLog("Його можна змінити прямо в панелі розширення: Shift + клік по домену у заголовку.")
+		} else if patched > 0 {
+			appendLog(fmt.Sprintf("Extension прив'язано до Site URL %s (%d файл(и)).", current.SiteURL, patched))
+		}
 	}
 	appendLog("Відкриваю офіційну сторінку Tampermonkey...")
 	openURL("https://www.tampermonkey.net/")

@@ -32,7 +32,7 @@ Installer сам проводить повне розгортання:
 7. записує актуальні secrets/env між Cloudflare, Vercel і Turso;
 8. робить фінальний deploy;
 9. перевіряє Site -> Core wiring, health та version endpoints;
-10. відкриває Tampermonkey і папку `extension`.
+10. автоматично прописує реальний Site URL у userscript, після чого відкриває Tampermonkey і папку `extension`.
 
 Старі URL/ключі не повинні використовуватись при чистому встановленні. Для resume Installer використовує свій state і прямо запитує, чи продовжувати попереднє встановлення.
 
@@ -48,11 +48,20 @@ Cloudflare Pages frontend + `_worker.js`. Каталог використову�
 
 ### `extension/`
 
-Tampermonkey userscript для додавання/обробки тайтлів із зовнішніх джерел.
+Tampermonkey userscript **Anime → YORU v3.1.2** для додавання/обробки тайтлів із зовнішніх джерел.
+
+У заголовку панелі показується активний домен YORU:
+
+- звичайний клік по домену відкриває відповідний тайтл у каталозі в новій вкладці;
+- `Shift + клік` відкриває зміну сайту;
+- можна вводити як `my-anime.pages.dev`, так і повне `https://my-anime.pages.dev`;
+- вибраний сайт зберігається в Tampermonkey storage і всі API endpoint-и перемикаються автоматично.
+
+Під час нового встановлення Installer сам підставляє створений Cloudflare Site URL у userscript перед його встановленням.
 
 ### `install/`
 
-`YoruInstaller.exe` — основний спосіб встановлення. Вихідний код installer-а є в `install/src/`.
+`YoruInstaller.exe` **1.1.9** — основний спосіб встановлення. Вихідний код installer-а є в `install/src/`.
 
 ## Збірка Installer
 

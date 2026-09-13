@@ -1,4 +1,4 @@
-# YORU Installer 1.1.8
+# YORU Installer 1.1.9
 
 Windows GUI orchestrator для повного встановлення YORU Anime Catalog.
 
@@ -67,6 +67,7 @@ Turso account Access Token і DB auth token — різні речі. Account tok
 - перевіряє Core health;
 - перевіряє Site health/version;
 - перевіряє Site -> Core wiring;
+- прописує актуальний Site URL у `anime-to-yoru-collector-*.user.js`;
 - відкриває сторінку Tampermonkey;
 - відкриває папку `extension`.
 
@@ -76,3 +77,10 @@ Turso account Access Token і DB auth token — різні речі. Account tok
 cd install\src
 go build -trimpath -ldflags="-s -w -H windowsgui" -o ..\YoruInstaller.exe .
 ```
+
+
+## Прив’язка розширення
+
+Перед відкриттям папки `extension` Installer підміняє `DEFAULT_BASE` у userscript на фактичний production URL створеного Cloudflare Pages сайту.
+
+Після встановлення userscript адресу можна змінити без редагування коду: у панелі **Anime → YORU** затисніть `Shift` і натисніть домен у верхньому рядку. Розширення приймає і простий домен, і повний `https://` URL.
