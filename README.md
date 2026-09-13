@@ -1,6 +1,11 @@
 # YORU Anime Catalog
 
 Актуальний мінімальний склад проєкту без міграційних і окремих deploy-скриптів.
+ 
+
+## Підтримка
+
+[Підтримай проект](https://send.monobank.ua/jar/3rqmBsdneV)
 
 ## Структура
 
@@ -72,14 +77,4 @@ cd install\src
 go build -trimpath -ldflags="-s -w -H windowsgui" -o ..\YoruInstaller.exe .
 ```
 
-## Що навмисно не входить у цей архів
 
-- `migration/`;
-- taxonomy/backfill/migration scripts;
-- `git-dep.ps1`;
-- `deploy.cmd`;
-- локальні `.env.local`, `.vercel`, `.wrangler`, `.venv`;
-- installer state/logs/cache;
-- backup/checkpoint файли.
-
-Усі необхідні deploy-кроки виконує Installer.
