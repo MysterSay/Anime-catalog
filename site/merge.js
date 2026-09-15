@@ -8,7 +8,7 @@ const FALLBACK_IMAGE = 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://
 let rightItem = null;
 let leftItem = null;
 let busy = false;
-const choices = { title: 'right', poster: 'right', marks: 'right', banner: 'right', description: 'right' };
+const choices = { title: 'right', poster: 'right', marks: 'right', banner: 'right', trailer: 'right', description: 'right' };
 
 function escapeHtml(value = '') {
   return String(value ?? '').replace(/[&<>'"]/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[ch]));
@@ -25,6 +25,7 @@ function hasField(item, field) {
   if (!item) return false;
   if (field === 'poster') return Boolean(item.hasPoster && item.poster);
   if (field === 'banner') return Boolean(item.hasBanner && item.banner);
+  if (field === 'trailer') return Boolean(item.hasTrailer && (item.trailer?.url || item.trailer?.embedUrl));
   if (field === 'description') return Boolean(String(item.description || '').trim());
   return true;
 }
@@ -66,6 +67,11 @@ function sideCard(field, side, item) {
     content = available ? `<img class="merge-poster-value" src="${escapeHtml(item.poster)}" alt="${escapeHtml(item.title)}" />` : '<div class="merge-empty-value">Постера немає</div>';
   } else if (field === 'banner') {
     content = available ? `<img class="merge-banner-value" src="${escapeHtml(item.banner)}" alt="" />` : '<div class="merge-empty-value">Банера немає</div>';
+  } else if (field === 'trailer') {
+    const trailer = item.trailer || {};
+    const preview = trailer.thumbnail ? `<img class="merge-banner-value merge-trailer-value" src="${escapeHtml(trailer.thumbnail)}" alt="" />` : '';
+    const label = trailer.site || trailer.source || 'Трейлер';
+    content = available ? `${preview}<div class="merge-trailer-meta"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(trailer.url || trailer.embedUrl || '')}</small></div>` : '<div class="merge-empty-value">Трейлера немає</div>';
   } else if (field === 'description') {
     content = `<p class="merge-description-value">${escapeHtml(snippet(item.description))}</p>`;
   } else if (field === 'marks') {
@@ -129,6 +135,7 @@ function render() {
       ${row('poster', 'Постер')}
       ${row('marks', 'Позначення')}
       ${row('banner', 'Банер')}
+      ${row('trailer', 'Трейлер')}
       ${row('description', 'Опис')}
       <section class="merge-links-row">
         <div><span>ПОСИЛАННЯ</span><strong>${uniqueLinks.size} унікальних</strong></div>

@@ -1,4 +1,4 @@
-# YORU Installer 1.1.9
+# YORU Installer 1.1.10
 
 Windows GUI orchestrator для повного встановлення YORU Anime Catalog.
 
@@ -84,3 +84,8 @@ go build -trimpath -ldflags="-s -w -H windowsgui" -o ..\YoruInstaller.exe .
 Перед відкриттям папки `extension` Installer підміняє `DEFAULT_BASE` у userscript на фактичний production URL створеного Cloudflare Pages сайту.
 
 Після встановлення userscript адресу можна змінити без редагування коду: у панелі **Anime → YORU** затисніть `Shift` і натисніть домен у верхньому рядку. Розширення приймає і простий домен, і повний `https://` URL.
+
+
+## Player preview aliases
+
+Installer 1.1.10 після production deploy автоматично створює/оновлює preview aliases `p-anihub`, `p-animeon`, `p-jutsu`, `p-animego`. Вони потрібні Site 7.5.1 для native virtual-origin DOM player режиму.

@@ -1,6 +1,13 @@
 const root = document.getElementById('titleRoot');
 const toast = document.getElementById('toast');
-const id = new URLSearchParams(location.search).get('id');
+const titleParams = new URLSearchParams(location.search);
+const id = titleParams.get('id');
+const randomMode = titleParams.get('random') === '1';
+const anihubPreviewId = titleParams.get('anihub') || '';
+const previewMode = titleParams.get('preview') === 'anihub' || Boolean(anihubPreviewId);
+const titleTopActions = document.getElementById('titleTopActions');
+let randomExcludeIds = new Set();
+try { randomExcludeIds = new Set(JSON.parse(sessionStorage.getItem('yoru-random-exclude') || '[]')); } catch { randomExcludeIds = new Set(); }
 const FALLBACK_IMAGE = 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 700 1000%22%3E%3Cdefs%3E%3ClinearGradient id=%22g%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22%3E%3Cstop stop-color=%22%23171b27%22/%3E%3Cstop offset=%221%22 stop-color=%22%23282d42%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%22700%22 height=%221000%22 fill=%22url(%23g)%22/%3E%3Ctext x=%22350%22 y=%22520%22 text-anchor=%22middle%22 fill=%22%23798094%22 font-family=%22Arial%22 font-size=%2270%22%3EYORU%3C/text%3E%3C/svg%3E';
 const ANILIST_PUBLIC_ENDPOINT = 'https://graphql.anilist.co';
 const STATUS_OPTIONS = ['Добавленно', 'Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто', 'Без статусу'];
@@ -54,7 +61,7 @@ for (const [key, mark] of Object.entries(previousLinkMarks)) {
 }
 saved.linkMarks = globalLinkMarks;
 let currentItem = null;
-let apiOptions = { statuses: [], groups: [], groupOptions: [], tags: [], genres: [], themes: [], statusGroups: {}, starredGroups: [] };
+let apiOptions = { statuses: [], groups: [], groupOptions: [], tags: [], genres: [], themes: [], statusGroups: {}, starredGroups: [], playerSettings: { mikaiApiKeyConfigured: false, mikaiSendToCore: false }, bannerSettings: { trailerEnabled: false } };
 let mediaKind = null;
 let editSiteLinks = {};
 
@@ -74,6 +81,52 @@ function safeHttpUrl(value) {
     const url = new URL(String(value || ''));
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
   } catch { return ''; }
+}
+function normalizeTrailerClient(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const url = safeHttpUrl(raw.url || '');
+  const embedUrl = safeHttpUrl(raw.embedUrl || raw.embed_url || '');
+  return { url, embedUrl, site:String(raw.site || '').toLowerCase(), id:String(raw.id || ''), thumbnail:safeHttpUrl(raw.thumbnail || ''), source:String(raw.source || '') };
+}
+function trailerBackgroundEnabled() { return Boolean(apiOptions.bannerSettings?.trailerEnabled); }
+function trailerAutoplayUrl(value) {
+  const trailer = normalizeTrailerClient(value);
+  let raw = trailer.embedUrl || trailer.url;
+  if (!raw) return '';
+  try {
+    let u = new URL(raw);
+    const host = u.hostname.toLowerCase().replace(/^www\./,'');
+    if (host === 'youtu.be') {
+      const id = u.pathname.split('/').filter(Boolean)[0] || trailer.id;
+      if (id) u = new URL(`https://www.youtube.com/embed/${encodeURIComponent(id)}`);
+    } else if (host.endsWith('youtube.com')) {
+      const id = trailer.id || u.searchParams.get('v') || (u.pathname.match(/^\/(?:embed|shorts)\/([^/?#]+)/)?.[1] || '');
+      if (id) u = new URL(`https://www.youtube.com/embed/${encodeURIComponent(id)}`);
+    } else if (host.endsWith('dailymotion.com')) {
+      const id = trailer.id || (u.pathname.match(/^\/(?:video|embed\/video)\/([^/?#]+)/)?.[1] || '');
+      if (id) u = new URL(`https://www.dailymotion.com/embed/video/${encodeURIComponent(id)}`);
+    }
+    const finalHost = u.hostname.toLowerCase();
+    if (finalHost.includes('youtube.com')) {
+      const id = trailer.id || u.pathname.split('/').filter(Boolean).pop() || '';
+      u.searchParams.set('autoplay','1');u.searchParams.set('mute','1');u.searchParams.set('controls','0');u.searchParams.set('playsinline','1');u.searchParams.set('rel','0');u.searchParams.set('modestbranding','1');u.searchParams.set('disablekb','1');u.searchParams.set('loop','1');
+      if (id) u.searchParams.set('playlist',id);
+    } else if (finalHost.includes('dailymotion.com')) {
+      u.searchParams.set('autoplay','1');u.searchParams.set('mute','1');u.searchParams.set('controls','0');u.searchParams.set('queue-enable','0');
+    } else {
+      u.searchParams.set('autoplay','1');u.searchParams.set('muted','1');
+    }
+    return u.href;
+  } catch { return ''; }
+}
+function trailerBackgroundHtml(item) {
+  if (!trailerBackgroundEnabled()) return '';
+  const trailer = normalizeTrailerClient(item?.trailer);
+  const src = trailerAutoplayUrl(trailer);
+  if (!src) return '';
+  const direct = /\.(?:mp4|webm)(?:$|[?#])/i.test(trailer.url || '');
+  if (direct) return `<div class="banner-trailer-bg" aria-hidden="true"><video src="${escapeHtml(trailer.url)}" autoplay muted loop playsinline preload="auto"></video></div>`;
+  return `<div class="banner-trailer-bg" aria-hidden="true"><iframe src="${escapeHtml(src)}" title="" tabindex="-1" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" referrerpolicy="origin-when-cross-origin"></iframe></div>`;
 }
 
 function statusClass(status) {
@@ -265,6 +318,650 @@ function groupLinks(links = []) {
   return sortSourceGroups([...map.values()]);
 }
 
+const PLAYER_PROVIDERS = Object.freeze([
+  { domain:'anihub.in.ua', label:'anihub.in.ua', kind:'dom', seasonSwitch:true, tone:'yellow', retryAfterMs:700, target:{ mode:'classes', value:'relative border border-white/10 rounded-2xl p-4 shadow-[0_12px_40px_-12px_rgba(0,0,0,0.6)] ring-1 ring-violet-500/5' } },
+  { domain:'animeon.club', label:'animeon.club', kind:'dom', seasonSwitch:true, tone:'yellow', retryAfterMs:900, target:{ mode:'classes', value:'anime-player-section flex-center' } },
+  { domain:'mikai.me', label:'mikai.me', kind:'mikai', seasonSwitch:true, tone:'yellow' },
+  { domain:'jut-su.net', label:'jut-su.net', kind:'dom', seasonSwitch:false, tone:'red', retryAfterMs:650, target:{ mode:'classes', value:'jutsu-page__player-video' } },
+  { domain:'animego.studio', label:'animego.studio', kind:'dom', seasonSwitch:false, tone:'red', retryAfterMs:1800, target:{ mode:'classes', value:'tabs-block__content video-inside' } },
+]);
+let titleMediaMode = localStorage.getItem('yoru-title-media-mode') === 'sources' ? 'sources' : 'player';
+let titlePlayerProvider = localStorage.getItem('yoru-title-player-provider') || 'anihub.in.ua';
+let titlePlayerSeasons = {};
+try { titlePlayerSeasons = JSON.parse(localStorage.getItem('yoru-title-player-seasons') || '{}') || {}; } catch { titlePlayerSeasons = {}; }
+let titlePlayerLoadSerial = 0;
+let mikaiPlayerData = null;
+let mikaiPlayerSelection = { release:0, episode:0, source:0 };
+let domPlayerCleanup = null;
+const DOM_REMOTE_VIEWPORT_W = 1365;
+const DOM_REMOTE_VIEWPORT_H = 900;
+const DOM_PLAYER_POLL_MS = 200;
+const DOM_PLAYER_WAIT_MS = 60000;
+const DOM_PLAYER_AUTO_RELOAD_AFTER_MS = 700;
+const DOM_PLAYER_AUTO_RELOAD_FORCE_MS = 1800;
+const DOM_PLAYER_NATIVE_BRANCHES = Object.freeze({
+  'anihub.in.ua':'p-anihub',
+  'animeon.club':'p-animeon',
+  'jut-su.net':'p-jutsu',
+  'animego.studio':'p-animego',
+});
+
+function playerProviderConfig(domain) {
+  return PLAYER_PROVIDERS.find(item => item.domain === domain) || PLAYER_PROVIDERS[0];
+}
+function playerGroupMap() {
+  return new Map(groupLinks(currentItem?.links || []).map(group => [group.domain, group]));
+}
+function availablePlayerProviders() {
+  const groups = playerGroupMap();
+  return PLAYER_PROVIDERS.filter(provider => groups.get(provider.domain)?.items?.length);
+}
+function ensurePlayerProvider() {
+  const available = availablePlayerProviders();
+  if (available.some(item => item.domain === titlePlayerProvider)) return titlePlayerProvider;
+  titlePlayerProvider = available[0]?.domain || PLAYER_PROVIDERS[0].domain;
+  localStorage.setItem('yoru-title-player-provider', titlePlayerProvider);
+  return titlePlayerProvider;
+}
+function playerLinksFor(domain) {
+  const items = playerGroupMap().get(domain)?.items || [];
+  return [...items].sort((a,b) => {
+    const number = value => Number(String(value?.name || '').match(/(?:сезон|season)\s*(\d+)/i)?.[1] || 9999);
+    return number(a) - number(b) || String(a?.name || '').localeCompare(String(b?.name || ''), 'uk');
+  });
+}
+function playerSeasonLabel(link, index, total) {
+  const raw = String(link?.name || '').trim();
+  const match = raw.match(/(?:сезон|season)\s*(\d+)/i);
+  if (match) return `Сезон ${match[1]}`;
+  if (total > 1) return raw || `Сезон ${index + 1}`;
+  return raw || 'Поточний сезон';
+}
+function currentPlayerLink(domain = titlePlayerProvider) {
+  const links = playerLinksFor(domain);
+  if (!links.length) return null;
+  const provider = playerProviderConfig(domain);
+  if (!provider.seasonSwitch) return links[0];
+  const index = Math.max(0, Math.min(links.length - 1, Number(titlePlayerSeasons[domain]) || 0));
+  titlePlayerSeasons[domain] = index;
+  return links[index];
+}
+function setPlayerSeason(domain, index) {
+  const links = playerLinksFor(domain);
+  titlePlayerSeasons[domain] = Math.max(0, Math.min(links.length - 1, Number(index) || 0));
+  localStorage.setItem('yoru-title-player-seasons', JSON.stringify(titlePlayerSeasons));
+}
+function mikaiKeyConfigured() { return Boolean(apiOptions.playerSettings?.mikaiApiKeyConfigured); }
+
+function buildPlayerProviderButtons() {
+  const groups = playerGroupMap();
+  return PLAYER_PROVIDERS.map(provider => {
+    const available = Boolean(groups.get(provider.domain)?.items?.length);
+    const active = provider.domain === titlePlayerProvider;
+    const limited = provider.domain === 'mikai.me' && !mikaiKeyConfigured();
+    const mikaiReady = provider.domain === 'mikai.me' && mikaiKeyConfigured();
+    const title = !available ? 'Для цього тайтлу немає посилання в базі' : limited ? 'Mikai працює без ключа, але з обмеженням запитів' : provider.label;
+    const toneClass = provider.tone === 'red' ? 'tone-red' : 'tone-yellow';
+    const mikaiStateClass = provider.domain === 'mikai.me' ? (mikaiReady ? 'mikai-ready' : 'mikai-limited') : '';
+    return `<button class="player-source-tab ${toneClass} ${mikaiStateClass} ${active ? 'active' : ''}" type="button" data-player-source="${escapeHtml(provider.domain)}" ${available ? '' : 'disabled'} title="${escapeHtml(title)}">${escapeHtml(provider.label)}</button>`;
+  }).join('');
+}
+function buildPlayerSeasonPicker(domain = titlePlayerProvider) {
+  const provider = playerProviderConfig(domain);
+  if (!provider.seasonSwitch) return '';
+  const links = playerLinksFor(domain);
+  if (!links.length) return '';
+  const selected = Math.max(0, Math.min(links.length - 1, Number(titlePlayerSeasons[domain]) || 0));
+  return `<label class="player-season-control"><span>Сезон</span><select data-player-season>${links.map((link,index) => `<option value="${index}" ${index === selected ? 'selected' : ''}>${escapeHtml(playerSeasonLabel(link,index,links.length))}</option>`).join('')}</select></label>`;
+}
+function buildPlayerPanelHtml() {
+  const provider = ensurePlayerProvider();
+  const link = currentPlayerLink(provider);
+  const sourceConfig = playerProviderConfig(provider);
+  if (!link) return `<div class="player-empty-state"><strong>Немає джерела</strong><span>Для ${escapeHtml(provider)} у базі тайтлу немає посилання.</span></div>`;
+  return `
+    <div class="player-toolbar">
+      ${buildPlayerSeasonPicker(provider)}
+      <a class="player-open-source" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">Відкрити джерело ↗</a>
+    </div>
+    <div class="player-stage" data-player-stage data-player-kind="${escapeHtml(sourceConfig.kind)}" data-player-domain="${escapeHtml(provider)}">
+      <div class="player-loading"><span class="detail-loader"></span><strong>Завантажую ${escapeHtml(provider)}…</strong><small>${provider === 'mikai.me' && !mikaiKeyConfigured() ? 'Public API без ключа — можливі ліміти запитів.' : 'Підготовка плеєра…'}</small></div>
+    </div>`;
+}
+function buildMediaWorkspace(linkGroups) {
+  return `
+    <div class="title-media-workspace">
+      <div class="title-media-mode-tabs" role="tablist" aria-label="Плеєр або джерела">
+        <button class="title-media-mode ${titleMediaMode === 'player' ? 'active' : ''}" type="button" data-media-mode="player">Плеєр</button>
+        <button class="title-media-mode ${titleMediaMode === 'sources' ? 'active' : ''}" type="button" data-media-mode="sources">Джерела</button>
+      </div>
+      <div class="player-source-tabs">${buildPlayerProviderButtons()}</div>
+      <section class="title-media-pane ${titleMediaMode === 'player' ? '' : 'hidden'}" data-media-pane="player">
+        <div class="player-panel" data-player-panel>${buildPlayerPanelHtml()}</div>
+      </section>
+      <section class="title-media-pane ${titleMediaMode === 'sources' ? '' : 'hidden'}" data-media-pane="sources">
+        <aside class="sources-card sources-card-wide">
+          <div class="sources-head">
+            <span class="section-kicker">ПОСИЛАННЯ</span>
+            <h3>Сайти та серії</h3>
+            <p class="sources-summary">${linkGroups.length ? `Сайтів: ${linkGroups.length} · Посилань: ${linkGroups.reduce((sum, group) => sum + group.items.length, 0)}` : 'Посилань поки немає'}</p>
+          </div>
+          <div class="source-groups">${buildLinksAccordion(linkGroups)}</div>
+        </aside>
+      </section>
+    </div>`;
+}
+function setTitleMediaMode(mode) {
+  titleMediaMode = mode === 'sources' ? 'sources' : 'player';
+  localStorage.setItem('yoru-title-media-mode', titleMediaMode);
+  root.querySelectorAll('[data-media-mode]').forEach(button => button.classList.toggle('active', button.dataset.mediaMode === titleMediaMode));
+  root.querySelectorAll('[data-media-pane]').forEach(pane => pane.classList.toggle('hidden', pane.dataset.mediaPane !== titleMediaMode));
+  if (titleMediaMode === 'player') loadActiveTitlePlayer();
+  else stopDomTitlePlayer();
+}
+
+function selectTitlePlayerProvider(domain) {
+  if (!PLAYER_PROVIDERS.some(item => item.domain === domain)) return;
+  if (!playerLinksFor(domain).length) return;
+  titlePlayerProvider = domain;
+  titleMediaMode = 'player';
+  localStorage.setItem('yoru-title-player-provider', domain);
+  localStorage.setItem('yoru-title-media-mode', 'player');
+  root.querySelectorAll('[data-player-source]').forEach(button => button.classList.toggle('active', button.dataset.playerSource === domain));
+  root.querySelectorAll('[data-media-mode]').forEach(button => button.classList.toggle('active', button.dataset.mediaMode === 'player'));
+  root.querySelectorAll('[data-media-pane]').forEach(pane => pane.classList.toggle('hidden', pane.dataset.mediaPane !== 'player'));
+  renderActivePlayerPanel();
+}
+function renderActivePlayerPanel() {
+  const panel = root.querySelector('[data-player-panel]');
+  if (!panel) return;
+  panel.innerHTML = buildPlayerPanelHtml();
+  loadActiveTitlePlayer();
+}
+function playerErrorMessage(stage, message) {
+  if (!stage) return;
+  stage.innerHTML = `<div class="player-empty-state error"><strong>Плеєр недоступний</strong><span>${escapeHtml(message || 'Невідома помилка.')}</span></div>`;
+}
+function sortedMikaiEpisodes(release) {
+  return Array.isArray(release?.episodes) ? [...release.episodes].sort((a,b) => Number(a?.number ?? a?.label ?? 0) - Number(b?.number ?? b?.label ?? 0)) : [];
+}
+function mikaiReleaseLabel(release) {
+  const teams = Array.isArray(release?.teams) ? release.teams.map(item => item?.name).filter(Boolean).join(' + ') : '';
+  const kind = release?.kind === 'sub' ? 'Субтитри' : release?.kind === 'voice' ? 'Озвучка' : (release?.kind || 'Реліз');
+  return `${teams || release?.id || 'Реліз'} — ${kind}${release?.isCollab ? ' · колаборація' : ''}`;
+}
+function renderMikaiPlayerStage(stage) {
+  const releases = Array.isArray(mikaiPlayerData?.result?.releases) ? mikaiPlayerData.result.releases.filter(item => sortedMikaiEpisodes(item).length) : [];
+  if (mikaiPlayerData?.result?.licensed && !releases.length) return playerErrorMessage(stage, 'Mikai позначає цей тайтл як ліцензований і не повертає джерела плеєра.');
+  if (!releases.length) return playerErrorMessage(stage, 'Mikai API не повернув серій із джерелами для цього сезону.');
+  mikaiPlayerSelection.release = Math.min(mikaiPlayerSelection.release, releases.length - 1);
+  const release = releases[mikaiPlayerSelection.release];
+  const episodes = sortedMikaiEpisodes(release);
+  mikaiPlayerSelection.episode = Math.min(mikaiPlayerSelection.episode, Math.max(0, episodes.length - 1));
+  const episode = episodes[mikaiPlayerSelection.episode];
+  const sources = Array.isArray(episode?.sources) ? episode.sources : [];
+  mikaiPlayerSelection.source = Math.min(mikaiPlayerSelection.source, Math.max(0, sources.length - 1));
+  const source = sources[mikaiPlayerSelection.source];
+  const rate = mikaiPlayerData?.rateLimit || {};
+  const limitText = rate.remaining != null ? ` · залишилось запитів: ${rate.remaining}` : '';
+  stage.innerHTML = `
+    <div class="mikai-player-controls">
+      <label><span>Реліз</span><select data-mikai-release>${releases.map((item,index) => `<option value="${index}" ${index === mikaiPlayerSelection.release ? 'selected' : ''}>${escapeHtml(mikaiReleaseLabel(item))}</option>`).join('')}</select></label>
+      <label><span>Серія</span><select data-mikai-episode>${episodes.map((item,index) => `<option value="${index}" ${index === mikaiPlayerSelection.episode ? 'selected' : ''}>${escapeHtml(item?.label ? `Серія ${item.label}` : `Серія ${item?.number ?? index + 1}`)}</option>`).join('')}</select></label>
+      <label><span>Провайдер</span><select data-mikai-source>${sources.length ? sources.map((item,index) => `<option value="${index}" ${index === mikaiPlayerSelection.source ? 'selected' : ''}>${escapeHtml(String(item?.provider || `Джерело ${index + 1}`).toUpperCase())}</option>`).join('') : '<option value="0">Немає джерел</option>'}</select></label>
+    </div>
+    <div class="player-meta-line">${escapeHtml(mikaiReleaseLabel(release))} · ${escapeHtml(episode?.label ? `Серія ${episode.label}` : `Серія ${episode?.number ?? ''}`)}${escapeHtml(limitText)}</div>
+    ${source?.embedUrl ? `<div class="player-frame-wrap"><iframe class="title-player-frame" data-mikai-frame src="${escapeHtml(source.embedUrl)}" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen referrerpolicy="origin-when-cross-origin"></iframe></div>` : '<div class="player-empty-state"><strong>Немає embedUrl</strong><span>Для вибраної серії Mikai не повернув джерело.</span></div>'}`;
+}
+async function loadMikaiTitlePlayer(stage, pageUrl, serial) {
+  try {
+    const response = await fetch(`/api/player/mikai?url=${encodeURIComponent(pageUrl)}`, { headers:{Accept:'application/json'}, cache:'no-store' });
+    const payload = await response.json().catch(() => ({}));
+    if (serial !== titlePlayerLoadSerial) return;
+    if (!response.ok || payload.ok !== true) throw new Error(payload?.error?.message || payload?.error || payload?.message || `HTTP ${response.status}`);
+    mikaiPlayerData = payload;
+    mikaiPlayerSelection = { release:0, episode:0, source:0 };
+    renderMikaiPlayerStage(stage);
+  } catch (error) {
+    if (serial !== titlePlayerLoadSerial) return;
+    playerErrorMessage(stage, error.message || 'Не вдалося завантажити Mikai API.');
+  }
+}
+function stopDomTitlePlayer() {
+  try { domPlayerCleanup?.(); } catch (_) {}
+  domPlayerCleanup = null;
+}
+
+function domPlayerPagesProjectHost() {
+  const host=String(location.hostname||'').toLowerCase();
+  const parts=host.split('.').filter(Boolean);
+  if (parts.length < 3 || parts.slice(-2).join('.') !== 'pages.dev') return '';
+  // Production: project.pages.dev. Preview: branch.project.pages.dev.
+  // In both cases the project name is the label immediately before pages.dev.
+  return `${parts[parts.length-3]}.pages.dev`;
+}
+function domPlayerNativeOrigin(domain) {
+  const branch=DOM_PLAYER_NATIVE_BRANCHES[domain];
+  const projectHost=domPlayerPagesProjectHost();
+  return branch && projectHost ? `https://${branch}.${projectHost}` : '';
+}
+function domPlayerNativeUrl(domain,pageUrl) {
+  const origin=domPlayerNativeOrigin(domain);
+  if (!origin) return '';
+  try {
+    const remote=new URL(pageUrl);
+    return `${origin}${remote.pathname}${remote.search}${remote.hash}`;
+  } catch (_) { return ''; }
+}
+function startNativeDomPlayerCrop(stage,frame,viewport,loading,serial,nativeOrigin,sourceUrl,domain,providerConfig={}) {
+  stopDomTitlePlayer();
+  let found=false, remoteLoadCount=0, retryTimer=null, failTimer=null;
+  const setLoadingMessage=(headline,detail)=>{
+    if (!loading) return;
+    const strong=loading.querySelector('strong'),small=loading.querySelector('small');
+    if (strong && headline) strong.textContent=headline;
+    if (small && detail) small.textContent=detail;
+  };
+  const applyRect=data=>{
+    const rect=data?.rect||{};
+    const width=Number(rect.width)||0,height=Number(rect.height)||0,left=Number(rect.left)||0,top=Number(rect.top)||0;
+    if (width<2 || height<2) return;
+    const remoteW=Math.max(320,Number(data.viewportW)||DOM_REMOTE_VIEWPORT_W);
+    const remoteH=Math.max(240,Number(data.viewportH)||DOM_REMOTE_VIEWPORT_H);
+    // Universal DOM Viewer v32: never enlarge a remote fragment. Keep the
+    // source site's natural player scale and only shrink when it cannot fit.
+    const maxWidth=Math.max(100,Math.min(stage.clientWidth||document.documentElement.clientWidth-40,1080));
+    const scale=Math.min(1,maxWidth/width);
+    frame.style.width=remoteW+'px';
+    frame.style.height=remoteH+'px';
+    frame.style.transform=`scale(${scale})`;
+    frame.style.left=(-left*scale)+'px';
+    frame.style.top=(-top*scale)+'px';
+    viewport.style.width=Math.max(1,Math.round(width*scale))+'px';
+    viewport.style.height=Math.max(1,Math.round(height*scale))+'px';
+    viewport.hidden=false;
+    viewport.classList.remove('is-loading');
+    if (loading) loading.hidden=true;
+    found=true;
+    viewport.dataset.playerReady='true';
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer=null; }
+    if (failTimer) { clearTimeout(failTimer); failTimer=null; }
+  };
+  const onMessage=event=>{
+    if (serial!==titlePlayerLoadSerial || titleMediaMode!=='player') return;
+    if (event.source!==frame.contentWindow || event.origin!==nativeOrigin) return;
+    const data=event.data;
+    if (!data || data.__yoruPlayerBridge!==1 || data.domain!==domain) return;
+    if (data.type==='crop') applyRect(data);
+    else if (data.type==='searching' && !found && remoteLoadCount<2) setLoadingMessage(`Шукаю плеєр ${domain}…`,'Сторінка вже працює у native-origin режимі; очікую заданий DOM-фрагмент.');
+    else if (data.type==='bridge-error' && !found) setLoadingMessage(`Шукаю плеєр ${domain}…`,String(data.message||'Помилка bridge runtime.'));
+  };
+  const onLoad=()=>{
+    if (serial!==titlePlayerLoadSerial || titleMediaMode!=='player') return;
+    remoteLoadCount+=1;
+    if (found) return;
+    if (remoteLoadCount===1) {
+      // Universal DOM Viewer starts monitoring ~700 ms after navigation. If the
+      // first complete navigation still has no target, repeat the SAME URL in the
+      // SAME iframe browsing context immediately. Cookies/storage survive.
+      retryTimer=setTimeout(()=>{
+        if (found || serial!==titlePlayerLoadSerial || titleMediaMode!=='player') return;
+        setLoadingMessage('Повторно запускаю плеєр…','Перше повне завантаження не дало DOM-фрагмент. Повторюю навігацію в тому самому iframe-контексті.');
+        try { frame.src=sourceUrl; } catch (_) {}
+      },Math.max(300,Number(providerConfig.retryAfterMs)||DOM_PLAYER_AUTO_RELOAD_AFTER_MS));
+    } else if (remoteLoadCount>1) {
+      setLoadingMessage(`Шукаю плеєр ${domain}…`,'Повторна навігація вже виконана; очікую DOM-фрагмент.');
+    }
+  };
+  window.addEventListener('message',onMessage);
+  frame.addEventListener('load',onLoad);
+  failTimer=setTimeout(()=>{
+    if (!found && serial===titlePlayerLoadSerial && titleMediaMode==='player') {
+      playerErrorMessage(stage,`Не знайдено DOM-фрагмент плеєра ${domain}. Перевір, що preview-гілка ${DOM_PLAYER_NATIVE_BRANCHES[domain]} задеплоєна на Cloudflare Pages.`);
+    }
+  },60000);
+  domPlayerCleanup=()=>{
+    window.removeEventListener('message',onMessage);
+    try { frame.removeEventListener('load',onLoad); } catch (_) {}
+    if (retryTimer) clearTimeout(retryTimer);
+    if (failTimer) clearTimeout(failTimer);
+  };
+}
+function domPlayerIsUsable(el, win) {
+  if (!el || !el.isConnected) return false;
+  const r = el.getBoundingClientRect();
+  if (r.width < 2 || r.height < 2) return false;
+  const cs = win.getComputedStyle(el);
+  if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse') return false;
+  if (Number(cs.opacity || 1) <= 0.001) return false;
+  return true;
+}
+function domPlayerPickBest(doc, win, targetSpec) {
+  let all;
+  if (targetSpec?.mode === 'classes') {
+    all = Array.from(doc.getElementsByClassName(targetSpec.value));
+  } else {
+    try { all = Array.from(doc.querySelectorAll(targetSpec?.value || '')); }
+    catch (error) { throw new Error('Некоректний selector плеєра: ' + error.message); }
+  }
+  if (!all.length) return null;
+  const usable = all.filter(el => domPlayerIsUsable(el, win));
+  const pool = usable.length ? usable : all;
+  let best = null;
+  let bestScore = -Infinity;
+  for (const el of pool) {
+    const r = el.getBoundingClientRect();
+    let score = Math.max(0, r.width) * Math.max(0, r.height);
+    if (el.querySelector?.('iframe,video,audio,canvas,object,embed')) score += 5_000_000;
+    if (el.querySelector?.('button,input,select,textarea')) score += 50_000;
+    if (score > bestScore) { bestScore = score; best = el; }
+  }
+  return { el:best, total:all.length, usable:usable.length, index:all.indexOf(best) };
+}
+function domPlayerCanScrollElement(el, win, dx, dy) {
+  if (!el || el.nodeType !== 1) return false;
+  const cs = win.getComputedStyle(el);
+  if (dy) {
+    const scrollableY = /(auto|scroll|overlay)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight + 1;
+    if (scrollableY) {
+      if (dy < 0 && el.scrollTop > 0) return true;
+      if (dy > 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true;
+    }
+  }
+  if (dx) {
+    const scrollableX = /(auto|scroll|overlay)/.test(cs.overflowX) && el.scrollWidth > el.clientWidth + 1;
+    if (scrollableX) {
+      if (dx < 0 && el.scrollLeft > 0) return true;
+      if (dx > 0 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1) return true;
+    }
+  }
+  return false;
+}
+function domPlayerIntersectsExpanded(a, b, pad = 80) {
+  return !(b.right < a.left - pad || b.left > a.right + pad || b.bottom < a.top - pad || b.top > a.bottom + pad);
+}
+function domPlayerUnionRects(rects) {
+  const valid = rects.filter(Boolean);
+  if (!valid.length) return null;
+  let left=valid[0].left, top=valid[0].top, right=valid[0].right, bottom=valid[0].bottom;
+  for (const r of valid.slice(1)) {
+    left=Math.min(left,r.left); top=Math.min(top,r.top); right=Math.max(right,r.right); bottom=Math.max(bottom,r.bottom);
+  }
+  return { left,top,right,bottom,width:right-left,height:bottom-top };
+}
+function domPlayerCollectTransientOverlays(doc, win, target, targetRect, lastInteractionAt) {
+  if (Date.now() - lastInteractionAt > 3500) return [];
+  const selector = '[role="menu"],[role="listbox"],[role="dialog"],[role="tooltip"],.dropdown-menu,.select2-dropdown,.ui-menu,.ui-autocomplete,[class*="dropdown"],[class*="popup"],[class*="popover"]';
+  let nodes=[];
+  try { nodes=Array.from(doc.querySelectorAll(selector)); } catch (_) { return []; }
+  return nodes.filter(el => {
+    if (!el.isConnected || target?.contains(el)) return false;
+    const r=el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8 || r.width > DOM_REMOTE_VIEWPORT_W*.95 || r.height > DOM_REMOTE_VIEWPORT_H*.95) return false;
+    const cs=win.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity || 1) <= .001) return false;
+    return domPlayerIntersectsExpanded(targetRect,r,120);
+  });
+}
+function domPlayerDetectTopOverlayInset(doc, win, target) {
+  const vw=Math.max(1,win.innerWidth||DOM_REMOTE_VIEWPORT_W), vh=Math.max(1,win.innerHeight||DOM_REMOTE_VIEWPORT_H);
+  const xs=[Math.round(vw*.08),Math.round(vw*.5),Math.round(vw*.92)], ys=[1,12,28,48,72,96,128,160];
+  const seen=new Set(); let inset=0;
+  for (const x of xs) for (const y of ys) {
+    if (y >= vh) continue;
+    let stack=[];
+    try { stack=doc.elementsFromPoint(x,y)||[]; } catch (_) { continue; }
+    for (const el of stack) {
+      if (!el || el===doc.documentElement || el===doc.body || seen.has(el)) continue;
+      seen.add(el);
+      if (target && (el===target || target.contains?.(el))) continue;
+      let cs,r;
+      try { cs=win.getComputedStyle(el); r=el.getBoundingClientRect(); } catch (_) { continue; }
+      if (!r || r.width<20 || r.height<4 || r.bottom<=0) continue;
+      if (cs.display==='none' || cs.visibility==='hidden' || Number(cs.opacity||1)<=.001) continue;
+      if (cs.position!=='fixed' && cs.position!=='sticky') continue;
+      if (r.top>8 || r.bottom>vh*.6) continue;
+      inset=Math.max(inset,Math.min(r.bottom,260));
+    }
+  }
+  return Math.max(0,Math.round(inset));
+}
+function startDomPlayerCrop(stage, frame, viewport, loading, targetSpec, serial, sourceUrl, domain) {
+  stopDomTitlePlayer();
+  let monitorTimer=null, currentTarget=null, currentAnchor=null, cleanupChildHooks=null, lastInteractionAt=0, found=false;
+  const providerConfig=playerProviderConfig(domain)||{};
+  let remoteLoadedAt=0, remoteLoadCount=0, autoReloadDone=false, retryInProgress=false;
+  const startedAt=Date.now();
+  const setLoadingMessage=(headline,detail)=>{
+    if (!loading) return;
+    const strong=loading.querySelector('strong'), small=loading.querySelector('small');
+    if (strong && headline) strong.textContent=headline;
+    if (small && detail) small.textContent=detail;
+  };
+  function cleanup() {
+    if (monitorTimer) clearInterval(monitorTimer);
+    monitorTimer=null;
+    try { cleanupChildHooks?.(); } catch (_) {}
+    cleanupChildHooks=null;
+    try { frame.removeEventListener('load',onFrameLoad); } catch (_) {}
+  }
+  domPlayerCleanup=cleanup;
+  function installChildHooks(doc, win) {
+    try { cleanupChildHooks?.(); } catch (_) {}
+    const onPointer=event => {
+      if (currentTarget && currentTarget.contains(event.target)) {
+        lastInteractionAt=Date.now();
+        setTimeout(()=>updateCrop(false),0);
+        setTimeout(()=>updateCrop(false),80);
+        setTimeout(()=>updateCrop(false),250);
+      }
+    };
+    const onWheel=event => {
+      if (!currentTarget || !currentTarget.contains(event.target)) { event.preventDefault(); return; }
+      let n=event.target;
+      while (n && n!==currentTarget.parentElement) {
+        if (domPlayerCanScrollElement(n,win,event.deltaX,event.deltaY)) return;
+        if (n===currentTarget) break;
+        n=n.parentElement;
+      }
+      event.preventDefault();
+    };
+    doc.addEventListener('pointerdown',onPointer,true);
+    doc.addEventListener('click',onPointer,true);
+    doc.addEventListener('wheel',onWheel,{capture:true,passive:false});
+    cleanupChildHooks=()=>{
+      try { doc.removeEventListener('pointerdown',onPointer,true); } catch (_) {}
+      try { doc.removeEventListener('click',onPointer,true); } catch (_) {}
+      try { doc.removeEventListener('wheel',onWheel,true); } catch (_) {}
+    };
+  }
+  function choosePlayerSurface(anchor, win) {
+    if (!anchor || !providerConfig.requireMedia) return anchor;
+    let nodes=[];
+    try {
+      nodes=Array.from(anchor.querySelectorAll('iframe,video,object,embed,canvas,[class*="player" i],[class*="video" i],[id*="player" i],[id*="video" i]'));
+    } catch (_) { return null; }
+    const usable=nodes.filter(el=>domPlayerIsUsable(el,win));
+    if (!usable.length) return null;
+    let best=null,bestScore=-Infinity;
+    for (const el of usable) {
+      const r=el.getBoundingClientRect();
+      if (r.width<120 || r.height<70) continue;
+      const tag=String(el.tagName||'').toLowerCase();
+      const text=((el.className&&String(el.className))||'')+' '+(el.id||'');
+      let score=r.width*r.height;
+      if (/^(iframe|video|object|embed|canvas)$/.test(tag)) score+=8_000_000;
+      if (/player|video|watch|embed/i.test(text)) score+=1_500_000;
+      const ratio=r.width/Math.max(1,r.height);
+      if (ratio>=1.2 && ratio<=2.4) score+=750_000;
+      if (score>bestScore) { bestScore=score; best=el; }
+    }
+    if (!best) return null;
+    if (!providerConfig.tightMedia) return anchor;
+    // Keep one/two local wrappers when they are clearly part of the player controls,
+    // but never climb back to the large page section supplied as the anchor.
+    let crop=best;
+    for (let i=0;i<2;i++) {
+      const parent=crop.parentElement;
+      if (!parent || parent===anchor || !anchor.contains(parent)) break;
+      const cr=crop.getBoundingClientRect(), pr=parent.getBoundingClientRect();
+      if (pr.width>=cr.width*.90 && pr.width<=cr.width*1.22 && pr.height>=cr.height && pr.height<=cr.height*1.55) crop=parent;
+      else break;
+    }
+    return crop;
+  }
+  function suppressOuterChrome(doc,win,anchor) {
+    if (!doc || !win || !anchor) return;
+    const xs=[Math.round(win.innerWidth*.08),Math.round(win.innerWidth*.5),Math.round(win.innerWidth*.92)];
+    const ys=[1,18,48,Math.max(1,win.innerHeight-1),Math.max(1,win.innerHeight-24),Math.max(1,win.innerHeight-64)];
+    const seen=new Set();
+    for (const x of xs) for (const y of ys) {
+      let stack=[]; try { stack=doc.elementsFromPoint(x,y)||[]; } catch (_) { continue; }
+      for (const el of stack) {
+        if (!el || seen.has(el) || el===doc.body || el===doc.documentElement) continue;
+        seen.add(el);
+        if (anchor.contains(el) || el.contains?.(anchor)) continue;
+        let cs,r; try { cs=win.getComputedStyle(el); r=el.getBoundingClientRect(); } catch (_) { continue; }
+        if (!r || (cs.position!=='fixed' && cs.position!=='sticky')) continue;
+        const edge=r.top<=12 || r.bottom>=win.innerHeight-12;
+        if (!edge || r.width<win.innerWidth*.45 || r.height<32) continue;
+        try { el.style.setProperty('visibility','hidden','important'); el.style.setProperty('pointer-events','none','important'); } catch (_) {}
+      }
+    }
+  }
+  function updateCrop(showStatus=true) {
+    if (serial !== titlePlayerLoadSerial || titleMediaMode !== 'player') return false;
+    let doc,win;
+    try { doc=frame.contentDocument; win=frame.contentWindow; } catch (_) { return false; }
+    if (!doc || !win || !targetSpec) return false;
+    let picked;
+    try { picked=domPlayerPickBest(doc,win,targetSpec); } catch (error) { playerErrorMessage(stage,error.message); cleanup(); return false; }
+    if (!picked || !domPlayerIsUsable(picked.el,win)) return false;
+    currentAnchor=picked.el;
+    const surface=currentAnchor;
+    if (!surface || !domPlayerIsUsable(surface,win)) return false;
+    const targetChanged=surface!==currentTarget;
+    currentTarget=surface;
+    if (targetChanged) installChildHooks(doc,win);
+    let rect=currentTarget.getBoundingClientRect();
+    let topInset=domPlayerDetectTopOverlayInset(doc,win,currentTarget);
+    const safeTop=topInset+12;
+    const outside=rect.bottom<safeTop || rect.top>DOM_REMOTE_VIEWPORT_H-8 || rect.right<0 || rect.left>DOM_REMOTE_VIEWPORT_W;
+    const underHeader=rect.top<safeTop-2;
+    if (targetChanged || outside || underHeader) {
+      const docY=rect.top+win.scrollY, desiredY=Math.max(0,docY-safeTop);
+      try { win.scrollTo({left:win.scrollX,top:desiredY,behavior:'instant'}); } catch (_) { try { win.scrollTo(win.scrollX,desiredY); } catch (_) {} }
+      rect=currentTarget.getBoundingClientRect();
+      topInset=domPlayerDetectTopOverlayInset(doc,win,currentTarget);
+    }
+    const overlays=domPlayerCollectTransientOverlays(doc,win,currentTarget,rect,lastInteractionAt).map(el=>el.getBoundingClientRect());
+    const visibleRect=domPlayerUnionRects([rect,...overlays]);
+    if (!visibleRect || visibleRect.width<2 || visibleRect.height<2) return false;
+    const maxWidth=Math.max(100,Math.min(stage.clientWidth||document.documentElement.clientWidth-40,1080));
+    const scale=Math.min(1,maxWidth/visibleRect.width);
+    frame.style.width=DOM_REMOTE_VIEWPORT_W+'px';
+    frame.style.height=DOM_REMOTE_VIEWPORT_H+'px';
+    frame.style.transform=`scale(${scale})`;
+    frame.style.left=(-visibleRect.left*scale)+'px';
+    frame.style.top=(-visibleRect.top*scale)+'px';
+    viewport.style.width=Math.max(1,Math.round(visibleRect.width*scale))+'px';
+    viewport.style.height=Math.max(1,Math.round(visibleRect.height*scale))+'px';
+    viewport.hidden=false;
+    viewport.classList.remove('is-loading');
+    if (loading) loading.hidden=true;
+    found=true;
+    if (showStatus || targetChanged) viewport.dataset.playerReady='true';
+    return true;
+  }
+  function retrySameContext() {
+    if (autoReloadDone || found || retryInProgress || !sourceUrl) return false;
+    autoReloadDone=true;
+    retryInProgress=true;
+    setLoadingMessage('Повторно запускаю плеєр…','Перше завантаження не створило DOM-фрагмент. Повторюю повну навігацію в тому самому iframe-контексті, зберігаючи localStorage/sessionStorage.');
+    const joiner=sourceUrl.includes('?')?'&':'?';
+    const retryUrl=`${sourceUrl}${joiner}__yoru_retry=1&__yoru_t=${Date.now()}`;
+    try {
+      // Важливо: НЕ створюємо новий iframe. Повторна навігація в тому самому
+      // browsing context повторює робочий "другий клік" Universal DOM Viewer:
+      // стан, який сторінка записала під час першого запуску, переживає reload.
+      frame.src=retryUrl;
+      return true;
+    } catch (_) {
+      retryInProgress=false;
+      return false;
+    }
+  }
+  function tick() {
+    if (serial !== titlePlayerLoadSerial || titleMediaMode !== 'player') { cleanup(); return; }
+    if (updateCrop(!found)) return;
+    if (!found && remoteLoadedAt && !autoReloadDone) {
+      let ready='';
+      try { ready=frame.contentDocument?.readyState || ''; } catch (_) {}
+      const sinceLoad=Date.now()-remoteLoadedAt;
+      const retryAfter=Math.max(300,Number(providerConfig.retryAfterMs)||DOM_PLAYER_AUTO_RELOAD_AFTER_MS);
+      if ((ready==='complete' && sinceLoad>=retryAfter) || sinceLoad>=Math.max(DOM_PLAYER_AUTO_RELOAD_FORCE_MS,retryAfter+700)) {
+        if (retrySameContext()) return;
+      }
+    }
+    if (!found && Date.now()-startedAt>DOM_PLAYER_WAIT_MS) {
+      cleanup();
+      playerErrorMessage(stage,'Не знайдено вказаний DOM-фрагмент плеєра за 60 секунд навіть після автоматичного повторного завантаження.');
+    }
+  }
+  function onFrameLoad() {
+    if (serial !== titlePlayerLoadSerial || titleMediaMode !== 'player') return;
+    let href='';
+    try { href=frame.contentWindow?.location?.href || ''; } catch (_) {}
+    if (!href || href==='about:blank') return;
+    remoteLoadCount+=1;
+    remoteLoadedAt=Date.now();
+    retryInProgress=false;
+    if (remoteLoadCount>1 && !found) setLoadingMessage('Шукаю плеєр після повторного завантаження…','Повторна навігація виконана в тому самому iframe-контексті.');
+    setTimeout(tick,0);
+    setTimeout(tick,250);
+    setTimeout(tick,1000);
+    setTimeout(tick,2500);
+  }
+  frame.addEventListener('load',onFrameLoad);
+  monitorTimer=setInterval(tick,DOM_PLAYER_POLL_MS);
+}
+function loadDomTitlePlayer(stage, domain, pageUrl, serial) {
+  const config=playerProviderConfig(domain), targetSpec=config.target;
+  if (!targetSpec?.value) return playerErrorMessage(stage,`Для ${domain} не задано DOM-фрагмент плеєра.`);
+  const nativeOrigin=domPlayerNativeOrigin(domain);
+  const nativeSrc=domPlayerNativeUrl(domain,pageUrl);
+  const fallbackSrc=`/api/player/view?site=${encodeURIComponent(domain)}&url=${encodeURIComponent(pageUrl)}`;
+  const useNative=Boolean(nativeOrigin&&nativeSrc);
+  const src=useNative?nativeSrc:fallbackSrc;
+  stage.innerHTML=`
+    <div class="player-loading" data-dom-player-loading><span class="detail-loader"></span><strong>Шукаю плеєр ${escapeHtml(domain)}…</strong><small>${useNative?'Native virtual-origin режим Universal DOM Viewer: оригінальний pathname, cookies/session та Next/RSC не підмінюються path-proxy.':'Fallback proxy режим для custom domain.'}</small></div>
+    <div class="dom-player-viewport is-loading" data-dom-player-viewport>
+      <iframe class="dom-player-frame" data-dom-player-frame src="about:blank" scrolling="no" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen referrerpolicy="origin-when-cross-origin"></iframe>
+    </div>`;
+  const frame=stage.querySelector('[data-dom-player-frame]'), viewport=stage.querySelector('[data-dom-player-viewport]'), loading=stage.querySelector('[data-dom-player-loading]');
+  if (!frame || !viewport) return playerErrorMessage(stage,'Не вдалося створити DOM-плеєр.');
+  if (useNative) startNativeDomPlayerCrop(stage,frame,viewport,loading,serial,nativeOrigin,src,domain,config);
+  else startDomPlayerCrop(stage,frame,viewport,loading,targetSpec,serial,src,domain);
+  requestAnimationFrame(()=>{
+    if (serial !== titlePlayerLoadSerial || titleMediaMode !== 'player') return;
+    frame.src=src;
+  });
+}
+function loadActiveTitlePlayer() {
+  if (titleMediaMode !== 'player') return;
+  stopDomTitlePlayer();
+  const stage = root.querySelector('[data-player-stage]');
+  if (!stage) return;
+  const domain = ensurePlayerProvider();
+  const link = currentPlayerLink(domain);
+  if (!link) return playerErrorMessage(stage, `Для ${domain} немає посилання в базі.`);
+  const serial = ++titlePlayerLoadSerial;
+  mikaiPlayerData = null;
+  if (domain === 'mikai.me') loadMikaiTitlePlayer(stage, link.url, serial);
+  else loadDomTitlePlayer(stage, domain, link.url, serial);
+}
+
+
 function buildDropdown(kind, currentValue, options) {
   const valueText = escapeHtml(currentValue || (kind === 'status' ? 'Без статусу' : 'Без групи'));
   const groupStyle = kind === 'group' ? ` style="${groupTagStyle(currentValue)}"` : '';
@@ -444,8 +1141,79 @@ function taxonomyRow(label, value, kind) {
   return `<div class="title-taxonomy-row title-taxonomy-${kind}"><span class="title-taxonomy-label">${escapeHtml(label)}</span><div class="title-taxonomy-chips">${values.map(name => { const sources = taxonomySourceNames(value, name); const tip = sources.length ? `Джерела: ${sources.join(' · ')}` : ''; return `<span class="title-taxonomy-chip" ${tip ? `title="${escapeHtml(tip)}"` : ''}>${escapeHtml(name)}</span>`; }).join('')}</div></div>`;
 }
 
+function setTitleTopActions(html = '') {
+  if (!titleTopActions) return;
+  titleTopActions.innerHTML = html;
+}
+
+function renderNormalTitleTopActions(item) {
+  setTitleTopActions(`<a class="top-context-btn" href="index.html?similar=${encodeURIComponent(item.id)}">Схожі тайтли</a>`);
+}
+
+function aniHubPreviewCard(item) {
+  const genres = Array.isArray(item.genres) ? item.genres : [];
+  return `<section class="anihub-preview-hero" style="--preview-banner:url('${escapeHtml(item.banner || item.poster || '').replace(/'/g, '%27')}')">
+    <div class="anihub-preview-backdrop"></div>
+    <div class="anihub-preview-shell">
+      <div class="anihub-preview-poster"><img src="${escapeHtml(item.poster || FALLBACK_IMAGE)}" alt="${escapeHtml(item.title || '')}" /></div>
+      <div class="anihub-preview-copy">
+        <span class="section-kicker">ANIHUB PREVIEW</span>
+        <h1>${escapeHtml(item.title || 'Без назви')}</h1>
+        ${item.originalTitle ? `<div class="anihub-preview-original">${escapeHtml(item.originalTitle)}</div>` : ''}
+        <div class="anihub-preview-meta">${[item.year,item.type,item.episodes ? `${item.episodes} еп.` : '',item.rating ? `★ ${item.rating}` : ''].filter(Boolean).map(x=>`<span>${escapeHtml(x)}</span>`).join('')}</div>
+        ${genres.length ? `<div class="anihub-preview-genres">${genres.slice(0,10).map(x=>`<span>${escapeHtml(typeof x==='string'?x:(x?.name||x?.title||''))}</span>`).join('')}</div>` : ''}
+        <p>${escapeHtml(item.description || 'Опис відсутній.')}</p>
+        ${item.sourceUrl ? `<a class="anihub-preview-source" href="${escapeHtml(item.sourceUrl)}" target="_blank" rel="noopener noreferrer">Відкрити на AniHub ↗</a>` : ''}
+      </div>
+    </div>
+  </section>`;
+}
+
+async function selectAniHubPreview(item, button) {
+  if (!item?.sourceUrl || !item?.title || button?.dataset.busy === '1') return;
+  if (button) { button.dataset.busy = '1'; button.disabled = true; button.textContent = 'Додаю…'; }
+  try {
+    const response = await fetch('/api/process-title', { method:'POST', headers:{'Content-Type':'application/json',Accept:'application/json'}, body:JSON.stringify({title:item.title,url:item.sourceUrl}), cache:'no-store' });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    if (!payload?.item?.id) throw new Error('Сайт не повернув id доданого тайтлу.');
+    location.href = `title.html?id=${encodeURIComponent(payload.item.id)}`;
+  } catch (error) {
+    console.error(error); toastMessage(error.message || 'Не вдалося додати тайтл.');
+    if (button) { button.dataset.busy = ''; button.disabled = false; button.textContent = 'Вибрати'; }
+  }
+}
+
+async function loadAniHubPreview({ random = false, id = '' } = {}) {
+  root.innerHTML = '<div class="not-found"><div class="detail-loader"></div><p>Отримую тайтл з AniHub…</p></div>';
+  try {
+    let endpoint;
+    if (random) {
+      const exclude = [...randomExcludeIds].join(',');
+      endpoint = `/api/anihub/random${exclude ? `?exclude=${encodeURIComponent(exclude)}` : ''}`;
+    } else endpoint = `/api/anihub/title?id=${encodeURIComponent(id)}`;
+    const response = await fetch(endpoint, {headers:{Accept:'application/json'}, cache:'no-store'});
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const item = payload.item;
+    if (!item) throw new Error('AniHub не повернув тайтл.');
+    if (item.anihubId) { randomExcludeIds.add(String(item.anihubId)); sessionStorage.setItem('yoru-random-exclude', JSON.stringify([...randomExcludeIds])); }
+    document.title = `${item.title || 'AniHub'} — Yoru`;
+    setTitleTopActions(`<button class="top-context-btn" type="button" data-random-next>Випадковий тайтл</button><button class="top-context-btn primary" type="button" data-random-select>Вибрати</button>`);
+    root.innerHTML = aniHubPreviewCard(item);
+    titleTopActions?.querySelector('[data-random-next]')?.addEventListener('click', () => loadAniHubPreview({random:true}));
+    titleTopActions?.querySelector('[data-random-select]')?.addEventListener('click', e => selectAniHubPreview(item, e.currentTarget));
+  } catch (error) {
+    console.error(error);
+    setTitleTopActions(`<button class="top-context-btn" type="button" data-random-next>Випадковий тайтл</button>`);
+    titleTopActions?.querySelector('[data-random-next]')?.addEventListener('click', () => loadAniHubPreview({random:true}));
+    renderNotFound(error.message || 'Не вдалося отримати тайтл AniHub.');
+  }
+}
+
 function renderItem(item) {
   currentItem = item;
+  renderNormalTitleTopActions(currentItem);
   syncMarksFromItem(currentItem);
   document.title = `${currentItem.title} — Yoru`;
   const linkGroups = groupLinks(currentItem.links || []);
@@ -458,9 +1226,11 @@ function renderItem(item) {
   ].filter(Boolean).join('');
 
   const theme = statusTheme(currentItem.status || 'Без статусу');
+  const useTrailerBackground = trailerBackgroundEnabled() && currentItem.hasTrailer;
   root.innerHTML = `
-    <section class="title-hero">
-      <div class="banner-bg"></div>
+    <section class="title-hero ${useTrailerBackground ? 'trailer-active' : ''}">
+      ${trailerBackgroundHtml(currentItem)}
+      ${useTrailerBackground ? '' : '<div class="banner-bg"></div>'}
       <div class="banner-vignette"></div>
       <div class="title-shell">
         <div class="title-side reveal">
@@ -511,15 +1281,11 @@ function renderItem(item) {
     </section>
 
     <section class="detail-links title-shell reveal delay-2">
-      <aside class="sources-card sources-card-wide">
-        <div class="sources-head">
-          <span class="section-kicker">ПОСИЛАННЯ</span>
-          <h3>Сайти та серії</h3>
-          <p class="sources-summary">${linkGroups.length ? `Сайтів: ${linkGroups.length} · Посилань: ${totalLinks}` : 'Посилань поки немає'}</p>
-        </div>
-        <div class="source-groups">${buildLinksAccordion(linkGroups)}</div>
-      </aside>
+      ${buildMediaWorkspace(linkGroups)}
       <div class="title-record-actions">
+        <button class="record-action-btn refresh-record-btn" type="button" data-refresh-title ${totalLinks ? '' : 'disabled'} title="Взяти перше джерело зі списку, повторно прогнати його через Core і доповнити відсутні дані">
+          <span>Оновити картку тайтла</span><b>↻</b>
+        </button>
         <a class="record-action-btn merge-record-btn" href="index.html?merge=${encodeURIComponent(currentItem.id)}">
           <span>Об’єднати</span><b>⇄</b>
         </a>
@@ -533,7 +1299,9 @@ function renderItem(item) {
     </section>`;
 
   const banner = safeHttpUrl(currentItem.banner || currentItem.poster || '');
-  if (banner) root.querySelector('.banner-bg').style.backgroundImage = `url("${banner.replace(/["\\]/g, '\\$&')}")`;
+  const bannerNode = root.querySelector('.banner-bg');
+  if (banner && bannerNode) bannerNode.style.backgroundImage = `url("${banner.replace(/["\\]/g, '\\$&')}")`;
+  if (titleMediaMode === 'player') queueMicrotask(loadActiveTitlePlayer);
 }
 
 async function patchCurrent(changes, successText) {
@@ -549,6 +1317,48 @@ async function patchCurrent(changes, successText) {
   renderItem(currentItem);
   if (successText) toastMessage(successText);
   return currentItem;
+}
+
+function firstDisplayedSourceLink() {
+  const groups = groupLinks(currentItem?.links || []);
+  const first = groups[0]?.items?.[0];
+  if (!first?.url) return null;
+  return { name: String(first.name || groups[0]?.site || '').trim() || groups[0]?.site || 'Джерело', url: first.url };
+}
+
+async function refreshTitleCard(button) {
+  if (!currentItem || !button || button.dataset.busy === '1') return;
+  const source = firstDisplayedSourceLink();
+  if (!source) {
+    toastMessage('Немає посилання, з якого можна оновити картку');
+    return;
+  }
+  const label = button.querySelector('span');
+  const oldText = label?.textContent || 'Оновити картку тайтла';
+  button.dataset.busy = '1';
+  button.disabled = true;
+  if (label) label.textContent = 'Оновлюю картку…';
+  try {
+    const response = await fetch(`/api/anime/refresh?id=${encodeURIComponent(currentItem.id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ title: source.name, url: source.url }),
+      cache: 'no-store',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    if (payload.options) apiOptions = payload.options;
+    if (payload.item) currentItem = payload.item;
+    const filled = Array.isArray(payload.filled) ? payload.filled : [];
+    renderItem(currentItem);
+    toastMessage(filled.length ? `Картку оновлено: ${filled.join(', ')}` : 'Нових відсутніх даних Core не знайшов');
+  } catch (error) {
+    console.error(error);
+    button.disabled = false;
+    delete button.dataset.busy;
+    if (label) label.textContent = oldText;
+    toastMessage(error.message || 'Не вдалося оновити картку');
+  }
 }
 
 function closeDropdowns() {
@@ -825,6 +1635,11 @@ function ensureEditModal() {
               <input id="editBannerUrl" type="url" placeholder="https://example.com/banner.jpg" />
               <small>Встав пряме http/https посилання. Якщо поле порожнє — поточний банер не зміниться.</small>
             </div>
+            <div class="edit-media-field">
+              <span>Трейлер — YouTube / Dailymotion / embed URL</span>
+              <input id="editTrailerUrl" type="url" placeholder="https://www.youtube.com/watch?v=..." />
+              <small>Поточне значення підставляється автоматично. Очисти поле, щоб прибрати трейлер із тайтлу.</small>
+            </div>
             <div class="edit-flags">
               <label><input id="editFavoriteValue" type="checkbox" /><span>Вибране</span></label>
               <label><input id="editLikedValue" type="checkbox" /><span>Улюблене</span></label>
@@ -955,6 +1770,7 @@ function openEditModal() {
   modal.querySelector('#editNotesValue').value = currentItem.notes || '';
   modal.querySelector('#editPosterUrl').value = '';
   modal.querySelector('#editBannerUrl').value = '';
+  modal.querySelector('#editTrailerUrl').value = currentItem.trailer?.url || currentItem.trailer?.embedUrl || '';
   modal.querySelector('#editFavoriteValue').checked = favorite.has(currentItem.id);
   modal.querySelector('#editLikedValue').checked = liked.has(currentItem.id);
   modal.querySelector('#editTitleStatus').textContent = '';
@@ -977,6 +1793,7 @@ function openEditModal() {
     existingValueCard('Група', currentItem.group),
     existingValueCard('Постер', '', currentItem.poster ? `<img class="edit-existing-image poster" src="${escapeHtml(currentItem.poster)}" alt="" />` : '<strong>—</strong>'),
     existingValueCard('Банер', '', currentItem.hasBanner && currentItem.banner ? `<img class="edit-existing-image banner" src="${escapeHtml(currentItem.banner)}" alt="" />` : '<strong>—</strong>'),
+    existingValueCard('Трейлер', '', currentItem.hasTrailer ? `${currentItem.trailer?.thumbnail ? `<img class="edit-existing-image banner trailer-thumb" src="${escapeHtml(currentItem.trailer.thumbnail)}" alt="" />` : ''}<a class="edit-existing-link" href="${escapeHtml(currentItem.trailer?.url || currentItem.trailer?.embedUrl || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(currentItem.trailer?.site || 'Відкрити трейлер')} ↗</a>` : '<strong>—</strong>'),
     existingValueCard('Опис', descPreview || '—'),
     existingValueCard('Нотатки', (currentItem.notes || '').slice(0, 300) || '—'),
     existingValueCard('Позначення', `${favorite.has(currentItem.id) ? 'Вибране · ' : ''}${liked.has(currentItem.id) ? 'Улюблене' : ''}` || '—'),
@@ -1020,8 +1837,10 @@ async function saveEditModal() {
     };
     const posterUrl = modal.querySelector('#editPosterUrl').value.trim();
     const bannerUrl = modal.querySelector('#editBannerUrl').value.trim();
+    const trailerUrl = modal.querySelector('#editTrailerUrl').value.trim();
     if (posterUrl) payload.posterUrl = posterUrl;
     if (bannerUrl) payload.bannerUrl = bannerUrl;
+    payload.trailerUrl = trailerUrl;
 
     const response = await fetch(`/api/anime?id=${encodeURIComponent(currentItem.id)}`, {
       method: 'PATCH',
@@ -1114,6 +1933,34 @@ function openDeleteModal() {
 }
 
 root.addEventListener('change', async e => {
+  const seasonSelect = e.target.closest('[data-player-season]');
+  if (seasonSelect) {
+    setPlayerSeason(titlePlayerProvider, Number(seasonSelect.value) || 0);
+    mikaiPlayerData = null;
+    mikaiPlayerSelection = { release:0, episode:0, source:0 };
+    renderActivePlayerPanel();
+    return;
+  }
+  const mikaiRelease = e.target.closest('[data-mikai-release]');
+  if (mikaiRelease) {
+    mikaiPlayerSelection.release = Number(mikaiRelease.value) || 0;
+    mikaiPlayerSelection.episode = 0; mikaiPlayerSelection.source = 0;
+    renderMikaiPlayerStage(root.querySelector('[data-player-stage]'));
+    return;
+  }
+  const mikaiEpisode = e.target.closest('[data-mikai-episode]');
+  if (mikaiEpisode) {
+    mikaiPlayerSelection.episode = Number(mikaiEpisode.value) || 0;
+    mikaiPlayerSelection.source = 0;
+    renderMikaiPlayerStage(root.querySelector('[data-player-stage]'));
+    return;
+  }
+  const mikaiSource = e.target.closest('[data-mikai-source]');
+  if (mikaiSource) {
+    mikaiPlayerSelection.source = Number(mikaiSource.value) || 0;
+    renderMikaiPlayerStage(root.querySelector('[data-player-stage]'));
+    return;
+  }
   const input = e.target.closest('[data-watch-input]');
   if (!input || !currentItem) return;
   const kind = input.dataset.watchInput === 'season' ? 'season' : 'episode';
@@ -1136,6 +1983,15 @@ root.addEventListener('keydown', e => {
 });
 
 root.addEventListener('click', async e => {
+  const mediaMode = e.target.closest('[data-media-mode]');
+  if (mediaMode) { setTitleMediaMode(mediaMode.dataset.mediaMode); return; }
+
+  const playerSource = e.target.closest('[data-player-source]');
+  if (playerSource && !playerSource.disabled) { selectTitlePlayerProvider(playerSource.dataset.playerSource); return; }
+
+  const refreshBtn = e.target.closest('[data-refresh-title]');
+  if (refreshBtn && !refreshBtn.disabled) { await refreshTitleCard(refreshBtn); return; }
+
   const editBtn = e.target.closest('[data-edit-title]');
   if (editBtn) { openEditModal(); return; }
 
@@ -1336,7 +2192,18 @@ document.addEventListener('keydown', e => {
   }
 });
 
+window.addEventListener('message', event => {
+  if (event.origin !== location.origin || !event.data || typeof event.data !== 'object') return;
+  if (event.data.type === 'yoru-player-waiting') {
+    const stage = root.querySelector('[data-player-stage]');
+    if (stage && !stage.querySelector('.player-proxy-hint')) stage.insertAdjacentHTML('beforeend', '<div class="player-proxy-hint">Плеєр ще завантажується — очікую DOM-блок джерела…</div>');
+  }
+  if (event.data.type === 'yoru-player-ready') root.querySelector('.player-proxy-hint')?.remove();
+});
+
 async function loadItem() {
+  if (randomMode) return loadAniHubPreview({ random:true });
+  if (previewMode && anihubPreviewId) return loadAniHubPreview({ id:anihubPreviewId });
   if (!id) return renderNotFound();
   root.innerHTML = '<div class="not-found"><div class="detail-loader"></div><p>Завантаження з Turso…</p></div>';
   try {

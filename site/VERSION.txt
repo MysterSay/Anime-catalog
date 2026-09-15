@@ -1,1 +1,1 @@
-yoru-v7.3.0-virtual-catalog-2026-09-11
+7.7.0

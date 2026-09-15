@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	appVersion       = "1.1.9"
+	appVersion       = "1.1.10"
 	vercelCLIVersion = "59.16.0"
 
 	WM_DESTROY = 0x0002
@@ -1675,6 +1675,15 @@ func stepFinalDeploy(ctx context.Context) error {
 	finalCFOut, cfErr := runWrangler(ctx, siteDir, "", nil, "pages", "deploy", ".", "--project-name", current.CloudflareProject)
 	if cfErr != nil {
 		return fmt.Errorf("фінальний Cloudflare deploy: %w", cfErr)
+	}
+
+	appendLog("Розгортаю native player preview aliases (Universal DOM Viewer mode)...")
+	playerBranches := []string{"p-anihub", "p-animeon", "p-jutsu", "p-animego"}
+	for _, branch := range playerBranches {
+		appendLog("Cloudflare player alias: " + branch + "." + current.CloudflareProject + ".pages.dev")
+		if _, branchErr := runWrangler(ctx, siteDir, "", nil, "pages", "deploy", ".", "--project-name", current.CloudflareProject, "--branch", branch, "--commit-dirty=true"); branchErr != nil {
+			return fmt.Errorf("Cloudflare player preview %s: %w", branch, branchErr)
+		}
 	}
 	if detected := cloudflarePagesStableURL("", finalCFOut); detected != "" && detected != current.SiteURL {
 		appendLog("Cloudflare production URL уточнено після фінального deploy: " + detected)

@@ -1,6 +1,6 @@
 let db = [];
 let apiSources = [];
-let apiOptions = { statuses: [], groups: [], groupOptions: [], tags: [], genres: [], themes: [], statusGroups: {}, starredGroups: [] };
+let apiOptions = { statuses: [], groups: [], groupOptions: [], tags: [], genres: [], themes: [], statusGroups: {}, starredGroups: [], playerSettings: { mikaiApiKeyConfigured: false, mikaiSendToCore: false }, bannerSettings: { trailerEnabled: false } };
 let discoverSelected = null;
 
 const catalog = document.getElementById('catalog');
@@ -28,11 +28,16 @@ const catalogTitle = document.getElementById('catalogTitle');
 const quickButtons = [...document.querySelectorAll('[data-quick]')];
 const toast = document.getElementById('toast');
 const openAddTitle = document.getElementById('openAddTitle');
+const openRandomTitle = document.getElementById('openRandomTitle');
 const openSettings = document.getElementById('openSettings');
 const settingsModal = document.getElementById('settingsModal');
 const settingsGroupsList = document.getElementById('settingsGroupsList');
 const settingsStatusesList = document.getElementById('settingsStatusesList');
 const settingsStatus = document.getElementById('settingsStatus');
+const mikaiApiKeyInput = document.getElementById('mikaiApiKeyInput');
+const mikaiCoreForwardToggle = document.getElementById('mikaiCoreForwardToggle');
+const mikaiKeyState = document.getElementById('mikaiKeyState');
+const bannerTrailerToggle = document.getElementById('bannerTrailerToggle');
 const discoverModal = document.getElementById('discoverModal');
 const discoverSearchForm = document.getElementById('discoverSearchForm');
 const discoverSearchInput = document.getElementById('discoverSearchInput');
@@ -43,6 +48,14 @@ const discoverProgress = document.getElementById('discoverProgress');
 const discoverProgressBar = document.getElementById('discoverProgressBar');
 const discoverProgressPercent = document.getElementById('discoverProgressPercent');
 const discoverProgressText = document.getElementById('discoverProgressText');
+const discoverImagePaste = document.getElementById('discoverImagePaste');
+const discoverImageFile = document.getElementById('discoverImageFile');
+const discoverImagePreview = document.getElementById('discoverImagePreview');
+const queryParams = new URLSearchParams(location.search);
+const similarModeId = queryParams.get('similar') || '';
+let discoverImageBlob = null;
+let discoverImageObjectUrl = '';
+let similarItems = [];
 
 const STATUS_ORDER = ['Добавленно', 'Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто'];
 const FALLBACK_IMAGE = 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 700 1000%22%3E%3Cdefs%3E%3ClinearGradient id=%22g%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22%3E%3Cstop stop-color=%22%23171b27%22/%3E%3Cstop offset=%221%22 stop-color=%22%23282d42%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%22700%22 height=%221000%22 fill=%22url(%23g)%22/%3E%3Ctext x=%22350%22 y=%22520%22 text-anchor=%22middle%22 fill=%22%23798094%22 font-family=%22Arial%22 font-size=%2270%22%3EYORU%3C/text%3E%3C/svg%3E';
@@ -68,6 +81,15 @@ const GROUP_COLOR_THEME = {
   red:{solid:'#d76868',soft:'rgba(215,104,104,.14)',border:'rgba(215,104,104,.32)'},
 };
 const GROUP_COLOR_ORDER = ['default','gray','brown','orange','yellow','green','blue','purple','pink','red'];
+
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+  } catch {
+    return '';
+  }
+}
 
 const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 const VIRTUAL_PAGE_MARGIN = 1600;
@@ -575,6 +597,23 @@ function iconHeart(active, filled) {
 }
 
 function cardTemplate(item, index) {
+  if (item?.remote) {
+    const href = item.previewUrl || `title.html?preview=anihub&anihub=${encodeURIComponent(item.anihubId || item.id || '')}`;
+    return `
+      <article class="anime-card remote-anime-card" style="--delay:${Math.min(index * 35, 280)}ms" data-id="${escapeHtml(item.id || '')}">
+        <a class="card-link" href="${escapeHtml(href)}" aria-label="Відкрити ${escapeHtml(item.title || 'тайтл')}"></a>
+        <div class="poster-wrap">
+          <img class="poster" ${item.poster ? `src="${TRANSPARENT_PIXEL}" data-src="${escapeHtml(item.poster)}"` : `src="${FALLBACK_IMAGE}"`} alt="${escapeHtml(item.title || '')}" loading="lazy" decoding="async" fetchpriority="low" width="700" height="1000" />
+          <div class="poster-shade"></div>
+          <span class="status-badge status-default">AniHub</span>
+        </div>
+        <div class="card-body">
+          <h3>${escapeHtml(item.title || 'Без назви')}</h3>
+          <div class="card-meta"><span>${escapeHtml(item.year || item.type || 'AniHub')}</span>${item.rating ? `<span>★ ${escapeHtml(item.rating)}</span>` : ''}</div>
+          <p>${escapeHtml(item.description || 'Відкрити попередній перегляд тайтлу.')}</p>
+        </div>
+      </article>`;
+  }
   const favorite = state.favorite.has(item.id);
   const liked = state.liked.has(item.id);
   const theme = statusTheme(item.status || 'Без статусу');
@@ -627,7 +666,7 @@ function renderMergeDock() {
 }
 
 function render() {
-  const items = getFiltered();
+  const items = similarModeId ? similarItems : getFiltered();
   renderVirtualCatalog(items);
 
   if (items.length === 0) {
@@ -659,7 +698,7 @@ function render() {
   document.getElementById('countAll').textContent = db.length;
   document.getElementById('countFavorite').textContent = [...state.favorite].filter(id => ids.has(id)).length;
   document.getElementById('countLiked').textContent = [...state.liked].filter(id => ids.has(id)).length;
-  catalogTitle.textContent = mergeMode ? 'Обери тайтл для об’єднання' : (state.quick === 'favorite' ? 'Вибране' : state.quick === 'liked' ? 'Улюблене' : 'Усі тайтли');
+  catalogTitle.textContent = similarModeId ? 'Схожі тайтли' : (mergeMode ? 'Обери тайтл для об’єднання' : (state.quick === 'favorite' ? 'Вибране' : state.quick === 'liked' ? 'Улюблене' : 'Усі тайтли'));
   gridViewBtn.classList.toggle('active', state.view === 'grid');
   listViewBtn.classList.toggle('active', state.view === 'list');
 }
@@ -714,6 +753,25 @@ async function loadAnime() {
   } catch (error) {
     console.error(error);
     showLoadError(error.message || 'Невідома помилка API.');
+  }
+}
+
+async function loadSimilarTitles() {
+  if (!similarModeId) return;
+  showLoading();
+  try {
+    const response = await fetch(`/api/anihub/similar?id=${encodeURIComponent(similarModeId)}`, { headers:{Accept:'application/json'}, cache:'no-store' });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    similarItems = (payload.items || []).map(item => ({ ...item, remote:true }));
+    render();
+    if (!similarItems.length) {
+      emptyState.classList.remove('hidden');
+      emptyState.innerHTML = '<div class="empty-icon">◇</div><h3>Схожих тайтлів не знайдено</h3><p>AniHub не повернув рекомендацій для цього тайтлу.</p>';
+    }
+  } catch (error) {
+    console.error(error);
+    showLoadError(error.message || 'Не вдалося отримати схожі тайтли.');
   }
 }
 
@@ -928,6 +986,106 @@ async function readNdjsonStream(response, onPacket) {
   return finalResult;
 }
 
+function coreResultUniqueLinkCount(result) {
+  const seen = new Set();
+  for (const bucket of [result?.authority, result?.catalogs]) {
+    if (!bucket || typeof bucket !== 'object') continue;
+    for (const rawItems of Object.values(bucket)) {
+      const items = Array.isArray(rawItems)
+        ? rawItems
+        : (rawItems && typeof rawItems === 'object'
+          ? (rawItems.items || rawItems.results || rawItems.links || rawItems.data || [])
+          : []);
+      for (const item of Array.isArray(items) ? items : []) {
+        const url = safeHttpUrl(item?.url || item?.link || item?.href || '');
+        if (!url) continue;
+        seen.add(url.replace(/#.*$/, '').replace(/\/$/, ''));
+      }
+    }
+  }
+  return seen.size;
+}
+
+function clearDiscoverImage() {
+  discoverImageBlob = null;
+  if (discoverImageObjectUrl) URL.revokeObjectURL(discoverImageObjectUrl);
+  discoverImageObjectUrl = '';
+  if (discoverImageFile) discoverImageFile.value = '';
+  if (discoverImagePreview) {
+    discoverImagePreview.innerHTML = '';
+    discoverImagePreview.classList.add('hidden');
+  }
+}
+
+function setDiscoverImage(blob) {
+  if (!blob || !String(blob.type || '').startsWith('image/')) return;
+  clearDiscoverImage();
+  discoverImageBlob = blob;
+  discoverImageObjectUrl = URL.createObjectURL(blob);
+  if (discoverImagePreview) {
+    discoverImagePreview.classList.remove('hidden');
+    discoverImagePreview.innerHTML = `<img src="${escapeHtml(discoverImageObjectUrl)}" alt="Кадр для визначення" /><span>Кадр готовий до пошуку</span><button type="button" data-clear-discover-image>×</button>`;
+  }
+  setDiscoverStatus('Кадр додано. Натисни «Знайти», щоб визначити аніме.', 'ok');
+}
+
+async function chooseDiscoverImage() {
+  if (navigator.clipboard?.read) {
+    try {
+      const entries = await navigator.clipboard.read();
+      for (const entry of entries) {
+        const type = entry.types.find(t => t.startsWith('image/'));
+        if (type) { setDiscoverImage(await entry.getType(type)); return; }
+      }
+    } catch {}
+  }
+  discoverImageFile?.click();
+}
+
+function screenshotResultTile(item, index) {
+  const title = item?.title || item?.titleEnglish || item?.titleRomaji || 'Невідомий тайтл';
+  const similarity = Number(item?.similarity || 0);
+  const pct = similarity > 0 ? `${Math.round(similarity * 100)}%` : '';
+  const meta = [item?.episode ? `еп. ${item.episode}` : '', item?.time ? item.time : '', pct].filter(Boolean).join(' · ');
+  const banner = item?.banner || item?.traceImage || '';
+  const poster = item?.banner || item?.poster || item?.traceImage || FALLBACK_IMAGE;
+  return `<button class="discover-result screenshot-discover-result" type="button" data-screenshot-result="${index}" ${banner ? `style="--discover-banner:url('${escapeHtml(banner).replace(/'/g, '%27')}')"` : ''}>
+    <img src="${escapeHtml(poster)}" alt="${escapeHtml(title)}" loading="lazy" />
+    <span class="discover-result-copy"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(meta || 'Kitsu metadata')}</small><em>${escapeHtml(item?.description || '')}</em></span>
+    <span class="discover-result-arrow">→</span>
+  </button>`;
+}
+
+async function executeScreenshotSearch() {
+  if (!discoverImageBlob) return;
+  discoverSelected = null;
+  resetDiscoverProgress();
+  discoverResults.innerHTML = '<div class="discover-loading"><span class="detail-loader"></span><span>Визначаю кадр та підтягаю дані Kitsu…</span></div>';
+  setDiscoverStatus('Визначаю аніме за кадром…', 'loading');
+  const form = new FormData();
+  form.append('image', discoverImageBlob, 'frame.jpg');
+  try {
+    const response = await fetch('/api/anime-identify', { method:'POST', body:form, cache:'no-store' });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    discoverResults.innerHTML = items.length ? items.map(screenshotResultTile).join('') : '<div class="discover-empty">Не вдалося впізнати аніме за цим кадром.</div>';
+    discoverResults.querySelectorAll('[data-screenshot-result]').forEach(button => button.addEventListener('click', async () => {
+      const item = items[Number(button.dataset.screenshotResult)];
+      const title = item?.title || item?.titleEnglish || item?.titleRomaji || '';
+      if (!title) return;
+      discoverSearchInput.value = title;
+      clearDiscoverImage();
+      await executeDiscoverSearch(title);
+    }));
+    setDiscoverStatus(items.length ? `Знайдено збігів: ${items.length}. Натисни на назву — далі піде звичайний пошук через Core.` : 'Збігів не знайдено.', items.length ? 'ok' : '');
+  } catch (error) {
+    console.error(error);
+    discoverResults.innerHTML = '';
+    setDiscoverStatus(error.message || 'Не вдалося визначити кадр.', 'error');
+  }
+}
+
 function openDiscoverModal() {
   if (!discoverModal) return;
   discoverModal.classList.remove('hidden');
@@ -942,6 +1100,7 @@ function closeDiscoverModal() {
   discoverModal.setAttribute('aria-hidden', 'true');
   document.body.classList.remove('modal-open');
   discoverSelected = null;
+  clearDiscoverImage();
   if (discoverResults) discoverResults.innerHTML = '';
   resetDiscoverProgress();
   if (discoverSetup) {
@@ -1293,8 +1452,24 @@ async function processSelectedSource(item, button) {
     if (!ingestResponse.ok) throw new Error(payload.error || `Turso ingest HTTP ${ingestResponse.status}`);
     if (!payload.item?.id) throw new Error('Turso не повернув ID тайтлу.');
 
-    updateDiscoverProgress({ percent: 100, stage: 'done', message: payload.existing ? 'Дані тайтлу оновлено.' : 'Тайтл додано у Turso.' });
-    setDiscoverStatus(payload.existing ? 'Тайтл уже був у Turso — дані оновлено.' : 'Повний пошук завершено, тайтл додано у Turso.', 'ok');
+    const expectedLinks = coreResultUniqueLinkCount(coreResult);
+    const receivedLinks = Number(payload?.imported?.receivedLinks ?? -1);
+    const storedLinks = Number(payload?.imported?.storedLinks ?? payload?.item?.links?.length ?? -1);
+    const catalogMismatches = Array.isArray(payload?.imported?.catalogMismatches) ? payload.imported.catalogMismatches : [];
+    if (catalogMismatches.length) {
+      const details = catalogMismatches.map(x => `${x.domain}: core=${x.reported}, JSON=${x.parsed}`).join('; ');
+      throw new Error(`Core повідомив більше посилань, ніж поклав у фінальний JSON: ${details}. Turso round-trip перевірено окремо.`);
+    }
+    if (expectedLinks > 0 && receivedLinks >= 0 && receivedLinks < expectedLinks) {
+      throw new Error(`Site ingest втратив посилання: Core передав ${expectedLinks}, Worker прийняв ${receivedLinks}. Запис зупинено для перевірки.`);
+    }
+    if (expectedLinks > 0 && storedLinks >= 0 && storedLinks < expectedLinks) {
+      throw new Error(`Turso зберіг не всі посилання: Core передав ${expectedLinks}, у записі ${storedLinks}.`);
+    }
+
+    const linkSummary = expectedLinks > 0 ? ` Посилань: ${storedLinks >= 0 ? storedLinks : expectedLinks}.` : '';
+    updateDiscoverProgress({ percent: 100, stage: 'done', message: (payload.existing ? 'Дані тайтлу оновлено.' : 'Тайтл додано у Turso.') + linkSummary });
+    setDiscoverStatus((payload.existing ? 'Тайтл уже був у Turso — дані оновлено.' : 'Повний пошук завершено, тайтл додано у Turso.') + linkSummary, 'ok');
     await new Promise(resolve => setTimeout(resolve, 650));
     location.href = `title.html?id=${encodeURIComponent(payload.item.id)}`;
   } catch (error) {
@@ -1386,16 +1561,65 @@ function renderSettingsStatuses() {
   }).join('');
 }
 
+function renderSettingsPlayer() {
+  const configured = Boolean(apiOptions.playerSettings?.mikaiApiKeyConfigured);
+  const sendToCore = configured && Boolean(apiOptions.playerSettings?.mikaiSendToCore);
+  if (mikaiKeyState) {
+    mikaiKeyState.textContent = configured
+      ? `Ключ збережено — Mikai працює без гостьового ліміту${sendToCore ? ' · передається у Core' : ''}`
+      : 'Ключ не збережено — Mikai працює з публічними обмеженнями';
+    mikaiKeyState.classList.toggle('configured', configured);
+  }
+  if (mikaiApiKeyInput) {
+    mikaiApiKeyInput.value = '';
+    mikaiApiKeyInput.placeholder = configured ? '•••••••••••• (збережено)' : 'mk_...';
+  }
+  if (mikaiCoreForwardToggle) {
+    mikaiCoreForwardToggle.checked = sendToCore;
+    mikaiCoreForwardToggle.disabled = !configured;
+    mikaiCoreForwardToggle.closest('.player-core-forward-row')?.classList.toggle('disabled', !configured);
+  }
+}
+
+function renderSettingsBanner() {
+  if (bannerTrailerToggle) bannerTrailerToggle.checked = Boolean(apiOptions.bannerSettings?.trailerEnabled);
+}
+
+async function saveBannerTrailerSetting(enabled) {
+  if (bannerTrailerToggle) bannerTrailerToggle.disabled = true;
+  setSettingsStatus(enabled ? 'Вмикаю трейлер замість банера…' : 'Повертаю статичний банер…', 'loading');
+  try {
+    const response = await fetch('/api/catalog-settings', {
+      method:'PATCH', headers:{'Content-Type':'application/json',Accept:'application/json'},
+      body:JSON.stringify({ trailerEnabled:Boolean(enabled) }), cache:'no-store',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    apiOptions = { ...apiOptions, ...payload, bannerSettings: payload.bannerSettings || { trailerEnabled:Boolean(payload.trailerEnabled) } };
+    renderSettingsBanner();
+    setSettingsStatus(enabled ? 'Трейлер буде використовуватися як фон, коли він є у тайтлу.' : 'Фоном знову буде банер.', 'ok');
+  } catch (error) {
+    renderSettingsBanner();
+    setSettingsStatus(error.message || 'Не вдалося змінити фон тайтлу.', 'error');
+  } finally {
+    if (bannerTrailerToggle) bannerTrailerToggle.disabled = false;
+  }
+}
+
 function switchSettingsTab(tab) {
-  const target = tab === 'statuses' ? 'statuses' : 'groups';
+  const target = ['groups','statuses','player','banner'].includes(tab) ? tab : 'groups';
   settingsModal?.querySelectorAll('[data-settings-tab]').forEach(button => button.classList.toggle('active', button.dataset.settingsTab === target));
   settingsModal?.querySelectorAll('[data-settings-panel]').forEach(panel => panel.classList.toggle('hidden', panel.dataset.settingsPanel !== target));
+  if (target === 'player') renderSettingsPlayer();
+  if (target === 'banner') renderSettingsBanner();
 }
 
 function openSettingsModal() {
   if (!settingsModal) return;
   renderSettingsGroups();
   renderSettingsStatuses();
+  renderSettingsPlayer();
+  renderSettingsBanner();
   switchSettingsTab(settingsModal.querySelector('[data-settings-tab].active')?.dataset.settingsTab || 'groups');
   setSettingsStatus('');
   settingsModal.classList.remove('hidden');
@@ -1428,12 +1652,65 @@ async function saveGroupSetting(row) {
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     apiOptions = { ...apiOptions, ...payload, groups: payload.groups || apiOptions.groups || [], groupOptions: payload.groupOptions || apiOptions.groupOptions || [], statusGroups: payload.statusGroups || apiOptions.statusGroups || {}, starredGroups: payload.starredGroups || apiOptions.starredGroups || [] };
     setSettingsStatus(`Готово. Оновлено записів: ${payload.migrated || 0}.`, 'ok');
-    await loadAnime();
+    await loadAnime().then(() => { if (similarModeId) loadSimilarTitles(); });
     renderSettingsGroups();
     renderSettingsStatuses();
   } catch (error) {
     setSettingsStatus(error.message || 'Не вдалося оновити групу.', 'error');
   } finally { button.disabled = false; }
+}
+
+async function saveMikaiApiKey(value) {
+  const key = String(value || '').trim();
+  if (key && !/^mk_\S+$/i.test(key)) {
+    setSettingsStatus('Mikai API key має починатися з mk_.', 'error');
+    mikaiApiKeyInput?.focus();
+    return;
+  }
+  setSettingsStatus(key ? 'Зберігаю Mikai API key у Turso…' : 'Видаляю Mikai API key…', 'loading');
+  try {
+    const response = await fetch('/api/catalog-settings', {
+      method:'PATCH', headers:{'Content-Type':'application/json',Accept:'application/json'},
+      body:JSON.stringify({ mikaiApiKey:key }), cache:'no-store',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    apiOptions = { ...apiOptions, ...payload, playerSettings: payload.playerSettings || { mikaiApiKeyConfigured:Boolean(payload.mikaiApiKeyConfigured), mikaiSendToCore:Boolean(payload.mikaiSendToCore) } };
+    renderSettingsPlayer();
+    setSettingsStatus(key ? 'Mikai API key збережено.' : 'Mikai API key очищено.', 'ok');
+  } catch (error) {
+    setSettingsStatus(error.message || 'Не вдалося зберегти Mikai API key.', 'error');
+  }
+}
+
+async function saveMikaiCoreForward(enabled) {
+  const configured = Boolean(apiOptions.playerSettings?.mikaiApiKeyConfigured);
+  if (enabled && !configured) {
+    if (mikaiCoreForwardToggle) mikaiCoreForwardToggle.checked = false;
+    setSettingsStatus('Спочатку збережи Mikai API key.', 'error');
+    return;
+  }
+  if (mikaiCoreForwardToggle) mikaiCoreForwardToggle.disabled = true;
+  setSettingsStatus(enabled ? 'Вмикаю передачу Mikai API key у Core…' : 'Вимикаю передачу Mikai API key у Core…', 'loading');
+  try {
+    const response = await fetch('/api/catalog-settings', {
+      method:'PATCH', headers:{'Content-Type':'application/json',Accept:'application/json'},
+      body:JSON.stringify({ mikaiSendToCore:Boolean(enabled) }), cache:'no-store',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    apiOptions = { ...apiOptions, ...payload, playerSettings: payload.playerSettings || {
+      mikaiApiKeyConfigured:Boolean(payload.mikaiApiKeyConfigured),
+      mikaiSendToCore:Boolean(payload.mikaiSendToCore),
+    } };
+    renderSettingsPlayer();
+    setSettingsStatus(enabled ? 'Mikai API key буде передаватися у Core.' : 'Передачу Mikai API key у Core вимкнено.', 'ok');
+  } catch (error) {
+    renderSettingsPlayer();
+    setSettingsStatus(error.message || 'Не вдалося змінити передачу ключа у Core.', 'error');
+  } finally {
+    if (mikaiCoreForwardToggle) mikaiCoreForwardToggle.disabled = !Boolean(apiOptions.playerSettings?.mikaiApiKeyConfigured);
+  }
 }
 
 async function saveStatusSetting(row) {
@@ -1458,11 +1735,17 @@ async function saveStatusSetting(row) {
   } finally { button.disabled = false; }
 }
 
+mikaiCoreForwardToggle?.addEventListener('change', () => saveMikaiCoreForward(mikaiCoreForwardToggle.checked));
+bannerTrailerToggle?.addEventListener('change', () => saveBannerTrailerSetting(bannerTrailerToggle.checked));
 openSettings?.addEventListener('click', openSettingsModal);
 settingsModal?.addEventListener('click', e => {
   if (e.target.closest('[data-settings-close]')) return closeSettingsModal();
   const tab = e.target.closest('[data-settings-tab]');
   if (tab) { switchSettingsTab(tab.dataset.settingsTab); return; }
+  const saveMikai = e.target.closest('[data-save-mikai-key]');
+  if (saveMikai) { saveMikaiApiKey(mikaiApiKeyInput?.value || ''); return; }
+  const clearMikai = e.target.closest('[data-clear-mikai-key]');
+  if (clearMikai) { saveMikaiApiKey(''); return; }
   const star = e.target.closest('[data-group-star]');
   if (star) {
     const row = star.closest('[data-group-setting]');
@@ -1490,12 +1773,18 @@ settingsModal?.addEventListener('click', e => {
   if (save) saveGroupSetting(save.closest('[data-group-setting]'));
 });
 
+openRandomTitle?.addEventListener('click', () => { location.href = 'title.html?random=1'; });
 openAddTitle?.addEventListener('click', openDiscoverModal);
+discoverImagePaste?.addEventListener('click', chooseDiscoverImage);
+discoverImageFile?.addEventListener('change', () => setDiscoverImage(discoverImageFile.files?.[0]));
+discoverImagePreview?.addEventListener('click', e => { if (e.target.closest('[data-clear-discover-image]')) clearDiscoverImage(); });
+discoverModal?.addEventListener('paste', e => { const file = [...(e.clipboardData?.files || [])].find(f => String(f.type || '').startsWith('image/')); if (file) { e.preventDefault(); setDiscoverImage(file); } });
 discoverModal?.addEventListener('click', e => {
   if (e.target.closest('[data-discover-close]')) closeDiscoverModal();
 });
 discoverSearchForm?.addEventListener('submit', async e => {
   e.preventDefault();
+  if (discoverImageBlob) return executeScreenshotSearch();
   const q = discoverSearchInput.value.trim();
   if (!q) return discoverSearchInput.focus();
   await executeDiscoverSearch(q);

@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "2.11.3"
+APP_VERSION = "2.21.2"
 DEFAULT_RESULT_WEBHOOK_URL = "https://myster-anime.pages.dev/api/ingest"
 
 USER_AGENT = (
@@ -79,8 +79,9 @@ SEARCH_ROUTES: dict[str, list[str]] = {
         "https://jut-su.net/index.php?do=search&subaction=search&story={q}",
     ],
     "ru.yummyani.me": [
-        "https://ru.yummyani.me/search?word={q}",
-        "https://ru.yummyani.me/search?q={q}",
+        # /catalog?search returns the actual filtered catalog. The WordPress-style
+        # /?s= route returns a ~0.9 MB generic page and has not produced useful
+        # matches in profiling, so avoid downloading it for every alias.
         "https://ru.yummyani.me/catalog?search={q}",
     ],
     "crunchyroll.com": ["https://www.crunchyroll.com/search?q={q}"],
@@ -89,16 +90,17 @@ SEARCH_ROUTES: dict[str, list[str]] = {
         "https://jutsu.tv/index.php?do=search&subaction=search&story={q}",
         "https://jutsu.tv/?s={q}",
     ],
-    "jut.su": ["https://jut.su/anime/?search={q}", "https://jut.su/?s={q}"],
+    "jut.su": ["https://jut.su/anime/?search={q}"],
     "animego.studio": [
         "https://animego.studio/index.php?do=search&subaction=search&story={q}",
         "https://animego.studio/?s={q}",
         "https://animego.studio/search?q={q}",
     ],
     "anilibria.tv": [
+        # aniliberty.top and anilibria.top are mirrors and returned byte-identical
+        # catalog pages in profiling. Use the preferred host; direct search falls
+        # back to the mirror only on transport/server failure.
         "https://aniliberty.top/anime/catalog?search={q}",
-        "https://anilibria.top/anime/catalog?search={q}",
-        "https://anilibria.tv/search?query={q}",
     ],
     "uaserials.com": ["https://uaserials.com/search/{q_path}/"],
     "uachan.com": [
@@ -110,9 +112,10 @@ SEARCH_ROUTES: dict[str, list[str]] = {
         "https://anihub.in.ua/anime?search={q}",
     ],
     "amanogawa.space": [
+        # Keep one canonical probe. If the search endpoint itself is 404, the
+        # per-run dead-route guard stops trying new aliases against the same
+        # unavailable route.
         "https://amanogawa.space/search?q={q}",
-        "https://amanogawa.space/catalog?search={q}",
-        "https://amanogawa.space/?s={q}",
     ],
     "animeon.club": [
         "https://animeon.club/anime?search={q}",
@@ -120,8 +123,8 @@ SEARCH_ROUTES: dict[str, list[str]] = {
         "https://animeon.club/?s={q}",
     ],
     "anidesu.net": [
+        # Native POST search is blocked with 403; the public GET search is usable.
         "https://anidesu.net/?s={q}",
-        "https://anidesu.net/index.php?do=search&subaction=search&story={q}",
     ],
     "mikai.me": ["https://mikai.me/catalog?search={q}"],
     "anitube.in.ua": [
@@ -135,6 +138,7 @@ SEARCH_HINT_RE = re.compile(r"search|find|пошук|знайти|поиск|н�
 NAV_RE = re.compile(r"/(?:search|find|login|register|forum|news|schedule|catalog|browse|users?|genres?|studios?|characters?)(?:/|$)", re.I)
 SEASON_RE = re.compile(
     r"(?:\b(?:season|сезон|сезони|часть|частина|part|cour|arc|арка|глава|hen)\b|"
+    r"\b(?:первый|перший|второй|другий|третий|третій|четвертый|четвёртый|четвертий)\s+(?:сезон|часть|частина)\b|"
     r"\b\d+(?:st|nd|rd|th)\b|\b\d+\s*(?:season|сезон|часть|частина|part)\b)",
     re.I,
 )
@@ -149,7 +153,7 @@ CATALOG_NOISE_TITLES = {
     "надприродне", "супер сила", "суперсила", "подборки", "добірки", "популярные франшизы",
     "популярні франшизи", "франшизы", "франшизи", "с субтитрами", "із субтитрами", "рандом",
     "telegram", "tiktok", "підтримка", "поддержка", "донат", "головна", "главная", "новинки",
-    "інше", "другое", "профіль", "профиль", "anihub", "аніхаб", "анихаб",
+    "інше", "другое", "профіль", "профиль", "anihub", "аніхаб", "анихаб", "буденність",
 }
 
 TITLE_PATH_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
@@ -180,6 +184,10 @@ class InputPayload(BaseModel):
     url: str | None = ""
     status: str | None = ""
     group: str | None = ""
+    # Optional Mikai Public API key forwarded server-to-server by the site.
+    # Missing/blank/invalid-looking values are ignored, so old clients and
+    # public no-key mode keep working unchanged.
+    mikai_api_key: str | None = ""
     # Backfill/site clients may ask the serverless core to skip AniList GraphQL
     # and perform that one hop from the user's own network instead.  AniList can
     # return HTTP 403 to shared cloud/serverless egress while the same public
@@ -199,10 +207,17 @@ class AuthorityData:
     original: str = ""
     english: str = ""
     native: str = ""
+    russian: str = ""
     description: str = ""
     cover: str = ""
     cover_source: str = ""
     banner: str = ""
+    trailer_id: str = ""
+    trailer_site: str = ""
+    trailer_thumbnail: str = ""
+    trailer_url: str = ""
+    trailer_embed_url: str = ""
+    trailer_source: str = ""
     genres: dict[str, list[str]] = field(default_factory=lambda: {site: [] for site in AUTHORITY_SITES})
     themes: dict[str, list[str]] = field(default_factory=lambda: {site: [] for site in ["myanimelist.net", "shikimori.io"]})
     anilist_id: int | None = None
@@ -288,6 +303,43 @@ def source_domain(url: str | None) -> str:
         return ""
 
 
+def media_trailer_url(site: str, trailer_id: str) -> str:
+    site = clean_text(site).lower()
+    trailer_id = clean_text(trailer_id)
+    if not trailer_id:
+        return ""
+    if trailer_id.startswith(("http://", "https://")):
+        return trailer_id
+    if site in {"youtube", "youtu.be"}:
+        return f"https://www.youtube.com/watch?v={quote(trailer_id, safe='-_')}"
+    if site in {"dailymotion", "dai.ly"}:
+        return f"https://www.dailymotion.com/video/{quote(trailer_id, safe='-_')}"
+    return ""
+
+
+def media_trailer_embed_url(site: str, trailer_id: str) -> str:
+    site = clean_text(site).lower()
+    trailer_id = clean_text(trailer_id)
+    if not trailer_id:
+        return ""
+    if site in {"youtube", "youtu.be"}:
+        return f"https://www.youtube.com/embed/{quote(trailer_id, safe='-_')}"
+    if site in {"dailymotion", "dai.ly"}:
+        return f"https://www.dailymotion.com/embed/video/{quote(trailer_id, safe='-_')}"
+    return ""
+
+
+def trailer_id_from_url(url: str) -> str:
+    url = clean_text(url)
+    if not url:
+        return ""
+    match = re.search(r"(?:youtu\.be/|youtube\.com/(?:watch\?v=|embed/))([A-Za-z0-9_-]{6,})", url, re.I)
+    if match:
+        return match.group(1)
+    match = re.search(r"(?:dailymotion\.com/(?:video|embed/video)/|dai\.ly/)([A-Za-z0-9]+)", url, re.I)
+    return match.group(1) if match else ""
+
+
 def compact_url(url: str) -> str:
     try:
         parsed = urlparse(url)
@@ -311,7 +363,8 @@ def is_navigation_url(url: str) -> bool:
 
 
 def is_catalog_noise_title(value: str) -> bool:
-    key = normalize_title(value)
+    text = clean_title(value)
+    key = normalize_title(text)
     if not key:
         return True
     if key in {normalize_title(x) for x in CATALOG_NOISE_TITLES}:
@@ -319,6 +372,21 @@ def is_catalog_noise_title(value: str) -> bool:
     if re.fullmatch(r"(?:19|20)\d{2}(?: год| рік)?", key):
         return True
     if re.fullmatch(r"\d+(?:[.,]\d+)?", key):
+        return True
+    # Ratings, rip/quality labels and bare site/brand names are metadata, not aliases.
+    if re.fullmatch(r"\d+(?:[.,]\d+)?\s*/\s*10(?:\s*\([^)]*\))?", text, re.I):
+        return True
+    if re.search(r"\b(?:WEB[- .]?DL|WEB[- .]?DLRip|BDRip|BluRay|HDRip|DVDRip|1080p|720p|2160p|4K)\b", text, re.I):
+        return True
+    if re.fullmatch(r"(?:animevost|anitube|animego|anihub|mikai|shikimori|myanimelist|anilist)", key, re.I):
+        return True
+    # Long SEO sentences such as "watch ... online free" must never drive searches.
+    seo_hits = re.findall(r"(?:дивитися|смотреть|watch|online|онлайн|безкоштовно|бесплатно|серій|серии|episodes?)", text, re.I)
+    if (len(text) > 150 and seo_hits) or (len(text) > 85 and len(seo_hits) >= 2):
+        return True
+    # Catalog-generated SEO labels such as "... смотреть на джутсу" are useful
+    # for display/debugging but must never become cross-catalog search aliases.
+    if len(text) > 42 and re.search(r"\b(?:дивитися|смотреть|watch|онлайн|online)\b", text, re.I):
         return True
     return False
 
@@ -479,6 +547,219 @@ def title_match_kind(candidate: str, aliases: list[str]) -> str | None:
             if suffix and not EPISODE_RE.search(suffix) and SEASON_RE.search(suffix):
                 return "season"
     return None
+
+
+
+def season_number(value: str) -> int | None:
+    """Return an explicit *season* number, never a cour/part number.
+
+    2.18 treated ``Part 2`` / ``Частина 2`` as season 2.  That polluted family
+    roots and could turn split cours, movies or specials into fake seasons.
+    """
+    text = clean_title(value).casefold()
+    if not text:
+        return None
+    text = re.sub(r"\bcезон", "сезон", text, flags=re.I)
+    patterns = [
+        r"\b(?:season|сезон(?:и)?)\s*[:#.-]?\s*(\d{1,2})\b",
+        r"\b(\d{1,2})\s*(?:st|nd|rd|th)?\s*(?:season|сезон(?:и)?)\b",
+        r"\bs\s*(\d{1,2})\b",
+        r"第\s*(\d{1,2})\s*期",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            try:
+                number = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= number <= 30:
+                return number
+    word_ordinals = {
+        "первый": 1, "первого": 1, "перший": 1, "перша": 1,
+        "второй": 2, "второго": 2, "другий": 2, "друга": 2,
+        "третий": 3, "третьего": 3, "третій": 3, "третя": 3,
+        "четвертый": 4, "четвёртый": 4, "четвертий": 4,
+        "пятый": 5, "п'ятий": 5, "п’ятий": 5,
+        "шестой": 6, "шостий": 6,
+        "седьмой": 7, "сьомий": 7,
+        "восьмой": 8, "восьмий": 8,
+    }
+    for word, number in word_ordinals.items():
+        if re.search(rf"\b{re.escape(word)}\s+(?:season|сезон)\b", text, re.I):
+            return number
+    return None
+
+
+def part_number(value: str) -> int | None:
+    """Return an explicit split-cour/part number without confusing it with season."""
+    text = clean_title(value).casefold()
+    if not text:
+        return None
+    for pattern in (
+        r"\b(?:part|cour|часть|частина)\s*[:#.-]?\s*(\d{1,2})\b",
+        r"\b(\d{1,2})\s*(?:st|nd|rd|th)?\s*(?:part|cour|часть|частина)\b",
+    ):
+        match = re.search(pattern, text, re.I)
+        if match:
+            number = int(match.group(1))
+            if 1 <= number <= 30:
+                return number
+    return None
+
+
+def season_family_title(value: str) -> str:
+    """Return a stable franchise root for a seasonal title.
+
+    Split-cour suffixes are stripped first and the season marker second, so
+    ``Season 2 Part 2`` and ``(сезон 2, частина 2)`` both reduce to the same root.
+    """
+    text = clean_title(value)
+    if not text:
+        return ""
+    text = re.sub(r"\b[Cc]езон", "сезон", text)
+    previous = None
+    while previous != text:
+        previous = text
+        # Parenthesized combined markers: ``(сезон 2, частина 2)``.
+        text = re.sub(
+            r"\s*[\[(]\s*(?:season|сезон(?:и)?)\s*[:#.-]?\s*\d{1,2}\s*(?:[,;/]\s*(?:part|cour|часть|частина)\s*[:#.-]?\s*\d{1,2})?\s*[\])]\s*$",
+            "", text, flags=re.I,
+        )
+        # Strip a trailing split-cour marker, then loop so the preceding season
+        # marker can be removed on the next pass.
+        text = re.sub(
+            r"\s*[:,.\-–—]?\s*[\[(]?\s*(?:part|cour|часть|частина)\s*[:#.-]?\s*\d{1,2}\s*[\])]?[\s.!:;,_\-–—]*$",
+            "", text, flags=re.I,
+        )
+        text = re.sub(
+            r"\s*[:,.\-–—]?\s*[\[(]?\s*\d{1,2}\s*(?:st|nd|rd|th)?\s*(?:part|cour|часть|частина)\s*[\])]?[\s.!:;,_\-–—]*$",
+            "", text, flags=re.I,
+        )
+        text = re.sub(
+            r"\s*[:\-–—]?\s*[\[(]?\s*(?:season|сезон(?:и)?)\s*[:#.-]?\s*\d{1,2}\s*[\])]?[\s.!:;,_\-–—]*$",
+            "", text, flags=re.I,
+        )
+        text = re.sub(
+            r"\s*[:\-–—]?\s*[\[(]?\s*\d{1,2}\s*(?:st|nd|rd|th)?\s*(?:season|сезон(?:и)?)\s*[\])]?[\s.!:;,_\-–—]*$",
+            "", text, flags=re.I,
+        )
+        text = re.sub(r"\s*[:\-–—]?\s+s\s*\d{1,2}\s*$", "", text, flags=re.I)
+        text = re.sub(
+            r"\s*[:\-–—]?\s*[\[(]?\s*(?:первый|перший|второй|другий|третий|третій|четвертый|четвёртый|четвертий|пятый|п'ятий|п’ятий|шестой|шостий|седьмой|сьомий|восьмой|восьмий)\s+(?:season|сезон)\s*[\])]?[\s.!:;,_\-–—]*$",
+            "", text, flags=re.I,
+        )
+        text = re.sub(r"\s*第\s*\d{1,2}\s*期\s*$", "", text, flags=re.I)
+        text = clean_title(text).rstrip(" :-–—,.;")
+    return clean_title(text).rstrip(" :-–—,.;")
+
+
+def season_family_roots(values: Iterable[str], *, limit: int = 12) -> list[str]:
+    """Extract stable season-free roots only from titles that explicitly name a season.
+
+    Split-cour/part markers may be present, but they never define a season by
+    themselves.  This keeps Season 2 Part 2 attached to season 2 while avoiding
+    fake roots such as a bare "Part 2" title.
+    """
+    roots: list[str] = []
+    for value in values:
+        value = clean_title(value)
+        if not value:
+            continue
+        explicit = season_number(value) is not None or bool(re.search(r"第\s*\d{1,2}\s*期", value))
+        if not explicit:
+            continue
+        root = season_family_title(value)
+        if root and normalize_title(root) != normalize_title(value) and len(root) >= 3:
+            roots.append(root)
+    return unique_strings(roots, limit=limit)
+
+
+_SEASON_FAMILY_EXTRA_RE = re.compile(
+    r"(?:\b(?:movie|film|ova|ona|special|specials|recap|summary|digest|compilation|spin[ -]?off|gaiden)\b"
+    r"|\b(?:фильм|фільм|спецвыпуск|спецвипуск|спецвыпуски|спецвипуски|переказ|пересказ|відступ)\b"
+    r"|劇場版)", re.I,
+)
+
+
+def _strip_episode_metadata(value: str) -> str:
+    text = clean_title(value)
+    # Remove only trailing bracket counters/OVA counters; do not erase meaningful
+    # parenthesized season markers.
+    text = re.sub(r"(?:\s*\[[^\]]*(?:\d+\s*[-–]\s*\d+|\d+\s*(?:из|з|of)\s*\d+|OVA\s*\d+)[^\]]*\])+$", "", text, flags=re.I)
+    return clean_title(text)
+
+
+def is_season_family_member(value: str, roots: Iterable[str]) -> bool:
+    """True only for the main TV season line, not movies/OVAs/recaps/spin-offs."""
+    text = _strip_episode_metadata(value)
+    roots = [clean_title(root) for root in roots if clean_title(root)]
+    if not text or not roots:
+        return False
+
+    def single(candidate: str) -> bool:
+        candidate = clean_title(candidate)
+        if not candidate or _SEASON_FAMILY_EXTRA_RE.search(candidate):
+            return False
+        number = season_number(candidate)
+        family = season_family_title(candidate) if number is not None else candidate
+        if number is None:
+            # Some catalogs write only a trailing number (``... слиз 3``). Accept
+            # it only when stripping that number yields a very strong root match.
+            bare = re.search(r"^(.*?)\s+([2-9]|[12]\d|30)\s*$", candidate)
+            if bare:
+                bare_family = clean_title(bare.group(1))
+                bare_best = max((title_relation_score(bare_family, root) for root in roots), default=0.0)
+                bare_exact = any(normalize_title(bare_family) == normalize_title(root) for root in roots)
+                if bare_exact or bare_best >= 0.90:
+                    return True
+        best = max((title_relation_score(family, root) for root in roots), default=0.0)
+        exact_root = any(normalize_title(family) == normalize_title(root) for root in roots)
+        if number is not None:
+            return exact_root or best >= 0.76
+        return exact_root or best >= 0.94
+
+    # AnimeVost and similar catalogs expose ``RU / Romaji [episodes]``. Either
+    # half may be the clean seasonal title; evaluate them independently so the
+    # bracketed OVA counter does not make season 1 look like an OVA entry.
+    if " / " in text:
+        parts = [clean_title(part) for part in text.split(" / ") if clean_title(part)]
+        if any(single(part) for part in parts):
+            return True
+    return single(text)
+
+
+def catalog_titles_cover_alias(existing_titles: Iterable[str], alias: str) -> bool:
+    """Whether existing catalog results already cover a discovered season alias.
+
+    This treats a plain base title as season 1 and understands both "2 сезон" and
+    "сезон 2", preventing needless replay of catalogs that already returned the
+    same season with a different suffix style.
+    """
+    alias = clean_title(alias)
+    if not alias:
+        return True
+    target_num = season_number(alias)
+    target_family = season_family_title(alias)
+    for existing in existing_titles:
+        existing = clean_title(existing)
+        if not existing:
+            continue
+        if normalize_title(existing) == normalize_title(alias):
+            return True
+        if title_match_kind(existing, [alias]) == "exact" or title_match_kind(alias, [existing]) == "exact":
+            return True
+        existing_num = season_number(existing)
+        existing_family = season_family_title(existing)
+        family_score = title_relation_score(existing_family or existing, target_family or alias)
+        if target_num is not None:
+            # A base title without an explicit suffix is the first season.
+            effective_existing_num = existing_num if existing_num is not None else 1
+            if effective_existing_num == target_num and family_score >= 0.72:
+                return True
+        elif family_score >= 0.9:
+            return True
+    return False
 
 
 def page_primary_title(soup: BeautifulSoup) -> str:
@@ -752,8 +1033,20 @@ class Core:
             follow_redirects=True,
             timeout=httpx.Timeout(45.0, connect=20.0),
         )
-        self.http_sem = asyncio.Semaphore(24)
-        self.google_sem = asyncio.Semaphore(6)
+        # HTML parsing is CPU-heavy on a 1-vCPU serverless function. Keep enough
+        # network parallelism to hide latency without creating dozens of queued
+        # page verifications at once.
+        self.http_sem = asyncio.Semaphore(12)
+        self.google_sem = asyncio.Semaphore(1)
+        self._google_disabled_reason = ""
+        self._request_cache: dict[str, httpx.Response] = {}
+        self._request_inflight: dict[str, asyncio.Task[httpx.Response]] = {}
+        self._request_cache_lock = asyncio.Lock()
+        self._domain_statuses: dict[str, list[int]] = {}
+        self._dead_search_domains: set[str] = set()
+        self._season_family_mode = False
+        self._season_family_roots: list[str] = []
+        self.mikai_api_key = ""
         self.verbose = clean_text(os.getenv("ANIME_CORE_VERBOSE")).lower() in {"1", "true", "yes", "on"}
 
     def log(self, message: str) -> None:
@@ -764,8 +1057,79 @@ class Core:
         await self.client.aclose()
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        async with self.http_sem:
-            return await self.client.request(method, url, **kwargs)
+        """HTTP request with per-run GET memoization and single-flight deduplication.
+
+        The catalog pipeline often reaches the same API/search URL through several
+        aliases or fallbacks. Reusing a completed response is safe for the duration
+        of one run and prevents duplicate network traffic without removing the
+        intentional second pass with a genuinely new localized title.
+        """
+        method_u = method.upper()
+        no_cache = bool(kwargs.pop("_no_cache", False))
+
+        async def perform() -> httpx.Response:
+            async with self.http_sem:
+                response = await self.client.request(method_u, url, **kwargs)
+            try:
+                host = (urlparse(str(response.url)).hostname or urlparse(url).hostname or "").lower()
+                if host:
+                    self._domain_statuses.setdefault(host.removeprefix("www."), []).append(int(response.status_code))
+            except Exception:
+                pass
+            return response
+
+        if method_u != "GET" or no_cache:
+            return await perform()
+
+        params = kwargs.get("params")
+        try:
+            query_key = str(httpx.QueryParams(params or {}))
+        except Exception:
+            query_key = repr(params)
+        headers = kwargs.get("headers") or {}
+        accept = clean_text(headers.get("Accept")) if isinstance(headers, dict) else ""
+        cache_key = f"GET|{url}|{query_key}|{accept}"
+
+        cached = self._request_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        owner = False
+        async with self._request_cache_lock:
+            cached = self._request_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            task = self._request_inflight.get(cache_key)
+            if task is None:
+                task = asyncio.create_task(perform())
+                self._request_inflight[cache_key] = task
+                owner = True
+
+        try:
+            response = await task
+            if response.status_code in {200, 203, 204, 404}:
+                self._request_cache[cache_key] = response
+            return response
+        finally:
+            if owner:
+                async with self._request_cache_lock:
+                    if self._request_inflight.get(cache_key) is task:
+                        self._request_inflight.pop(cache_key, None)
+
+    def domain_hard_blocked(self, domain: str) -> bool:
+        statuses: list[int] = []
+        for host, values in self._domain_statuses.items():
+            if host_allowed(host, domain):
+                statuses.extend(values)
+        if not statuses:
+            return False
+        recent = statuses[-8:]
+        # Crunchyroll consistently blocks this server-side flow with 403, so one
+        # explicit search response is sufficient evidence for the current run.
+        # Other catalogs keep the two-response threshold to tolerate a transient
+        # access error before they are considered hard-blocked.
+        minimum = 1 if domain == "crunchyroll.com" else 2
+        return len(recent) >= minimum and all(code in {401, 403, 429} for code in recent)
 
     async def authority_request(
         self, method: str, url: str, *, retries: int = 4, base_delay: float = 0.7, **kwargs: Any
@@ -801,8 +1165,15 @@ class Core:
     async def google_site_search_detailed(
         self, domain: str, title: str, limit: int = 12
     ) -> tuple[list[dict[str, str]], str]:
+        # Once Google rate-limits / blocks the shared IP, the remaining queued
+        # fallbacks in this run cannot recover by repeating the same request.
+        # Stop the fan-out immediately instead of spending 20+ requests on 429s.
+        if self._google_disabled_reason:
+            return [], self._google_disabled_reason
         query = f'site:{domain} "{title}"'
         async with self.google_sem:
+            if self._google_disabled_reason:
+                return [], self._google_disabled_reason
             try:
                 response = await self.request(
                     "GET",
@@ -824,11 +1195,13 @@ class Core:
                 return [], f"Google request failed: {error}"
 
         if response.status_code == 429:
-            return [], "Google повернув HTTP 429. Спробуй пошук ще раз через кілька секунд."
+            self._google_disabled_reason = "Google повернув HTTP 429; fallback Google вимкнено до кінця цього запуску."
+            return [], self._google_disabled_reason
         if response.status_code >= 400:
             return [], f"Google повернув HTTP {response.status_code}."
         if re.search(r"unusual traffic|/sorry/|detected unusual traffic", response.text, re.I):
-            return [], "Google тимчасово заблокував автоматичний пошук для IP Vercel."
+            self._google_disabled_reason = "Google тимчасово заблокував автоматичний пошук для IP Vercel; fallback вимкнено до кінця запуску."
+            return [], self._google_disabled_reason
 
         soup = BeautifulSoup(response.text, "html.parser")
         found: list[dict[str, str]] = []
@@ -1103,6 +1476,7 @@ class Core:
             genres
             description(asHtml: false)
             bannerImage
+            trailer { id site thumbnail }
             coverImage { extraLarge large medium }
           }
         }
@@ -1125,11 +1499,13 @@ class Core:
           Page(page: 1, perPage: 10) {
             media(search: $search, type: ANIME) {
               id idMal
+              format
               title { romaji english native }
               synonyms
               genres
               description(asHtml: false)
               bannerImage
+              trailer { id site thumbnail }
               coverImage { extraLarge large medium }
             }
           }
@@ -1163,6 +1539,7 @@ class Core:
             genres
             description(asHtml: false)
             bannerImage
+            trailer { id site thumbnail }
             coverImage { extraLarge large medium }
           }
         }
@@ -1462,7 +1839,14 @@ class Core:
             merged.extend(names)
         return {"all": self.taxonomy_names(merged, limit=80), "sources": clean_sources}
 
-    async def resolve_authorities(self, payload: InputPayload, extra_queries: list[str] | None = None) -> AuthorityData:
+    async def resolve_authorities(
+        self,
+        payload: InputPayload,
+        extra_queries: list[str] | None = None,
+        *,
+        mal_id_hint: int | None = None,
+        anilist_id_hint: int | None = None,
+    ) -> AuthorityData:
         """Resolve one anime identity before catalog search.
 
         Important invariant: ``original`` means the canonical Romaji/original title,
@@ -1475,7 +1859,11 @@ class Core:
         source_for_cache = source_domain(payload.url)
         if payload.url and any(same_host(source_for_cache, d) for d in AUTHORITY_SITES):
             authority_url_key = compact_url(payload.url).casefold()
-        cache_key = normalize_title(payload.title) + "|" + authority_url_key + "|" + "|".join(normalize_title(x) for x in extra_queries[:6])
+        cache_key = (
+            normalize_title(payload.title) + "|" + authority_url_key + "|"
+            + "|".join(normalize_title(x) for x in extra_queries[:6])
+            + f"|mal:{int(mal_id_hint) if mal_id_hint else 0}|al:{int(anilist_id_hint) if anilist_id_hint else 0}"
+        )
         cached = TITLE_CACHE.get(cache_key)
         if cached:
             result = AuthorityData(**json.loads(json.dumps(cached)))
@@ -1490,7 +1878,14 @@ class Core:
 
         data = AuthorityData()
         source = source_domain(payload.url)
-        english_input = clean_title(await self.translate_en(payload.title))
+        # Translating a localized title only helps when we have no Latin seed at all.
+        # AniHub/Mikai APIs normally provide Romaji/English up front, so avoid a
+        # guaranteed-extra Google Translate request (and its frequent HTTP 429).
+        latin_seed = next(
+            (clean_title(x) for x in [payload.title, *extra_queries] if title_script(x) == "latin"),
+            "",
+        )
+        english_input = "" if latin_seed else clean_title(await self.translate_en(payload.title))
         base_queries = unique_strings([payload.title, *extra_queries, english_input], limit=8)
 
         candidates: list[dict[str, Any]] = []
@@ -1525,11 +1920,14 @@ class Core:
                 "forced": forced,
             })
 
-        async def add_shiki(item: dict[str, Any], source_name: str, rank: int = 99, forced: bool = False) -> None:
+        async def add_shiki(
+            item: dict[str, Any], source_name: str, rank: int = 99, forced: bool = False,
+            *, fetch_details: bool = True,
+        ) -> None:
             anime_id = item.get("id")
             if not anime_id:
                 return
-            details = await self.shikimori_details(int(anime_id)) or item
+            details = (await self.shikimori_details(int(anime_id)) or item) if fetch_details else item
             names = self.shikimori_names(details)
             score, exact = relation(names)
             if not forced and not exact and score < 0.72:
@@ -1544,6 +1942,7 @@ class Core:
                 "rank": rank,
                 "source": source_name,
                 "forced": forced,
+                "details_loaded": fetch_details,
             })
 
         # Explicit authority URL has highest identity priority, but only if it is an actual anime title page.
@@ -1562,33 +1961,58 @@ class Core:
                 if details:
                     await add_shiki(details, "source:shikimori", 0, True)
 
-        # Phase 1: direct APIs first. No "first result wins" rule.
-        ani_jobs = [(query, asyncio.create_task(self.anilist_search(query))) for query in base_queries]
-        shiki_jobs = [(query, asyncio.create_task(self.shikimori_authority_search(query))) for query in base_queries]
+        # Trusted external IDs from the opened AniHub/Mikai API response are a
+        # stronger identity signal than launching text searches against AniList and
+        # Shikimori for every alias. Resolve that exact ID first; only fall back to
+        # multi-query authority search when the source did not expose usable IDs.
+        if not candidates and (anilist_id_hint or mal_id_hint):
+            hinted_media: dict[str, Any] | None = None
+            if anilist_id_hint:
+                hinted_media = await self.anilist_by_id(int(anilist_id_hint))
+            elif mal_id_hint:
+                hinted_media = await self.anilist_by_mal_id(int(mal_id_hint))
+            if hinted_media:
+                add_ani(hinted_media, "source-api-id", 0, True)
+            elif mal_id_hint:
+                hinted_shiki = await self.shikimori_details(int(mal_id_hint))
+                if hinted_shiki:
+                    await add_shiki(hinted_shiki, "source-api-mal", 0, True)
 
-        for query, task in ani_jobs:
-            try:
-                items = await task
-            except Exception:
-                items = []
-            for rank, media in enumerate(items[:10]):
-                names = self.media_names(media)
-                q_exact = any(normalize_title(name) == normalize_title(query) for name in names)
-                q_score = max((title_relation_score(name, query) for name in names), default=0.0)
-                if q_exact or q_score >= 0.72:
-                    add_ani(media, f"anilist:{normalize_title(query)}", rank)
+        # Phase 1: direct text APIs only when exact source IDs were unavailable or
+        # could not be resolved. No "first result wins" rule.
+        if not candidates:
+            ani_jobs = [(query, asyncio.create_task(self.anilist_search(query))) for query in base_queries]
+            shiki_jobs = [(query, asyncio.create_task(self.shikimori_authority_search(query))) for query in base_queries]
 
-        for query, task in shiki_jobs:
-            try:
-                items = await task
-            except Exception:
-                items = []
-            for rank, item in enumerate(items[:10]):
-                quick_names = unique_strings([item.get("name"), item.get("russian")])
-                q_exact = any(normalize_title(name) == normalize_title(query) for name in quick_names)
-                q_score = max((title_relation_score(name, query) for name in quick_names), default=0.0)
-                if q_exact or q_score >= 0.72:
-                    await add_shiki(item, f"shikimori:{normalize_title(query)}", rank)
+            for query, task in ani_jobs:
+                try:
+                    items = await task
+                except Exception:
+                    items = []
+                for rank, media in enumerate(items[:10]):
+                    names = self.media_names(media)
+                    q_exact = any(normalize_title(name) == normalize_title(query) for name in names)
+                    q_score = max((title_relation_score(name, query) for name in names), default=0.0)
+                    if q_exact or q_score >= 0.72:
+                        add_ani(media, f"anilist:{normalize_title(query)}", rank)
+
+            for query, task in shiki_jobs:
+                try:
+                    items = await task
+                except Exception:
+                    items = []
+                for rank, item in enumerate(items[:10]):
+                    quick_names = unique_strings([item.get("name"), item.get("russian")])
+                    q_exact = any(normalize_title(name) == normalize_title(query) for name in quick_names)
+                    q_score = max((title_relation_score(name, query) for name in quick_names), default=0.0)
+                    if q_exact or q_score >= 0.72:
+                        # The list response already has enough title information to
+                        # rank identity candidates. Fetch details only for the final
+                        # selected MAL id instead of downloading every related season.
+                        await add_shiki(
+                            item, f"shikimori:{normalize_title(query)}", rank,
+                            fetch_details=False,
+                        )
 
         def dedup_candidates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             best: dict[str, dict[str, Any]] = {}
@@ -1662,6 +2086,8 @@ class Core:
 
         if chosen and chosen["kind"] == "shikimori":
             item = chosen["item"]
+            if not chosen.get("details_loaded") and item.get("id"):
+                item = await self.shikimori_details(int(item["id"])) or item
             resolved_shikimori = item
             mal_id = int(item.get("id")) if item.get("id") else None
             # Shikimori's `name` is the canonical Romaji title. This is trusted even if AniList is down.
@@ -1674,6 +2100,7 @@ class Core:
                 japanese_values = [japanese_values]
             data.english = clean_title(next((x for x in english_values if clean_title(x)), "") or english_input)
             data.native = clean_title(next((x for x in japanese_values if clean_title(x)), ""))
+            data.russian = clean_title(item.get("russian") or data.russian)
             data.mal_id = mal_id
             data.description = clean_text(item.get("description"))
             image = item.get("image") or {}
@@ -1699,6 +2126,13 @@ class Core:
                     data.native = clean_title(titles.get("native") or data.native)
                     data.description = clean_text(media.get("description")) or data.description
                     data.banner = clean_text(media.get("bannerImage"))
+                    trailer = media.get("trailer") or {}
+                    data.trailer_id = clean_text(trailer.get("id"))
+                    data.trailer_site = clean_text(trailer.get("site")).lower()
+                    data.trailer_thumbnail = clean_text(trailer.get("thumbnail"))
+                    data.trailer_url = media_trailer_url(data.trailer_site, data.trailer_id)
+                    data.trailer_embed_url = media_trailer_embed_url(data.trailer_site, data.trailer_id)
+                    data.trailer_source = "anilist.co" if data.trailer_id else ""
                     cover = media.get("coverImage") or {}
                     ani_cover = clean_text(cover.get("extraLarge") or cover.get("large") or cover.get("medium"))
                     if ani_cover:
@@ -1718,6 +2152,13 @@ class Core:
             data.native = clean_title(titles.get("native") or "")
             data.description = clean_text(media.get("description"))
             data.banner = clean_text(media.get("bannerImage"))
+            trailer = media.get("trailer") or {}
+            data.trailer_id = clean_text(trailer.get("id"))
+            data.trailer_site = clean_text(trailer.get("site")).lower()
+            data.trailer_thumbnail = clean_text(trailer.get("thumbnail"))
+            data.trailer_url = media_trailer_url(data.trailer_site, data.trailer_id)
+            data.trailer_embed_url = media_trailer_embed_url(data.trailer_site, data.trailer_id)
+            data.trailer_source = "anilist.co" if data.trailer_id else ""
             cover = media.get("coverImage") or {}
             data.cover = clean_text(cover.get("extraLarge") or cover.get("large") or cover.get("medium"))
             if data.cover:
@@ -1748,6 +2189,11 @@ class Core:
                 resolved_shikimori = shiki
                 shiki_names = self.shikimori_names(shiki)
                 if not chosen_names or any(titles_related(a, b, 0.72) for a in shiki_names for b in chosen_names):
+                    # Keep the primary localized Russian title separate from synonyms.
+                    # This must be available BEFORE catalog fan-out; otherwise RU sites
+                    # start from a weaker synonym and may spend tens of seconds probing
+                    # aliases before the correct title is discovered.
+                    data.russian = clean_title(shiki.get("russian") or data.russian)
                     data.aliases.extend(shiki_names)
                     shiki_url = urljoin("https://shikimori.io", shiki.get("url") or f"/animes/{data.mal_id}")
                     data.links["shikimori.io"].append({
@@ -1770,10 +2216,43 @@ class Core:
         if data.anilist_id and not resolved_anilist_media:
             resolved_anilist_media = await self.anilist_by_id(int(data.anilist_id))
         if resolved_anilist_media:
+            # AniList exposes banner + trailer in the same Media object, so this
+            # adds no network request compared with the existing authority lookup.
+            if not data.banner:
+                data.banner = clean_text(resolved_anilist_media.get("bannerImage"))
+            trailer = resolved_anilist_media.get("trailer") or {}
+            if isinstance(trailer, dict) and clean_text(trailer.get("id")):
+                data.trailer_id = clean_text(trailer.get("id"))
+                data.trailer_site = clean_text(trailer.get("site")).lower()
+                data.trailer_thumbnail = clean_text(trailer.get("thumbnail"))
+                data.trailer_url = media_trailer_url(data.trailer_site, data.trailer_id)
+                data.trailer_embed_url = media_trailer_embed_url(data.trailer_site, data.trailer_id)
+                data.trailer_source = "anilist.co"
             data.genres["anilist.co"] = self.taxonomy_names(resolved_anilist_media.get("genres") or [])
 
         if data.mal_id and not resolved_shikimori:
             resolved_shikimori = await self.shikimori_details(int(data.mal_id))
+        if not data.trailer_url and isinstance(resolved_shikimori, dict):
+            videos = resolved_shikimori.get("videos") or []
+            if isinstance(videos, list):
+                video_items = [item for item in videos if isinstance(item, dict)]
+                preferred = [
+                    item for item in video_items
+                    if clean_text(item.get("kind")).lower() in {"pv", "trailer", "teaser", "cm"}
+                ]
+                video = (preferred or video_items or [{}])[0]
+                direct_url = clean_text(video.get("url"))
+                player_url = clean_text(video.get("player_url") or video.get("playerUrl"))
+                site = clean_text(video.get("hosting") or video.get("site")).lower()
+                trailer_id = trailer_id_from_url(direct_url or player_url)
+                if direct_url or player_url:
+                    data.trailer_id = trailer_id
+                    data.trailer_site = site or ("youtube" if "youtu" in (direct_url + player_url).lower() else "")
+                    data.trailer_thumbnail = clean_text(video.get("image_url") or video.get("imageUrl"))
+                    data.trailer_url = direct_url or media_trailer_url(data.trailer_site, trailer_id)
+                    data.trailer_embed_url = player_url or media_trailer_embed_url(data.trailer_site, trailer_id)
+                    data.trailer_source = "shikimori.io"
+
         shiki_genres, shiki_themes, shiki_page_ok, _ = await self.shikimori_page_taxonomy(data.mal_id)
         if not shiki_page_ok:
             shiki_genres, shiki_themes = self.shikimori_taxonomy(resolved_shikimori)
@@ -1917,6 +2396,11 @@ class Core:
             names = self.shikimori_names(shiki_details)
             if not data.original:
                 data.original = clean_title(shiki_details.get("name") or payload.title)
+            # Keep Shikimori's primary localized title distinct from its synonyms.
+            # Choosing by Cyrillic letter heuristics can prefer a secondary synonym
+            # (e.g. "Неторопливый фермер...") over the actual catalog title
+            # ("Фермерская жизнь...") and makes every RU catalog miss its first query.
+            data.russian = clean_title(shiki_details.get("russian") or data.russian)
             data.aliases = unique_strings([*data.aliases, *names, payload.title], limit=60)
             if not data.english:
                 english_values = shiki_details.get("english") or []
@@ -2130,6 +2614,12 @@ class Core:
                 return None
 
             display_title = clean_title(item.get("title"))
+            if (
+                self._season_family_mode
+                and display_title
+                and not is_season_family_member(display_title, self._season_family_roots)
+            ):
+                return None
             direct_kind = None
             if display_title and not is_catalog_noise_title(display_title):
                 direct_kind = title_match_kind(display_title, identity_aliases)
@@ -2150,6 +2640,11 @@ class Core:
                 return None
 
             page_signals = soup_title_signals(soup, domain)
+            if self._season_family_mode:
+                page_signals = [
+                    signal for signal in page_signals
+                    if is_season_family_member(signal, self._season_family_roots)
+                ]
             matching_signal = ""
             match_kind = None
             for signal in page_signals:
@@ -2175,7 +2670,40 @@ class Core:
                 "_aliases": unique_strings(page_signals, limit=40),
             }
 
-        results = await asyncio.gather(*(verify(item) for item in candidates[:18]))
+        # Loose result pages can contain dozens of unrelated anime cards. Fetching
+        # the first 18 title pages blindly caused hundreds of useless requests
+        # (Bleach, seasonal cards, recommendations, etc.). Rank locally first and
+        # verify only candidates that already resemble a trusted identity alias.
+        def pre_score(item: dict[str, str]) -> float:
+            display = clean_title(item.get("title", ""))
+            if (
+                self._season_family_mode
+                and display
+                and not is_season_family_member(display, self._season_family_roots)
+            ):
+                return -1.0
+            signals = unique_strings([display, slug_title(item.get("url", ""))], limit=4)
+            best = 0.0
+            for signal in signals:
+                kind = title_match_kind(signal, identity_aliases)
+                if kind == "exact":
+                    return 2.0
+                if kind == "season":
+                    best = max(best, 1.5)
+                for alias in identity_aliases:
+                    best = max(best, title_relation_score(signal, alias))
+            return best
+
+        ranked = sorted(candidates, key=pre_score, reverse=True)
+        # 0.48 admitted generic cards sharing only words like "isekai" and caused
+        # unrelated title-page fetches. Exact/season matches score 2.0/1.5, so a
+        # stricter lexical floor keeps completeness while cutting false candidates.
+        plausible_limit = 10 if self._season_family_mode else 4
+        plausible = [item for item in ranked if pre_score(item) >= 0.66][:plausible_limit]
+        if not plausible:
+            return []
+
+        results = await asyncio.gather(*(verify(item) for item in plausible))
         unique: dict[str, dict[str, str]] = {}
         for item in results:
             if item:
@@ -2217,42 +2745,149 @@ class Core:
                 continue
         return list(found.values())[:30]
 
-    async def search_anihub(self, queries: list[str], identity_aliases: list[str], anilist_id: int | None) -> list[dict[str, str]]:
-        found: dict[str, dict[str, str]] = {}
-        urls: list[str] = []
-        if anilist_id:
-            urls.append(f"https://api.anihub.in.ua/anime?anilist_id={anilist_id}&page_size=20")
-        urls.extend(f"https://api.anihub.in.ua/anime?search={quote_plus(query)}&page_size=20" for query in queries)
-        for url in urls:
-            try:
-                response = await self.request("GET", url, headers={"Accept": "application/json"})
+    async def anihub_api_lookup(
+        self,
+        *,
+        anime_id: int | None = None,
+        mal_id: int | None = None,
+        anilist_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Resolve one AniHub title through the documented JSON API only."""
+        try:
+            if anime_id:
+                response = await self.request(
+                    "GET", f"https://api.anihub.in.ua/anime/{int(anime_id)}",
+                    headers={"Accept": "application/json"},
+                )
+                if response.status_code < 400:
+                    data = response.json()
+                    return data if isinstance(data, dict) else None
+                return None
+
+            lookups: list[tuple[str, int]] = []
+            if mal_id:
+                lookups.append(("mal_id", int(mal_id)))
+            if anilist_id:
+                lookups.append(("anilist_id", int(anilist_id)))
+            for field, value in lookups:
+                response = await self.request(
+                    "GET", "https://api.anihub.in.ua/anime",
+                    params={"page_size": 5, field: value},
+                    headers={"Accept": "application/json"},
+                )
                 if response.status_code >= 400:
                     continue
                 payload = response.json()
                 items = payload.get("items", []) if isinstance(payload, dict) else []
-                for item in items:
-                    titles = item.get("titles") or {}
-                    names = unique_strings([
-                        item.get("title_ukrainian"), item.get("title_english"), item.get("title_original"),
-                        titles.get("ukrainian"), titles.get("uk"), titles.get("english"), titles.get("en"),
-                        titles.get("original"), titles.get("romaji"), *(item.get("aliases") or []),
-                    ])
+                if not items:
+                    continue
+                exact = next((x for x in items if str(x.get(field) or "") == str(value)), None)
+                if exact:
+                    return exact
+                if isinstance(items[0], dict):
+                    return items[0]
+            return None
+        except Exception:
+            return None
+
+    def anihub_item_to_catalog(self, item: dict[str, Any], fallback: str = "") -> dict[str, str] | None:
+        item_id = item.get("id")
+        slug = clean_text(item.get("slug")).strip("/")
+        if not item_id:
+            return None
+        page = f"https://anihub.in.ua/anime/{slug}-{item_id}" if slug else f"https://anihub.in.ua/anime/{item_id}"
+        names = unique_strings([
+            item.get("title_ukrainian"), item.get("title_original"), item.get("title_english"), fallback,
+        ], limit=8)
+        display = clean_title(item.get("title_ukrainian") or item.get("title_original") or item.get("title_english") or fallback)
+        return {
+            "url": compact_url(page),
+            "title": display,
+            "match": "exact",
+            "_aliases": names,
+        }
+
+    async def search_anihub(
+        self,
+        queries: list[str],
+        identity_aliases: list[str],
+        anilist_id: int | None,
+        mal_id: int | None = None,
+    ) -> list[dict[str, str]]:
+        found: dict[str, dict[str, str]] = {}
+
+        # Exact external identifiers are vastly cheaper and more reliable than text search.
+        exact = await self.anihub_api_lookup(mal_id=mal_id, anilist_id=anilist_id)
+        if exact:
+            item = self.anihub_item_to_catalog(exact, queries[0] if queries else "")
+            if item:
+                found[item["url"]] = item
+                return list(found.values())
+
+        # Name search is only a fallback and uses at most two high-confidence names.
+        for query in unique_strings(queries, limit=2):
+            try:
+                response = await self.request(
+                    "GET", "https://api.anihub.in.ua/anime",
+                    params={"search": query, "page_size": 10},
+                    headers={"Accept": "application/json"},
+                )
+                if response.status_code >= 400:
+                    continue
+                payload = response.json()
+                items = payload.get("items", []) if isinstance(payload, dict) else []
+                for raw in items:
+                    if not isinstance(raw, dict):
+                        continue
+                    names = unique_strings([raw.get("title_ukrainian"), raw.get("title_original"), raw.get("title_english")])
                     match = next((title_match_kind(name, identity_aliases) for name in names if title_match_kind(name, identity_aliases)), None)
-                    id_exact = anilist_id and str(item.get("anilist_id")) == str(anilist_id)
-                    if not match and not id_exact:
+                    if not match:
                         continue
-                    slug = clean_text(item.get("slug")).strip("/")
-                    item_id = item.get("id")
-                    if slug and item_id:
-                        page = f"https://anihub.in.ua/anime/{slug}-{item_id}"
-                    elif item_id:
-                        page = f"https://anihub.in.ua/anime/{item_id}"
-                    else:
-                        continue
-                    display = clean_title(item.get("title_ukrainian") or titles.get("ukrainian") or titles.get("uk") or (names[0] if names else ""))
-                    found[page] = {"url": page, "title": display or (names[0] if names else queries[0]), "match": match or "exact"}
+                    item = self.anihub_item_to_catalog(raw, query)
+                    if item:
+                        item["match"] = match
+                        found[item["url"]] = item
                 if found:
                     break
+            except Exception:
+                continue
+        return list(found.values())[:30]
+
+    async def search_anihub_family(
+        self, queries: list[str], identity_aliases: list[str]
+    ) -> list[dict[str, str]]:
+        """Search AniHub by a season-free franchise root and keep only season-family hits."""
+        found: dict[str, dict[str, str]] = {}
+        for query in unique_strings(queries, limit=1):
+            try:
+                response = await self.request(
+                    "GET", "https://api.anihub.in.ua/anime",
+                    params={"search": query, "page_size": 20},
+                    headers={"Accept": "application/json"},
+                )
+                if response.status_code >= 400:
+                    continue
+                payload = response.json()
+                items = payload.get("items", []) if isinstance(payload, dict) else []
+                for raw in items:
+                    if not isinstance(raw, dict):
+                        continue
+                    names = unique_strings([
+                        raw.get("title_ukrainian"), raw.get("title_original"), raw.get("title_english")
+                    ])
+                    if not any(is_season_family_member(name, queries) for name in names):
+                        continue
+                    match = next((
+                        title_match_kind(name, identity_aliases)
+                        for name in names if title_match_kind(name, identity_aliases)
+                    ), None)
+                    if not match:
+                        continue
+                    item = self.anihub_item_to_catalog(raw, query)
+                    if item:
+                        item["match"] = match
+                        found[item["url"]] = item
+                break
             except Exception:
                 continue
         return list(found.values())[:30]
@@ -2307,10 +2942,13 @@ class Core:
     async def search_animeon(self, queries: list[str], identity_aliases: list[str], mal_id: int | None) -> list[dict[str, str]]:
         found: dict[str, dict[str, str]] = {}
         endpoints: list[tuple[str, str]] = []
+        # We already know the localized UA title before catalog search. One text
+        # query usually returns the whole matching franchise (season 1 + season 2),
+        # while probing three MAL parameter spellings first cost 3 extra requests.
+        for query in unique_strings(queries, limit=2):
+            endpoints.extend((key, query) for key in ("search", "q", "title", "query"))
         if mal_id:
             endpoints.extend((key, str(mal_id)) for key in ("malId", "mal_id", "mal"))
-        for query in queries:
-            endpoints.extend((key, query) for key in ("search", "q", "title", "query"))
         for key, value in endpoints:
             try:
                 response = await self.request("GET", "https://animeon.club/api/anime/", params={key: value}, headers={"Accept": "application/json"})
@@ -2341,68 +2979,128 @@ class Core:
                 continue
         return list(found.values())[:30]
 
-    async def load_mikai_catalog(self) -> list[dict[str, Any]]:
-        cache_key = "mikai:catalog"
-        cached = FORM_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
-        try:
-            first = await self.request(
-                "GET", "https://api.mikai.me/v1/anime/search",
-                params={"limit": 100, "order": "desc", "page": 1, "sort": "year"},
-                headers={"Accept": "application/json"},
+    def effective_mikai_api_key(self) -> str:
+        key = clean_text(self.mikai_api_key or os.getenv("MIKAI_API_KEY"))
+        return key if key.lower().startswith("mk_") else ""
+
+    def mikai_api_headers(self, *, anonymous: bool = False) -> dict[str, str]:
+        headers = {"Accept": "application/json"}
+        key = "" if anonymous else self.effective_mikai_api_key()
+        if key:
+            headers["X-API-Key"] = key
+        return headers
+
+    async def mikai_api_get(self, url: str, *, params: dict[str, Any] | None = None) -> httpx.Response:
+        # Use the saved/user-provided key when available. If it was revoked or
+        # malformed and Mikai rejects it, transparently retry public anonymous
+        # mode so a bad optional key cannot break title processing.
+        keyed = bool(self.effective_mikai_api_key())
+        response = await self.request(
+            "GET", url, params=params, headers=self.mikai_api_headers(),
+        )
+        if keyed and response.status_code in {401, 403}:
+            response = await self.request(
+                "GET", url, params=params, headers=self.mikai_api_headers(anonymous=True), _no_cache=True,
             )
-            payload = first.json()
-            first_items = payload.get("result", []) if isinstance(payload, dict) else []
-            total = int(payload.get("total") or len(first_items)) if isinstance(payload, dict) else len(first_items)
-            if not first_items:
-                return []
-            page_size = max(1, len(first_items))
-            pages = min(80, max(1, (total + page_size - 1) // page_size))
+        return response
 
-            async def load(page: int) -> list[dict[str, Any]]:
-                try:
-                    r = await self.request(
-                        "GET", "https://api.mikai.me/v1/anime/search",
-                        params={"limit": 100, "order": "desc", "page": page, "sort": "year"},
-                        headers={"Accept": "application/json"},
-                    )
-                    d = r.json()
-                    return d.get("result", []) if isinstance(d, dict) else []
-                except Exception:
-                    return []
+    async def mikai_api_detail(
+        self,
+        *,
+        mikai_id: int | None = None,
+        mal_id: int | None = None,
+        anilist_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        refs: list[str] = []
+        if mikai_id:
+            refs.append(str(int(mikai_id)))
+        if mal_id:
+            refs.append(f"mal:{int(mal_id)}")
+        if anilist_id:
+            refs.append(f"al:{int(anilist_id)}")
+        for ref in unique_strings(refs, limit=3):
+            try:
+                response = await self.mikai_api_get(
+                    f"https://api.mikai.me/public/v1/anime/{quote(ref, safe=':')}"
+                )
+                if response.status_code == 404:
+                    continue
+                if response.status_code >= 400:
+                    return None
+                payload = response.json()
+                result = payload.get("result") if isinstance(payload, dict) and payload.get("ok") is True else None
+                if isinstance(result, dict):
+                    return result
+            except Exception:
+                continue
+        return None
 
-            rest = await asyncio.gather(*(load(page) for page in range(2, pages + 1))) if pages > 1 else []
-            merged: dict[str, dict[str, Any]] = {}
-            for item in [*first_items, *(x for page in rest for x in page)]:
-                if isinstance(item, dict):
-                    merged[str(item.get("id") or item.get("slug") or len(merged))] = item
-            values = list(merged.values())
-            FORM_CACHE.set(cache_key, values)
-            return values
-        except Exception:
-            return []
+    def mikai_item_to_catalog(self, item: dict[str, Any], fallback: str = "") -> dict[str, str] | None:
+        ids = item.get("ids") or {}
+        titles = item.get("titles") or {}
+        item_id = ids.get("mikai") or item.get("id")
+        slug = clean_text(ids.get("slug") or item.get("slug")).strip("/")
+        if not item_id:
+            return None
+        page = f"https://mikai.me/anime/{item_id}-{slug}" if slug else f"https://mikai.me/anime/{item_id}"
+        names = unique_strings([titles.get("ua"), titles.get("english"), titles.get("original"), fallback], limit=8)
+        display = clean_title(titles.get("ua") or titles.get("english") or titles.get("original") or fallback)
+        return {
+            "url": compact_url(page),
+            "title": display,
+            "match": "exact",
+            "_aliases": names,
+        }
 
-    async def search_mikai(self, queries: list[str], identity_aliases: list[str]) -> list[dict[str, str]]:
-        items = await self.load_mikai_catalog()
+    async def search_mikai(
+        self,
+        queries: list[str],
+        identity_aliases: list[str],
+        mal_id: int | None = None,
+        anilist_id: int | None = None,
+    ) -> list[dict[str, str]]:
         found: dict[str, dict[str, str]] = {}
-        for item in items:
-            details = item.get("details") or {}
-            names_obj = details.get("names") or {}
-            names = unique_strings([names_obj.get("nameNative"), names_obj.get("name"), names_obj.get("nameEnglish")])
-            match = next((title_match_kind(name, identity_aliases) for name in names if title_match_kind(name, identity_aliases)), None)
-            if not match:
+
+        # Official public API: one exact request by MAL/AniList ID gives the
+        # canonical title/description. Keep it, then do at most ONE text search to
+        # recover related seasons. This preserves the old complete catalog result
+        # without ever walking dozens of API pages.
+        detail = await self.mikai_api_detail(mal_id=mal_id, anilist_id=anilist_id)
+        if detail:
+            item = self.mikai_item_to_catalog(detail, queries[0] if queries else "")
+            if item:
+                found[item["url"]] = item
+
+        for query in unique_strings(queries, limit=1):
+            try:
+                response = await self.mikai_api_get(
+                    "https://api.mikai.me/public/v1/anime",
+                    params={"search": query, "limit": 20, "page": 1},
+                )
+                if response.status_code >= 400:
+                    continue
+                payload = response.json()
+                items = payload.get("result", []) if isinstance(payload, dict) and payload.get("ok") is True else []
+                for raw in items:
+                    if not isinstance(raw, dict):
+                        continue
+                    titles = raw.get("titles") or {}
+                    names = unique_strings([titles.get("ua"), titles.get("english"), titles.get("original")])
+                    if self._season_family_mode and self._season_family_roots:
+                        if not any(is_season_family_member(name, self._season_family_roots) for name in names):
+                            continue
+                    match = next((title_match_kind(name, identity_aliases) for name in names if title_match_kind(name, identity_aliases)), None)
+                    if not match:
+                        continue
+                    item = self.mikai_item_to_catalog(raw, query)
+                    if item:
+                        item["match"] = match
+                        found[item["url"]] = item
+                # One family-search request is enough. Exact-ID result, if any,
+                # remains merged with season/franchise matches from this response.
+                break
+            except Exception:
                 continue
-            item_id = item.get("id")
-            slug = clean_text(item.get("slug")).strip("/")
-            if item_id and slug:
-                page = f"https://mikai.me/anime/{item_id}-{slug}"
-            elif item_id:
-                page = f"https://mikai.me/anime/{item_id}"
-            else:
-                continue
-            display = clean_title(names_obj.get("name") or names_obj.get("nameNative") or names_obj.get("nameEnglish") or queries[0])
-            found[page] = {"url": page, "title": display, "match": match}
         return list(found.values())[:30]
 
     async def search_aniliberty_direct(self, queries: list[str], identity_aliases: list[str]) -> list[dict[str, str]]:
@@ -2411,16 +3109,31 @@ class Core:
             slug = re.sub(r"[^a-z0-9]+", "-", query.casefold()).strip("-")
             if not slug:
                 continue
-            for host in ("aniliberty.top", "anilibria.top"):
+            # The two domains are mirrors. Query the preferred host once; only
+            # retry the mirror when the preferred host is unreachable/5xx. A 404
+            # is a valid "release slug not found" result and should not be doubled.
+            hosts = ("aniliberty.top", "anilibria.top")
+            for idx, host in enumerate(hosts):
                 url = f"https://{host}/anime/releases/release/{slug}"
-                soup, final_url = await self.fetch_soup(url)
-                if not soup:
-                    continue
+                try:
+                    response = await self.request("GET", url, headers={"Accept": "text/html,application/xhtml+xml"})
+                except Exception:
+                    if idx == 0:
+                        continue
+                    break
+                if response.status_code >= 500:
+                    if idx == 0:
+                        continue
+                    break
+                if response.status_code >= 400:
+                    break
+                soup = BeautifulSoup(response.text, "html.parser")
                 signals = soup_title_signals(soup)
                 match = next((title_match_kind(signal, identity_aliases) for signal in signals if title_match_kind(signal, identity_aliases)), None)
                 if match:
                     display = next((x for x in signals if is_probable_title(x)), query)
-                    found[compact_url(final_url)] = {"url": compact_url(final_url), "title": display, "match": match}
+                    found[compact_url(str(response.url))] = {"url": compact_url(str(response.url)), "title": display, "match": match}
+                break
             if found:
                 break
         return list(found.values())[:30]
@@ -2439,7 +3152,7 @@ class Core:
         generic /search?q= routes do not exist. Priority queries use the normal
         HTTP transport timeout; only secondary aliases receive a short timeout.
         """
-        hosts = logical_hosts(domain)
+        hosts = ["uachan.top"] if domain == "uachan.com" else logical_hosts(domain)
         for query in queries:
             data = {
                 "do": "search",
@@ -2450,14 +3163,11 @@ class Core:
                 "story": query,
             }
             for host in hosts[:2]:
-                # jut-su.net has a known DLE search action. Avoid a second generic
-                # POST on the priority query: it adds latency without improving the
-                # result. Other DLE clones keep the secondary endpoint as a fallback.
-                endpoints = (
-                    [f"https://{host}/index.php?do=search"]
-                    if domain == "jut-su.net"
-                    else [f"https://{host}/index.php?do=search", f"https://{host}/index.php"]
-                )
+                # All supported DLE catalogs expose the canonical search action at
+                # /index.php?do=search. Posting the same form again to bare /index.php
+                # duplicates work on failures and was a major source of AnimeGO/Jutsu
+                # latency. Use one native request per title variant.
+                endpoints = [f"https://{host}/index.php?do=search"]
                 for endpoint in endpoints:
                     try:
                         request_coro = self.request(
@@ -2501,8 +3211,15 @@ class Core:
                         continue
         return []
 
-    async def generic_site_search(self, domain: str, queries: list[str], identity_aliases: list[str], *, compact: bool = False) -> list[dict[str, str]]:
+    async def generic_site_search(
+        self, domain: str, queries: list[str], identity_aliases: list[str], *,
+        compact: bool = False, discover_forms: bool = True,
+    ) -> list[dict[str, str]]:
+        if domain in self._dead_search_domains:
+            return []
         for query in queries:
+            if domain in self._dead_search_domains:
+                break
             q = quote_plus(query)
             q_path = quote(query, safe="")
             urls = [route.format(q=q, q_path=q_path) for route in SEARCH_ROUTES.get(domain, [])]
@@ -2521,9 +3238,12 @@ class Core:
             max_routes = 2 if compact else 6
             urls = list(dict.fromkeys(urls + generic))[:max_routes]
 
+            route_statuses: list[int] = []
+
             async def fetch_route(url: str) -> list[dict[str, str]]:
                 try:
                     response = await self.request("GET", url, headers={"Accept": "text/html,application/xhtml+xml"})
+                    route_statuses.append(int(response.status_code))
                     if response.status_code >= 400:
                         return []
                     strict = self.parse_catalog_results(response.text, str(response.url), domain, identity_aliases)
@@ -2537,6 +3257,11 @@ class Core:
                     return []
 
             route_results = await asyncio.gather(*(fetch_route(url) for url in urls))
+            # A 404 from every configured search route means the route itself does
+            # not exist, not that this particular anime is missing. Stop probing
+            # more aliases/replay for that domain during this run.
+            if urls and route_statuses and len(route_statuses) == len(urls) and all(code == 404 for code in route_statuses):
+                self._dead_search_domains.add(domain)
             merged: dict[str, dict[str, str]] = {}
             for items in route_results:
                 for item in items:
@@ -2544,6 +3269,8 @@ class Core:
             if merged:
                 return list(merged.values())[:30]
 
+            if not discover_forms or domain in self._dead_search_domains:
+                continue
             discovered = await self.discover_search_requests(domain, query)
             form_jobs: list[asyncio.Task] = []
             for method, url, kwargs in discovered:
@@ -2607,23 +3334,38 @@ class Core:
         if domain == "shikimori.io":
             result = await self.search_shikimori(queries, identity_aliases, authority.mal_id)
         elif domain == "anihub.in.ua":
-            result = await self.search_anihub(queries, identity_aliases, authority.anilist_id)
+            result = await self.search_anihub(queries, identity_aliases, authority.anilist_id, authority.mal_id)
         elif domain == "ru.yummyani.me":
             result = await self.search_yummy(queries, identity_aliases)
             if not result:
-                result = await self.generic_site_search(domain, queries, identity_aliases)
+                result = await self.generic_site_search(
+                    domain, queries, identity_aliases, compact=True, discover_forms=False
+                )
         elif domain == "animeon.club":
             result = await self.search_animeon(queries, identity_aliases, authority.mal_id)
-            if not result:
-                result = await self.generic_site_search(domain, queries, identity_aliases)
         elif domain == "mikai.me":
-            result = await self.search_mikai(queries, identity_aliases)
-            if not result:
-                result = await self.generic_site_search(domain, queries, identity_aliases)
+            result = await self.search_mikai(queries, identity_aliases, authority.mal_id, authority.anilist_id)
         elif domain == "anilibria.tv":
-            result = await self.search_aniliberty_direct(queries, identity_aliases)
-            if not result:
-                result = await self.generic_site_search(domain, queries, identity_aliases)
+            # The catalog search endpoint is explicit and stable. Guessed release
+            # slugs plus homepage/form discovery added many requests on misses while
+            # returning no extra verified titles in profiling.
+            result = await self.generic_site_search(
+                domain, queries, identity_aliases, compact=True, discover_forms=False
+            )
+        elif domain == "anidesu.net":
+            # Current AniDesu DLE POST endpoints consistently return 403 while
+            # the public GET search remains reachable. Do not waste two blocked
+            # POSTs per alias or rediscover the same blocked form.
+            result = await self.generic_site_search(
+                domain, queries, identity_aliases, compact=True, discover_forms=False
+            )
+        elif domain in {"crunchyroll.com", "uaserials.com", "amanogawa.space", "jut.su"}:
+            # These catalogs already have explicit known GET search routes. Form
+            # discovery adds a homepage request (and for UASerials an extra form
+            # submission) for every alias without improving the observed result.
+            result = await self.generic_site_search(
+                domain, queries, identity_aliases, compact=True, discover_forms=False
+            )
         elif domain in DLE_SEARCH_SITES:
             # DLE catalogs (including jut-su.net) must use their real POST search
             # first.  The old generic GET fan-out often consumed the whole outer
@@ -2636,8 +3378,9 @@ class Core:
                 if "request_timeout" not in str(error):
                     raise
                 result = await self.search_dle_post(domain, queries, identity_aliases)
-            if not result:
-                result = await self.generic_site_search(domain, queries, identity_aliases, compact=True)
+            # Do not immediately fan out into generic GET routes for every alias.
+            # The process already has an indexed fallback phase for still-empty
+            # catalogs. Running both here multiplied each DLE miss by 2-4 requests.
         else:
             result = await self.generic_site_search(domain, queries, identity_aliases, compact=True)
 
@@ -2732,6 +3475,12 @@ class Core:
             title = clean_title(item.get("title")) or slug_title(url)
             if is_catalog_noise_title(title):
                 continue
+            if (
+                self._season_family_mode
+                and self._season_family_roots
+                and not is_season_family_member(title, self._season_family_roots)
+            ):
+                continue
             value = {"url": url, "title": title}
             aliases = item.get("_aliases") if isinstance(item, dict) else None
             if isinstance(aliases, list):
@@ -2767,20 +3516,57 @@ class Core:
             return None
         return next((domain for domain in CATALOG_SITES if host_allowed(host, domain)), None)
 
-    async def seed_source_catalog(self, payload: InputPayload) -> tuple[str | None, dict[str, str] | None, list[str]]:
+    async def seed_source_catalog(self, payload: InputPayload) -> tuple[str | None, dict[str, str] | None, list[str], dict[str, Any]]:
         domain = self.source_catalog(payload.url)
         if not domain or not payload.url:
-            return None, None, []
+            return None, None, [], {}
+
+        # AniHub and Mikai expose documented JSON APIs, so never parse their HTML
+        # title pages just to recover names we can receive directly as structured data.
+        try:
+            path = urlparse(payload.url).path or ""
+            if domain == "anihub.in.ua":
+                match = re.search(r"-(\d+)/?$", path)
+                anime_id = int(match.group(1)) if match else None
+                api_item = await self.anihub_api_lookup(anime_id=anime_id) if anime_id else None
+                if api_item:
+                    item = self.anihub_item_to_catalog(api_item, payload.title)
+                    aliases = unique_strings([
+                        api_item.get("title_original"), api_item.get("title_english"),
+                        api_item.get("title_ukrainian"), payload.title,
+                    ], limit=8)
+                    meta = {
+                        "mal_id": api_item.get("mal_id"),
+                        "anilist_id": api_item.get("anilist_id"),
+                        "anihub_item": api_item,
+                    }
+                    return domain, item, aliases, meta
+            elif domain == "mikai.me":
+                match = re.search(r"^/anime/(\d+)", path)
+                mikai_id = int(match.group(1)) if match else None
+                api_item = await self.mikai_api_detail(mikai_id=mikai_id) if mikai_id else None
+                if api_item:
+                    item = self.mikai_item_to_catalog(api_item, payload.title)
+                    titles = api_item.get("titles") or {}
+                    aliases = unique_strings([titles.get("original"), titles.get("english"), titles.get("ua"), payload.title], limit=8)
+                    ids = api_item.get("ids") or {}
+                    meta = {
+                        "mal_id": ids.get("mal") or ids.get("mal_id"),
+                        "anilist_id": ids.get("anilist") or ids.get("anilist_id") or ids.get("al"),
+                        "mikai_item": api_item,
+                    }
+                    return domain, item, aliases, meta
+        except Exception:
+            pass
+
         soup, final_url = await self.fetch_soup(payload.url)
         final_url = compact_url(final_url or payload.url)
         trusted_aliases = trusted_source_title_variants(domain, soup) if soup else []
         explicit_aliases = site_specific_title_variants(domain, soup) if soup else []
         if not is_catalog_title_url(domain, final_url):
-            return domain, None, unique_strings([payload.title, *trusted_aliases], limit=16)
+            return domain, None, unique_strings([payload.title, *trusted_aliases], limit=16), {}
 
         # Keep search-driving aliases intentionally small and high-confidence.
-        # The full metadata alias set stays attached to the verified source item so
-        # it can help later verification without triggering dozens of searches.
         title = clean_title(payload.title)
         if soup:
             primary = page_primary_title(soup)
@@ -2789,10 +3575,8 @@ class Core:
                 if not title or normalize_title(primary) == normalize_title(title) or (same_script and titles_related(primary, title, 0.62)):
                     title = primary
         source_aliases = unique_strings([*explicit_aliases, title, payload.title, *trusted_aliases], limit=8)
-        # Store only identity-bearing aliases from this page.  Do not persist broad
-        # JSON-LD/navigation strings such as Telegram/TikTok/menu labels.
         item_aliases = unique_strings([*explicit_aliases, title, payload.title, *trusted_aliases], limit=12)
-        return domain, {"url": final_url, "title": title or clean_title(payload.title), "_aliases": item_aliases}, source_aliases
+        return domain, {"url": final_url, "title": title or clean_title(payload.title), "_aliases": item_aliases}, source_aliases, {}
 
     async def send_callback(self, result: dict[str, Any]) -> dict[str, Any] | None:
         url = clean_text(os.getenv("RESULT_WEBHOOK_URL")) or DEFAULT_RESULT_WEBHOOK_URL
@@ -2822,6 +3606,10 @@ class Core:
         started_at = time.perf_counter()
         last_percent = 0
         soft_deadline_seconds = 235.0
+        # The website can forward its Turso-stored Mikai key in the internal
+        # server-to-server payload. Old/local callers may omit it entirely.
+        incoming_mikai_key = clean_text(getattr(payload, "mikai_api_key", "") or "")
+        self.mikai_api_key = incoming_mikai_key if incoming_mikai_key.lower().startswith("mk_") else ""
 
         def elapsed_seconds() -> float:
             return time.perf_counter() - started_at
@@ -2899,6 +3687,10 @@ class Core:
                     return domain, [], clean_text(error), tried
                 if result:
                     return domain, result, "", tried
+                # If repeated access/rate-limit responses established that the
+                # domain is blocked for this run, do not burn the remaining aliases.
+                if self.domain_hard_blocked(domain):
+                    return domain, [], "blocked after repeated HTTP 401/403/429", tried
             return domain, [], "", tried
 
         async def google_job(
@@ -2929,10 +3721,13 @@ class Core:
         # expose the real Romaji/original title in a small field near H1.  That
         # string is substantially more reliable than translating a UA/RU H1 to
         # English, so it participates in authority resolution immediately.
-        await emit("source_identity", 3, "Читаю оригінальну/альтернативну назву з поточної сторінки.")
+        await emit("source_identity", 3, "Отримую оригінальну/альтернативну назву з поточного джерела або його API.")
         source_seed = await self.seed_source_catalog(payload)
+        source_meta: dict[str, Any] = {}
         if isinstance(source_seed, tuple) and len(source_seed) >= 3:
             source_catalog, source_item, source_aliases = source_seed[0], source_seed[1], source_seed[2]
+            if len(source_seed) >= 4 and isinstance(source_seed[3], dict):
+                source_meta = source_seed[3]
         else:
             source_catalog, source_item = source_seed  # backward-compatible subclass/test hook
             source_aliases = []
@@ -2947,11 +3742,22 @@ class Core:
 
         await emit("identity", 7, "Визначаю canonical ID, назви та медіа.")
         try:
-            authority = await self.resolve_authorities(payload, extra_queries=source_aliases)
+            authority = await self.resolve_authorities(
+                payload,
+                extra_queries=source_aliases,
+                mal_id_hint=source_meta.get("mal_id"),
+                anilist_id_hint=source_meta.get("anilist_id"),
+            )
         except TypeError as error:
-            if "extra_queries" not in str(error):
+            message = str(error)
+            if not any(key in message for key in ("extra_queries", "mal_id_hint", "anilist_id_hint")):
                 raise
-            authority = await self.resolve_authorities(payload)
+            try:
+                authority = await self.resolve_authorities(payload, extra_queries=source_aliases)
+            except TypeError as legacy_error:
+                if "extra_queries" not in str(legacy_error):
+                    raise
+                authority = await self.resolve_authorities(payload)
 
         # In this project "original" means the useful Latin/Romaji title, not
         # native CJK script.  The exact Latin line exposed by the opened source
@@ -2982,6 +3788,116 @@ class Core:
             romaji=romanized,
             source_aliases=source_aliases[:12],
         )
+
+        # API-first localization. AniHub and Mikai both expose structured title
+        # data, so resolve them once by canonical IDs before touching localized
+        # catalog HTML. Besides the UA name this can provide a native UA description
+        # and lets us pre-seed both catalog links without any page parsing.
+        anihub_exact: dict[str, Any] | None = source_meta.get("anihub_item") if isinstance(source_meta.get("anihub_item"), dict) else None
+        mikai_exact: dict[str, Any] | None = source_meta.get("mikai_item") if isinstance(source_meta.get("mikai_item"), dict) else None
+        if authority.mal_id or authority.anilist_id:
+            pending_api: list[tuple[str, asyncio.Task]] = []
+            if not anihub_exact:
+                pending_api.append(("anihub", asyncio.create_task(
+                    self.anihub_api_lookup(mal_id=authority.mal_id, anilist_id=authority.anilist_id)
+                )))
+            if not mikai_exact:
+                pending_api.append(("mikai", asyncio.create_task(
+                    self.mikai_api_detail(mal_id=authority.mal_id, anilist_id=authority.anilist_id)
+                )))
+            for api_name, task in pending_api:
+                value = await task
+                if api_name == "anihub":
+                    anihub_exact = value
+                else:
+                    mikai_exact = value
+
+        mikai_titles = (mikai_exact or {}).get("titles") or {}
+        api_ua_title = clean_title(
+            (anihub_exact or {}).get("title_ukrainian")
+            or mikai_titles.get("ua")
+        )
+        api_description_uk = clean_text(
+            (mikai_exact or {}).get("description")
+            or (anihub_exact or {}).get("description")
+        )
+        api_identity_aliases = unique_strings([
+            (anihub_exact or {}).get("title_original"),
+            (anihub_exact or {}).get("title_english"),
+            (anihub_exact or {}).get("title_ukrainian"),
+            mikai_titles.get("original"), mikai_titles.get("english"), mikai_titles.get("ua"),
+        ], limit=10)
+
+        # Franchise search must also work when the website starts from the base
+        # season on MAL/AniList/Shikimori.  Older 2.21.0 logic only enabled the
+        # season-family mode when an explicit Season N>1 marker was already
+        # present, so the normal site flow (which usually selects season 1 from
+        # an authority source) could save only a handful of exact season-1 links.
+        pre_family_inputs = unique_strings([
+            payload.title, native_original, romanized, english, authority.russian,
+            *source_aliases, *api_identity_aliases,
+        ], limit=30)
+        detected_seasons = [season_number(value) for value in pre_family_inputs]
+        detected_seasons = [number for number in detected_seasons if number is not None]
+        source_season_number = max(detected_seasons) if detected_seasons else None
+        authority_host = source_domain(payload.url)
+        authority_family_seed = any(host_allowed(authority_host, domain) for domain in AUTHORITY_SITES)
+        season_family_expansion = bool(source_season_number and source_season_number > 1) or authority_family_seed
+        preliminary_family_roots = season_family_roots(pre_family_inputs, limit=12)
+        if season_family_expansion and not preliminary_family_roots:
+            # An unnumbered/base title is itself the franchise root.  Keep several
+            # language variants so each catalog still receives a native query.
+            preliminary_family_roots = unique_strings([
+                season_family_title(value)
+                for value in pre_family_inputs
+                if clean_title(value)
+                and not _SEASON_FAMILY_EXTRA_RE.search(clean_title(value))
+                and not is_catalog_noise_title(value)
+            ], limit=12)
+        if authority_family_seed and source_season_number is None:
+            source_season_number = 1
+        self._season_family_mode = season_family_expansion
+        self._season_family_roots = list(preliminary_family_roots)
+
+        # Mikai family search is the same single request we previously issued later
+        # inside phase 1. Move it before catalog fan-out so season/part aliases are
+        # trusted by every other adapter from the first query. The exact Mikai detail
+        # request above is served from the per-run HTTP cache inside search_mikai().
+        mikai_family_items: list[dict[str, str]] = []
+        mikai_ua_root = season_family_title(clean_title(mikai_titles.get("ua"))) if season_family_expansion else ""
+        mikai_original_root = season_family_title(clean_title(mikai_titles.get("original"))) if season_family_expansion else ""
+        mikai_family_query = (
+            mikai_ua_root
+            or mikai_original_root
+            or next((root for root in preliminary_family_roots if re.search(r"[іїєґ]", root, re.I)), "")
+            or next((root for root in preliminary_family_roots if re.search(r"[а-яё]", root, re.I)), "")
+            or next((root for root in preliminary_family_roots if title_script(root) == "latin"), "")
+            or api_ua_title or clean_title(authority.russian) or romanized or english
+        )
+        if mikai_family_query and (authority.mal_id or authority.anilist_id):
+            preliminary_identity = unique_strings([
+                *preliminary_family_roots, *api_identity_aliases, authority.russian, romanized, english, native_original, payload.title,
+            ], limit=32)
+            try:
+                mikai_family_items = await self.search_mikai(
+                    [mikai_family_query], preliminary_identity, authority.mal_id, authority.anilist_id
+                )
+            except Exception:
+                mikai_family_items = []
+            family_aliases: list[str] = []
+            for item in mikai_family_items:
+                family_aliases.append(item.get("title", ""))
+                aliases = item.get("_aliases") if isinstance(item, dict) else None
+                if isinstance(aliases, list):
+                    family_aliases.extend(aliases[:8])
+            api_identity_aliases = unique_strings([*api_identity_aliases, *family_aliases], limit=24)
+
+        if api_ua_title:
+            await emit(
+                "localized_api", 13,
+                "Українську назву отримано через API AniHub/Mikai без HTML-парсингу.",
+                ukrainian=api_ua_title,
+            )
 
         # The title directly exposed by the source page (AniHub: H1 + the
         # adjacent p.text-sm.text-gray-400.mb-1) is the highest-confidence search
@@ -3018,9 +3934,9 @@ class Core:
         # are deliberately excluded above).  Shikimori usually supplies the RU
         # title here, so prefer it over machine translation.
         if not ru_title:
-            ru_title = choose_localized_title("RU", authority.aliases, canonical_names)
+            ru_title = clean_title(authority.russian) or choose_localized_title("RU", authority.aliases, canonical_names)
         if not ua_title:
-            ua_title = choose_localized_title("UA", [], canonical_names)
+            ua_title = api_ua_title or choose_localized_title("UA", api_identity_aliases, canonical_names)
 
         async def quick_translate(coro: Awaitable[str]) -> str:
             try:
@@ -3041,28 +3957,154 @@ class Core:
             elif lang == "ru" and value:
                 ru_title = value
 
+        # Rebuild family roots after localized titles are known.  For a request
+        # that starts on season N>1 these roots become the primary catalog queries,
+        # so a single search can return season 1..N and any later indexed seasons.
+        family_inputs = unique_strings([
+            search_original, romanized, english, native_original, ua_title, ru_title,
+            payload.title, *source_aliases, *api_identity_aliases, *preliminary_family_roots,
+        ], limit=40)
+        if not season_family_expansion:
+            numbers = [season_number(value) for value in family_inputs]
+            numbers = [number for number in numbers if number is not None]
+            source_season_number = max(numbers) if numbers else source_season_number
+            season_family_expansion = bool(source_season_number and source_season_number > 1)
+        family_roots = season_family_roots(family_inputs, limit=16) if season_family_expansion else []
+        if season_family_expansion:
+            # Authority-started base seasons (MAL/AniList/Shikimori) often have no
+            # explicit season marker in the selected title.  ``season_family_roots``
+            # therefore used to keep only Latin roots discovered from sequel aliases,
+            # while the already-known UA/RU translations were missing.  The verifier
+            # then rejected perfectly valid localized catalog cards before title
+            # matching because they were not members of the Latin-only family.
+            #
+            # Canonical localized/base names are trusted identity data, so always add
+            # their season-free forms to the family root set.  Do not do this for
+            # arbitrary discovered catalog strings.
+            canonical_base_roots = [
+                season_family_title(value)
+                for value in [search_original, romanized, english, native_original, ua_title, ru_title, *preliminary_family_roots]
+                if clean_title(value)
+                and not _SEASON_FAMILY_EXTRA_RE.search(clean_title(value))
+                and not is_catalog_noise_title(value)
+            ]
+            family_roots = unique_strings([*family_roots, *canonical_base_roots], limit=16)
+        if season_family_expansion and not family_roots:
+            family_roots = unique_strings([
+                season_family_title(value)
+                for value in [*preliminary_family_roots, search_original, romanized, english, native_original, ua_title, ru_title]
+                if clean_title(value)
+                and not _SEASON_FAMILY_EXTRA_RE.search(clean_title(value))
+                and not is_catalog_noise_title(value)
+            ], limit=16)
+        self._season_family_mode = season_family_expansion
+        self._season_family_roots = list(family_roots)
+
+        # One bounded AniList family search gives us canonical season names even
+        # when the starting item is season 4.  Keep only TV entries that are an
+        # exact/base-or-season match of the derived franchise root, so movies/OVAs
+        # and unrelated spin-offs do not enter the catalog search aliases.
+        anilist_family_aliases: list[str] = []
+        if season_family_expansion:
+            latin_family_seed = next((root for root in family_roots if title_script(root) == "latin"), "")
+            if latin_family_seed:
+                try:
+                    family_media = await self.anilist_search(latin_family_seed)
+                except Exception:
+                    family_media = []
+                for media in family_media[:10]:
+                    media_format = clean_text(media.get("format")).upper()
+                    if media_format and media_format not in {"TV", "TV_SHORT"}:
+                        continue
+                    names = self.media_names(media)
+                    if not any(title_match_kind(name, family_roots) for name in names):
+                        continue
+                    anilist_family_aliases.extend(names[:8])
+                anilist_family_aliases = unique_strings(anilist_family_aliases, limit=30)
+
+        def family_root_for(value: str, *, script: str = "") -> str:
+            value = clean_title(value)
+            if value and (season_number(value) is not None or re.search(r"第\s*\d{1,2}\s*期", value)):
+                root = season_family_title(value)
+                if root:
+                    return root
+            if script:
+                return next((root for root in family_roots if title_script(root) == script), "")
+            return ""
+
+        ua_family_root = family_root_for(ua_title) or next((
+            root for root in family_roots if re.search(r"[іїєґ]", root, re.I)
+        ), "")
+        ru_family_root = family_root_for(ru_title) or next((
+            root for root in family_roots if re.search(r"[а-яё]", root, re.I) and not re.search(r"[іїєґ]", root, re.I)
+        ), "")
+        original_family_root = family_root_for(search_original, script="latin")
+        english_family_root = family_root_for(english, script="latin")
+
         await emit(
             "localized_titles", 14,
-            "Порядок пошуку підготовлено: Original → English → мова каталогу → інші назви.",
+            "Порядок пошуку підготовлено: мова каталогу → franchise root → Original/English → інші назви." if season_family_expansion else "Порядок пошуку підготовлено: Original → English → мова каталогу → інші назви.",
             original=search_original, english=english, ukrainian=ua_title, russian=ru_title,
+            source_season=source_season_number, family_roots=family_roots[:8],
         )
 
         # Only exact-media aliases are allowed to drive searches.  The old family
         # enrichment added sequel/arc names such as Faceless Arc and 2nd Season,
         # which both polluted Notion aliases and multiplied catalog requests.
+        canonical_search_aliases = unique_strings([
+            *(family_roots if season_family_expansion else []),
+            *anilist_family_aliases,
+            search_original, romanized, english, native_original, ua_title, ru_title,
+            *api_identity_aliases, payload.title,
+        ], limit=50)
+
+        def searchworthy_alias(value: str) -> bool:
+            if not is_probable_title(value) or is_catalog_noise_title(value):
+                return False
+            if any(normalize_title(value) == normalize_title(base) for base in canonical_search_aliases):
+                return True
+            # Keep season/part variants and close lexical aliases; reject unrelated
+            # card metadata and SEO strings discovered deep in catalog pages.
+            if title_match_kind(value, canonical_search_aliases):
+                return True
+            return max(
+                (title_relation_score(value, base) for base in canonical_search_aliases if base),
+                default=0.0,
+            ) >= 0.72
+
         trusted_identity_aliases = unique_strings([
-            search_original, romanized, english, native_original,
-            ua_title, ru_title, *source_aliases, *authority.aliases, payload.title,
-        ], limit=40)
-        identity_aliases = [
-            value for value in trusted_identity_aliases
-            if is_probable_title(value) and not is_catalog_noise_title(value)
-        ]
+            *canonical_search_aliases, *source_aliases, *authority.aliases,
+        ], limit=60)
+        identity_aliases = [value for value in trusted_identity_aliases if searchworthy_alias(value)]
+
+        # AniHub exact lookup identifies the current season only.  When the user
+        # starts from season N>1, add one root search so AniHub can contribute all
+        # indexed seasons, not just N.  The same family-root logic is already used
+        # by Mikai above.
+        anihub_family_items: list[dict[str, str]] = []
+        if season_family_expansion and (ua_family_root or original_family_root or english_family_root):
+            try:
+                anihub_family_items = await self.search_anihub_family(
+                    [ua_family_root or original_family_root or english_family_root], identity_aliases
+                )
+            except Exception:
+                anihub_family_items = []
 
         def catalog_priority_plan(domain: str) -> list[str]:
             local = ua_title if domain in UA_SITES else ru_title
-            # The first three semantic slots are protected from short timeouts:
-            # Latin Original/Romaji -> English -> language of this catalog.
+            local_root = ua_family_root if domain in UA_SITES else ru_family_root
+            if season_family_expansion:
+                # A season-free query is intentional here: catalog search pages
+                # usually return the whole franchise, so starting from season 4
+                # can still discover seasons 1/2/3 and later seasons in one request.
+                if domain in UA_SITES or (domain in RU_SITES and domain != "crunchyroll.com"):
+                    return unique_strings([local_root, local, original_family_root or search_original, english_family_root or english], limit=4)
+                return unique_strings([original_family_root or search_original, english_family_root or english, local_root, local], limit=4)
+            # Localized catalogs are most likely to index the localized title. Once
+            # AniHub/Mikai/Shikimori have supplied it, try that first and avoid two
+            # predictable misses on Romaji/English. Crunchyroll remains Latin-first.
+            if domain in UA_SITES or (domain in RU_SITES and domain != "crunchyroll.com"):
+                return unique_strings([local, search_original, english], limit=3)
             return unique_strings([search_original, english, local], limit=3)
 
         def catalog_query_plan(domain: str, extra: Iterable[str] = ()) -> list[str]:
@@ -3070,10 +4112,13 @@ class Core:
             # Only after the priority trio has failed may native CJK / alternate
             # aliases be tried, and these secondary names use a short timeout.
             remaining = [
-                romanized, payload.title, native_original,
-                *source_aliases, *authority.aliases, *extra,
+                value for value in [
+                    romanized, payload.title, native_original,
+                    *source_aliases, *authority.aliases, *extra,
+                ]
+                if searchworthy_alias(value)
             ]
-            return unique_strings([*priority, *remaining], limit=8)
+            return unique_strings([*priority, *remaining], limit=4)
 
         catalogs: dict[str, list[dict[str, Any]]] = {site: [] for site in CATALOG_SITES}
         timed_out_domains: set[str] = set()
@@ -3088,9 +4133,45 @@ class Core:
                 found=1,
             )
 
-        # PHASE 1 — all catalogs run concurrently, but each catalog checks its
-        # title variants SEQUENTIALLY in the strict order above.
-        phase1_domains = [domain for domain in CATALOG_SITES if domain != source_catalog]
+        # Authority resolution already confirmed Shikimori by MAL ID. Reuse the
+        # canonical link instead of doing another Shikimori catalog search.
+        if authority.mal_id and authority.links.get("shikimori.io"):
+            shiki_link = authority.links["shikimori.io"][0]
+            catalogs["shikimori.io"] = [{
+                "url": compact_url(shiki_link.get("url", "")),
+                "title": ru_title or clean_title(shiki_link.get("title", "")) or romanized,
+                "match": "exact",
+            }]
+
+        # Exact API lookups can pre-seed AniHub/Mikai even when the input came from
+        # another catalog. This removes their search work from phase 1 entirely.
+        if anihub_exact:
+            api_item = self.anihub_item_to_catalog(anihub_exact, ua_title or search_original)
+            if api_item:
+                catalogs["anihub.in.ua"] = self.merge_catalog_items(catalogs["anihub.in.ua"], [api_item])
+        if anihub_family_items:
+            catalogs["anihub.in.ua"] = self.merge_catalog_items(catalogs["anihub.in.ua"], anihub_family_items)
+        if mikai_family_items:
+            catalogs["mikai.me"] = self.merge_catalog_items(catalogs["mikai.me"], mikai_family_items)
+        elif mikai_exact:
+            api_item = self.mikai_item_to_catalog(mikai_exact, ua_title or search_original)
+            if api_item:
+                catalogs["mikai.me"] = self.merge_catalog_items(catalogs["mikai.me"], [api_item])
+
+        # PHASE 1 — all still-empty catalogs run concurrently, but each catalog
+        # checks its title variants sequentially. Mikai family data was resolved
+        # before fan-out, so it does not need a second adapter task here.
+        phase1_domains = [
+            domain for domain in CATALOG_SITES
+            if (
+                not catalogs[domain]
+                or (
+                    season_family_expansion
+                    and domain == source_catalog
+                    and domain not in {"anihub.in.ua", "mikai.me", "shikimori.io"}
+                )
+            )
+        ]
         phase1_tasks = [
             asyncio.create_task(
                 catalog_job(
@@ -3099,8 +4180,8 @@ class Core:
                     identity_aliases,
                     authority,
                     priority_queries=catalog_priority_plan(domain),
-                    query_limit=8,
-                    secondary_timeout=7.0,
+                    query_limit=(3 if domain in {"ru.yummyani.me", "jut.su", "anilibria.tv", "uaserials.com", "amanogawa.space", "anidesu.net"} else 4),
+                    secondary_timeout=6.0,
                 )
             )
             for domain in phase1_domains
@@ -3142,40 +4223,155 @@ class Core:
                         values.extend(aliases[:6])
             return [
                 value for value in unique_strings(values, limit=60)
-                if is_probable_title(value) and not is_catalog_noise_title(value)
+                if searchworthy_alias(value)
             ]
 
-        # PHASE 2 — one tiny replay only when a VERIFIED catalog page reveals a
-        # genuinely new exact title.  Domains that timed out are not hammered again.
-        discovered = collect_verified_aliases()
+        # PHASE 2 — targeted replay. New localized base names are sent only to
+        # empty catalogs of the same language group. New season/part titles are
+        # also sent to catalogs that found season 1 but do not yet cover that
+        # season. This keeps completeness (e.g. AnimeGO season 2) without replaying
+        # every alias across every domain.
         initial_keys = {normalize_title(v) for v in identity_aliases if normalize_title(v)}
-        new_names = unique_strings([
-            v for v in discovered
-            if normalize_title(v) and normalize_title(v) not in initial_keys
-        ], limit=2)
+        discovered_by_group: dict[str, list[str]] = {"UA": [], "RU": []}
+        season_by_group: dict[str, list[str]] = {"UA": [], "RU": []}
+
+        # In family mode build an explicit contiguous season grid.  Season 1 is
+        # often stored as the bare franchise title, so relying only on discovered
+        # ``2 сезон`` / ``3 сезон`` aliases can leave a partially-filled catalog
+        # without season 1.  Starting from season 4 therefore means 1..4; if APIs
+        # already exposed season 5, the grid naturally becomes 1..5.
+        if season_family_expansion:
+            known_numbers = [source_season_number or 1]
+            for value in [*identity_aliases, *anilist_family_aliases, *api_identity_aliases]:
+                number = season_number(value)
+                if number is not None:
+                    known_numbers.append(number)
+            max_known_season = max(known_numbers) if known_numbers else (source_season_number or 1)
+            max_known_season = min(max(1, max_known_season), 12)
+            if ua_family_root:
+                season_by_group["UA"].extend(
+                    clean_title(f"{ua_family_root} ({number} сезон)")
+                    for number in range(1, max_known_season + 1)
+                )
+            if ru_family_root:
+                season_by_group["RU"].extend(
+                    clean_title(f"{ru_family_root} {number} сезон")
+                    for number in range(1, max_known_season + 1)
+                )
+
+        def compact_replay_alias(group: str, value: str) -> str:
+            """Turn noisy catalog display titles into one stable replay query.
+
+            Example: AnimeVost may expose
+            "... (второй сезон) / Romaji 2 [1-12 из 12]". Sending that whole
+            display string to every other catalog is slow and brittle. If we can
+            identify the season, replay the trusted localized base + season number.
+            """
+            value = clean_title(value)
+            # Display titles such as "RU / Romaji [1-12 из 12]" are useful in
+            # results but waste requests when replayed verbatim across catalogs.
+            # Keep only the localized half before season normalization.
+            if " / " in value and re.search(r"\[\s*\d+\s*-\s*\d+\s+(?:из|з|of)\s+\d+\s*\]", value, re.I):
+                value = clean_title(value.split(" / ", 1)[0])
+            number = season_number(value)
+            if number is not None:
+                if group == "UA":
+                    base = ua_family_root or season_family_title(ua_title) or ua_title
+                else:
+                    base = ru_family_root or season_family_title(ru_title) or ru_title
+                if base:
+                    if number == 1:
+                        return clean_title(base)
+                    return clean_title(f"{base} ({number} сезон)" if group == "UA" else f"{base} {number} сезон")
+            return value
+
+        for source_domain_name, items in catalogs.items():
+            group = self.catalog_group(source_domain_name)
+            for item in items:
+                values = [item.get("title", "")]
+                aliases = item.get("_aliases") if isinstance(item, dict) else None
+                if isinstance(aliases, list):
+                    values.extend(aliases[:8])
+                for value in values:
+                    if (
+                        searchworthy_alias(value)
+                        and normalize_title(value)
+                        and normalize_title(value) not in initial_keys
+                    ):
+                        compact_value = compact_replay_alias(group, value)
+                        if compact_value:
+                            discovered_by_group[group].append(compact_value)
+                        if season_number(value) is not None or SEASON_RE.search(value):
+                            season_value = compact_replay_alias(group, value)
+                            if season_value:
+                                season_by_group[group].append(season_value)
+        if season_family_expansion:
+            for group in ("UA", "RU"):
+                observed = [season_number(value) for value in season_by_group[group]]
+                observed = [number for number in observed if number is not None]
+                if not observed:
+                    continue
+                upper = min(max(observed), 12)
+                base = ua_family_root if group == "UA" else ru_family_root
+                if base:
+                    grid = [
+                        clean_title(f"{base} ({number} сезон)" if group == "UA" else f"{base} {number} сезон")
+                        for number in range(1, upper + 1)
+                    ]
+                    season_by_group[group] = unique_strings([*grid, *season_by_group[group]], limit=16)
+
+        discovered_limit = 8 if season_family_expansion else 3
+        season_limit = 12 if season_family_expansion else 3
+        discovered_by_group = {group: unique_strings(values, limit=discovered_limit) for group, values in discovered_by_group.items()}
+        season_by_group = {group: unique_strings(values, limit=season_limit) for group, values in season_by_group.items()}
+        replay_aliases = unique_strings([*discovered_by_group["UA"], *discovered_by_group["RU"]], limit=6)
         alias_replay_rounds = 0
-        replay_domains = [
-            d for d in CATALOG_SITES
-            if d != source_catalog and not catalogs[d] and d not in timed_out_domains
-        ]
-        if new_names and replay_domains and within_budget(35.0):
+        replay_plan: dict[str, list[str]] = {}
+        for domain in CATALOG_SITES:
+            if domain in timed_out_domains or domain in self._dead_search_domains or self.domain_hard_blocked(domain) or domain in {"anihub.in.ua", "mikai.me", "shikimori.io"}:
+                continue
+            group = self.catalog_group(domain)
+            already_tried = {normalize_title(x) for x in tried_by_domain.get(domain, [])}
+            pending: list[str] = []
+            if not catalogs[domain]:
+                # A completely empty catalog needs the explicit localized season grid
+                # too.  Previously only newly *discovered* aliases were replayed here.
+                # When UA/RU names were already known before phase 1, they were not
+                # considered new aliases, so the second scan was silently skipped for
+                # the very catalogs that needed it most.
+                pending.extend(discovered_by_group[group])
+                pending.extend(season_by_group[group])
+            else:
+                existing_titles = [clean_title(item.get("title", "")) for item in catalogs[domain]]
+                for season_alias in season_by_group[group]:
+                    if not catalog_titles_cover_alias(existing_titles, season_alias):
+                        pending.append(season_alias)
+            replay_limit = 8 if season_family_expansion else 2
+            pending = [x for x in unique_strings(pending, limit=replay_limit) if normalize_title(x) not in already_tried]
+            if pending:
+                replay_plan[domain] = pending
+
+        replay_domains = list(replay_plan)
+        if replay_domains and within_budget(35.0):
             alias_replay_rounds = 1
+            replay_visible_aliases = unique_strings([
+                *replay_aliases,
+                *(alias for domain in replay_domains for alias in replay_plan.get(domain, [])),
+            ], limit=16)
             await emit(
                 "catalogs_alias_replay", 64,
-                f"Нову точну назву знайдено на перевіреній сторінці. Короткий повтор: {len(replay_domains)} каталогів.",
-                aliases=new_names,
+                f"Повторний пошук локалізованих/сезонних назв: {len(replay_domains)} каталогів.",
+                aliases=replay_visible_aliases,
             )
             replay_tasks = []
             for domain in replay_domains:
-                already = {normalize_title(x) for x in tried_by_domain.get(domain, [])}
-                pending = [x for x in new_names if normalize_title(x) not in already]
-                if pending:
-                    replay_tasks.append(asyncio.create_task(
-                        catalog_job(
-                            domain, pending, unique_strings([*identity_aliases, *new_names], limit=50), authority,
-                            priority_queries=(), query_limit=2, secondary_timeout=6.0,
-                        )
-                    ))
+                pending = replay_plan[domain]
+                replay_tasks.append(asyncio.create_task(
+                    catalog_job(
+                        domain, pending, unique_strings([*identity_aliases, *replay_aliases], limit=50), authority,
+                        priority_queries=(), query_limit=(8 if season_family_expansion else 2), secondary_timeout=5.0,
+                    )
+                ))
             completed = 0
             total = max(1, len(replay_tasks))
             for task in asyncio.as_completed(replay_tasks):
@@ -3189,7 +4385,7 @@ class Core:
                 pct = 64 + round((completed / total) * 5)
                 await emit(
                     "catalogs_alias_replay", pct,
-                    f"{domain}: повтор {completed}/{len(replay_tasks)}" + (f" · {error}" if error else "") + ".",
+                    f"{domain}: точковий повтор {completed}/{len(replay_tasks)}" + (f" · {error}" if error else "") + ".",
                     domain=domain, found=len(catalogs[domain]), error=error, tried=tried,
                 )
 
@@ -3199,10 +4395,14 @@ class Core:
         all_identity = unique_strings([*identity_aliases, *final_identity_aliases], limit=70)
         fallback_specs = [
             (domain, catalog_query_plan(domain, final_identity_aliases))
-            for domain in CATALOG_SITES if not catalogs[domain]
+            for domain in CATALOG_SITES
+            if not catalogs[domain] and domain not in self._dead_search_domains and domain not in {"anihub.in.ua", "mikai.me"}
         ]
         fallback_tasks = [
-            asyncio.create_task(google_job(domain, queries, all_identity, query_limit=7, timeout=12.0))
+            asyncio.create_task(google_job(
+                domain, queries, all_identity,
+                query_limit=(1 if season_family_expansion else 3), timeout=10.0,
+            ))
             for domain, queries in fallback_specs
         ]
         completed = 0
@@ -3227,8 +4427,12 @@ class Core:
         ru_candidates = [item.get("title", "") for d, items in catalogs.items() if d in RU_SITES for item in items]
         ua_candidates = [item.get("title", "") for d, items in catalogs.items() if d in UA_SITES for item in items]
         refined_identity = collect_verified_aliases()
-        ru_title = choose_localized_title("RU", ru_candidates, refined_identity) or ru_title
-        ua_title = choose_localized_title("UA", ua_candidates, refined_identity) or ua_title
+        # When processing season N>1, the selected media must remain season N even
+        # though catalog expansion now finds the whole franchise.  Do not let a
+        # season-1/base catalog title replace the localized title of the input item.
+        if not season_family_expansion:
+            ru_title = choose_localized_title("RU", ru_candidates, refined_identity) or ru_title
+            ua_title = choose_localized_title("UA", ua_candidates, refined_identity) or ua_title
         final_identity_aliases = refined_identity
 
         self.log("Пошук завершено: " + ", ".join(f"{d}={len(v)}" for d, v in catalogs.items() if v))
@@ -3246,7 +4450,8 @@ class Core:
                 return fallback
 
         description_task = asyncio.create_task(
-            safe_translation(self.translate_uk(authority.description), clean_text(authority.description))
+            asyncio.sleep(0, result=api_description_uk)
+            if api_description_uk else safe_translation(self.translate_uk(authority.description), clean_text(authority.description))
         )
         title_uk_task = asyncio.create_task(
             asyncio.sleep(0, result=ua_title)
@@ -3268,7 +4473,12 @@ class Core:
                 native_original, romanized, english, final_uk, final_ru,
                 *source_aliases, *final_identity_aliases, *authority.aliases,
             ], limit=80)
-            if is_probable_title(value) and not is_catalog_noise_title(value)
+            if (
+                is_probable_title(value)
+                and not is_catalog_noise_title(value)
+                and not re.search(r"\[\s*\d+\s*-\s*\d+\s+(?:из|з|of)\s+\d+\s*\]", value, re.I)
+                and (not season_family_expansion or not _SEASON_FAMILY_EXTRA_RE.search(value))
+            )
         ]
 
         public_catalogs = {
@@ -3278,6 +4488,8 @@ class Core:
             ]
             for site in CATALOG_SITES
         }
+        internal_result_counts = {site: len(catalogs.get(site, [])) for site in CATALOG_SITES}
+        public_result_counts = {site: len(public_catalogs.get(site, [])) for site in CATALOG_SITES}
 
         result: dict[str, Any] = {
             "schema_version": 3,
@@ -3304,6 +4516,14 @@ class Core:
                 "url": authority.banner,
                 "source": "anilist.co" if authority.banner else "",
             },
+            "trailer": {
+                "url": authority.trailer_url or media_trailer_url(authority.trailer_site, authority.trailer_id),
+                "embed_url": authority.trailer_embed_url or media_trailer_embed_url(authority.trailer_site, authority.trailer_id),
+                "site": authority.trailer_site,
+                "id": authority.trailer_id,
+                "thumbnail": authority.trailer_thumbnail,
+                "source": authority.trailer_source,
+            },
             "authority": authority.links,
             "genres": self.taxonomy_payload(authority.genres, ["myanimelist.net", "shikimori.io", "anilist.co"]),
             "themes": self.taxonomy_payload(authority.themes, ["myanimelist.net", "shikimori.io"]),
@@ -3316,23 +4536,30 @@ class Core:
                 "mal_id": authority.mal_id,
                 "source_catalog": source_catalog or "",
                 "search_strategy": {
-                    "authority": "fast /api/search: Google site -> direct authority fallback",
-                    "catalogs": "per catalog: Latin Original/Romaji -> English -> UA/RU title without short timeout; then secondary aliases with timeout; ordered fallback",
+                    "authority": "canonical MAL/AniList/Shikimori identity with API-first UA enrichment",
+                    "catalogs": "AniHub/Mikai API first; season-family root expansion from any starting season; localized catalog title -> Romaji -> English; targeted same-language alias replay; bounded Google fallback",
                 },
                 "catalog_search": {
                     "async": True,
                     "domains": len(CATALOG_SITES),
-                    "query_names": unique_strings([search_original, english, ua_title, ru_title, native_original], limit=8),
-                    "query_order": "original -> english -> catalog_language -> other_exact_aliases",
+                    "query_names": unique_strings([*family_roots, search_original, english, ua_title, ru_title, native_original], limit=16),
+                    "query_order": "season_family_root -> catalog_language -> original -> english -> other_exact_aliases" if season_family_expansion else "catalog_language -> original -> english -> other_exact_aliases (Crunchyroll stays Latin-first)",
+                    "source_season": source_season_number,
+                    "season_family_expansion": season_family_expansion,
+                    "family_roots": family_roots,
                     "source_aliases": source_aliases,
                     "discovered_aliases": final_identity_aliases,
                     "alias_replay_rounds": alias_replay_rounds,
-                    "result_counts": {site: len(catalogs.get(site, [])) for site in CATALOG_SITES},
+                    # result_counts describes the JSON that clients actually
+                    # receive. Keep pre-serialization counts separately for debugging.
+                    "result_counts": public_result_counts,
+                    "internal_result_counts": internal_result_counts,
+                    "public_result_counts": public_result_counts,
                     "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
                     "priority_short_timeout": False,
-                    "priority_order": "latin_original -> english -> catalog_language",
+                    "priority_order": "catalog_language -> latin_original -> english",
                     "secondary_alias_timeout_seconds": 7,
-                    "fallback_timeout_seconds": 12,
+                    "fallback_timeout_seconds": 10,
                     "timed_out_domains": sorted(timed_out_domains),
                 },
                 "generated_at_unix": int(time.time()),

@@ -1235,6 +1235,8 @@ body.modal-open { overflow:hidden; }
   transition:.2s ease;
 }
 .record-action-btn b { font-size:18px; font-weight:500; }
+.refresh-record-btn:hover:not(:disabled) { border-color:rgba(93,226,170,.38); background:rgba(70,210,150,.1); color:#dffff1; }
+.refresh-record-btn:disabled { opacity:.42; cursor:not-allowed; }
 .merge-record-btn:hover { border-color:rgba(112,201,255,.34); background:rgba(112,201,255,.1); color:#eaf8ff; }
 .delete-record-btn:hover { border-color:rgba(255,105,126,.34); background:rgba(255,85,110,.1); color:#ffb0bc; }
 .delete-title-modal { width:min(520px, 100%); }
@@ -2225,3 +2227,406 @@ body.modal-open { overflow:hidden; }
   .catalog-virtualized .anime-card,
   .catalog-virtualized .poster { transition:none !important; }
 }
+
+/* v7.4 — title player/source workspace */
+.title-media-workspace {
+  width:100%;
+  display:grid;
+  gap:12px;
+}
+.title-media-mode-tabs {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px;
+  width:min(420px,100%);
+}
+.title-media-mode {
+  min-height:46px;
+  padding:0 18px;
+  border:1px solid rgba(255,255,255,.10);
+  border-radius:14px;
+  background:rgba(255,255,255,.025);
+  color:#9ca7b8;
+  cursor:pointer;
+  font-weight:850;
+  transition:.18s ease;
+}
+.title-media-mode:hover { background:rgba(255,255,255,.05); color:#eef7ff; }
+.title-media-mode.active {
+  border-color:rgba(112,201,255,.36);
+  background:linear-gradient(180deg,rgba(112,201,255,.14),rgba(112,201,255,.07));
+  color:#e9f8ff;
+  box-shadow:0 10px 30px rgba(0,0,0,.18);
+}
+.player-source-tabs {
+  display:grid;
+  grid-template-columns:repeat(5,minmax(0,1fr));
+  gap:8px;
+}
+.player-source-tab {
+  min-height:42px;
+  padding:0 10px;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:12px;
+  background:rgba(255,255,255,.022);
+  color:#aab3c2;
+  cursor:pointer;
+  font-size:12px;
+  font-weight:800;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  transition:.18s ease;
+}
+.player-source-tab:hover:not(:disabled) { color:#f0f7ff; background:rgba(255,255,255,.055); }
+.player-source-tab.active { color:#e9f8ff; background:rgba(112,201,255,.10); }
+.player-source-tab.tone-yellow,
+.player-source-tab.tone-yellow:hover:not(:disabled),
+.player-source-tab.tone-yellow.active { border-color:rgba(255,207,89,.66); }
+.player-source-tab.tone-red,
+.player-source-tab.tone-red:hover:not(:disabled),
+.player-source-tab.tone-red.active { border-color:rgba(255,104,123,.62); }
+.player-source-tab.mikai-limited { background:rgba(255,91,112,.11); }
+.player-source-tab.mikai-limited.active { background:rgba(255,91,112,.17); box-shadow:inset 0 0 0 1px rgba(255,207,89,.08); }
+.player-source-tab.mikai-ready { background:rgba(71,205,132,.09); }
+.player-source-tab.mikai-ready.active { background:rgba(71,205,132,.15); box-shadow:inset 0 0 0 1px rgba(255,207,89,.08); }
+.player-source-tab:disabled { opacity:.34; cursor:not-allowed; }
+.title-media-pane { min-width:0; }
+.player-panel,
+.title-media-pane[data-media-pane="sources"] .sources-card {
+  width:100%;
+  max-width:none;
+  margin:0;
+}
+.player-panel {
+  border:1px solid rgba(255,255,255,.085);
+  border-radius:22px;
+  background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.016));
+  overflow:hidden;
+}
+.player-toolbar {
+  min-height:58px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:10px 12px;
+  border-bottom:1px solid rgba(255,255,255,.07);
+}
+.player-season-control {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  color:#8f99aa;
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+}
+.player-season-control select,
+.mikai-player-controls select {
+  min-height:38px;
+  padding:0 34px 0 12px;
+  border:1px solid rgba(255,255,255,.10);
+  border-radius:10px;
+  background:#121725;
+  color:#eef4fb;
+  font-weight:750;
+  outline:none;
+}
+.player-season-control select:focus,
+.mikai-player-controls select:focus { border-color:rgba(112,201,255,.42); }
+.player-open-source {
+  min-height:38px;
+  padding:0 12px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:10px;
+  color:#9fcce8;
+  background:rgba(112,201,255,.05);
+  font-size:11px;
+  font-weight:800;
+}
+.player-stage { min-height:360px; position:relative; background:#05070b; }
+.player-loading,
+.player-empty-state {
+  min-height:360px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:10px;
+  padding:30px;
+  text-align:center;
+  color:#dce5ef;
+}
+.player-loading[hidden] { display:none !important; }
+.player-loading small,
+.player-empty-state span { max-width:620px; color:#7f899b; font-size:12px; line-height:1.55; }
+.player-empty-state.error strong { color:#ff9caf; }
+.player-frame-wrap {
+  position:relative;
+  width:100%;
+  aspect-ratio:16/9;
+  min-height:360px;
+  background:#000;
+  overflow:hidden;
+}
+.title-player-frame {
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  border:0;
+  background:#000;
+}
+.dom-player-viewport {
+  position:relative;
+  overflow:hidden;
+  background:#000;
+  max-width:100%;
+  margin:0 auto;
+  border-radius:10px;
+}
+/* Keep the remote iframe laid out at its real desktop size while loading.
+   display:none/hidden makes Chromium initialize nested pages with a tiny
+   mobile-like viewport (~300px), which is why players looked like a phone UI. */
+.dom-player-viewport.is-loading {
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  max-width:none;
+  margin:0;
+  border-radius:0;
+  opacity:0;
+  pointer-events:none;
+  overflow:hidden;
+}
+.dom-player-viewport[hidden] { display:none !important; }
+.dom-player-frame {
+  position:absolute;
+  left:0;
+  top:0;
+  width:1365px;
+  height:900px;
+  min-width:1365px;
+  min-height:900px;
+  border:0;
+  background:#000;
+  transform-origin:0 0;
+}
+.mikai-player-controls {
+  display:grid;
+  grid-template-columns:1.2fr .8fr .8fr;
+  gap:8px;
+  padding:12px;
+  border-bottom:1px solid rgba(255,255,255,.07);
+  background:rgba(255,255,255,.018);
+}
+.mikai-player-controls label { display:grid; gap:5px; min-width:0; }
+.mikai-player-controls label > span { color:#7f899b; font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }
+.mikai-player-controls select { width:100%; min-width:0; }
+.player-meta-line {
+  min-height:34px;
+  padding:8px 12px;
+  display:flex;
+  align-items:center;
+  border-bottom:1px solid rgba(255,255,255,.055);
+  color:#8793a5;
+  font-size:10px;
+  font-weight:700;
+}
+.player-proxy-hint {
+  position:absolute;
+  left:50%;
+  bottom:12px;
+  z-index:5;
+  transform:translateX(-50%);
+  width:max-content;
+  max-width:calc(100% - 24px);
+  padding:8px 11px;
+  border:1px solid rgba(255,208,122,.25);
+  border-radius:10px;
+  background:rgba(10,13,20,.88);
+  color:#ffd992;
+  font-size:10px;
+  font-weight:750;
+  backdrop-filter:blur(10px);
+}
+.detail-links .title-record-actions { margin-top:18px; }
+
+/* v7.4 — player settings */
+.player-settings-card {
+  padding:18px;
+  border:1px solid rgba(255,255,255,.085);
+  border-radius:18px;
+  background:rgba(255,255,255,.025);
+}
+.player-setting-label { display:block; margin-bottom:8px; color:#dce4ef; font-size:12px; font-weight:850; }
+.player-setting-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:8px; align-items:center; }
+.player-setting-input {
+  min-width:0;
+  height:44px;
+  padding:0 13px;
+  border:1px solid rgba(255,255,255,.11);
+  border-radius:11px;
+  background:#10141f;
+  color:#eef4fb;
+  outline:none;
+}
+.player-setting-input:focus { border-color:rgba(112,201,255,.42); box-shadow:0 0 0 3px rgba(112,201,255,.06); }
+.player-setting-link,
+.player-setting-save,
+.player-setting-clear { min-height:42px; white-space:nowrap; }
+.player-setting-link {
+  padding:0 13px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid rgba(167,150,255,.24);
+  border-radius:11px;
+  background:rgba(167,150,255,.08);
+  color:#d6cdff;
+  font-size:11px;
+  font-weight:800;
+}
+.player-setting-meta { margin-top:10px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.player-key-state { color:#ff9caf; font-size:11px; font-weight:750; }
+.player-key-state.configured { color:#8ce6b8; }
+
+.player-core-forward-row {
+  margin-top:14px;
+  padding-top:14px;
+  border-top:1px solid rgba(255,255,255,.07);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:18px;
+}
+.player-core-forward-row.disabled { opacity:.52; }
+.player-core-forward-copy { min-width:0; display:grid; gap:4px; }
+.player-core-forward-copy strong { color:#e5ebf4; font-size:12px; font-weight:850; }
+.player-core-forward-copy span { color:#7f899b; font-size:10px; line-height:1.45; }
+.player-core-forward-copy code { color:#ffd66b; font:inherit; }
+.setting-switch { position:relative; flex:0 0 auto; display:inline-flex; align-items:center; cursor:pointer; }
+.setting-switch input { position:absolute; opacity:0; pointer-events:none; }
+.setting-switch-track {
+  width:50px; height:28px; padding:3px; box-sizing:border-box;
+  border:1px solid rgba(255,255,255,.14); border-radius:999px;
+  background:rgba(255,255,255,.055); transition:.18s ease;
+}
+.setting-switch-track i {
+  display:block; width:20px; height:20px; border-radius:50%; background:#8893a5;
+  box-shadow:0 3px 10px rgba(0,0,0,.3); transform:translateX(0); transition:.18s ease;
+}
+.setting-switch input:checked + .setting-switch-track { border-color:rgba(255,207,89,.58); background:rgba(255,207,89,.13); }
+.setting-switch input:checked + .setting-switch-track i { background:#ffd66b; transform:translateX(22px); box-shadow:0 0 15px rgba(255,214,107,.22); }
+.setting-switch input:disabled + .setting-switch-track { cursor:not-allowed; opacity:.55; }
+
+@media (max-width:900px) {
+  .player-source-tabs { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .mikai-player-controls { grid-template-columns:1fr 1fr; }
+  .mikai-player-controls label:first-child { grid-column:1 / -1; }
+  .player-setting-row { grid-template-columns:1fr 1fr; }
+  .player-setting-input { grid-column:1 / -1; }
+}
+@media (max-width:620px) {
+  .title-media-mode-tabs { width:100%; }
+  .player-source-tabs { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .player-toolbar { align-items:stretch; flex-direction:column; }
+  .player-season-control { justify-content:space-between; }
+  .player-season-control select { flex:1; }
+  .player-open-source { width:100%; }
+  .player-stage,
+  .player-loading,
+  .player-empty-state,
+  .player-frame-wrap { min-height:220px; }
+  .mikai-player-controls { grid-template-columns:1fr; }
+  .mikai-player-controls label:first-child { grid-column:auto; }
+  .player-setting-row { grid-template-columns:1fr; }
+  .player-setting-input { grid-column:auto; }
+  .player-setting-link,
+  .player-setting-save { width:100%; }
+  .player-setting-meta { align-items:stretch; flex-direction:column; }
+}
+@media (max-width:820px) {
+  .settings-nav { grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
+
+/* YORU 7.6.0 - trailer as title background */
+.title-hero .banner-trailer-bg {
+  position:absolute;
+  top:0;
+  left:0;
+  right:0;
+  height:var(--title-banner-height);
+  overflow:hidden;
+  z-index:0;
+  pointer-events:none;
+  background:#080a10;
+  -webkit-mask-image:linear-gradient(to bottom,#000 0%,#000 58%,rgba(0,0,0,.94) 68%,rgba(0,0,0,.56) 82%,transparent 100%);
+  mask-image:linear-gradient(to bottom,#000 0%,#000 58%,rgba(0,0,0,.94) 68%,rgba(0,0,0,.56) 82%,transparent 100%);
+}
+.title-hero .banner-trailer-bg iframe,
+.title-hero .banner-trailer-bg video {
+  position:absolute;
+  top:50%;
+  left:50%;
+  width:max(100%, calc(var(--title-banner-height) * 1.777778));
+  height:max(var(--title-banner-height), calc(100vw * .5625));
+  transform:translate(-50%,-50%);
+  border:0;
+  object-fit:cover;
+  pointer-events:none;
+}
+.title-hero .banner-vignette { z-index:1; }
+.title-hero .banner-bg { z-index:0; }
+.banner-settings-card { max-width:760px; }
+.banner-trailer-setting { margin-top:0; padding-top:0; border-top:0; }
+.edit-existing-link { display:inline-flex; margin-top:8px; color:#8bd8ff; font-size:11px; font-weight:800; word-break:break-all; }
+.merge-trailer-value { margin-bottom:10px; }
+.merge-trailer-meta { display:grid; gap:4px; text-align:left; }
+.merge-trailer-meta strong { color:#edf4ff; font-size:12px; }
+.merge-trailer-meta small { color:#8794a8; font-size:9px; line-height:1.4; word-break:break-all; }
+
+
+/* YORU 7.7.0: AniHub discovery + screenshot identify */
+.random-title-chip { color:#fff1c9; background:rgba(255,208,122,.07); border:1px solid rgba(255,208,122,.17); }
+.random-title-chip:hover { color:#fff; background:rgba(255,208,122,.13); }
+.detail-top-actions { margin-left:auto; margin-right:12px; display:flex; gap:8px; align-items:center; }
+.top-context-btn { min-height:40px; padding:0 14px; border:1px solid rgba(255,255,255,.14); border-radius:12px; background:rgba(9,11,17,.52); backdrop-filter:blur(16px); color:#dce2ec; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; transition:.2s; }
+.top-context-btn:hover { border-color:rgba(112,201,255,.4); background:rgba(112,201,255,.09); color:#fff; }
+.top-context-btn.primary { border-color:rgba(126,232,181,.34); background:rgba(126,232,181,.12); color:#dffff0; }
+.discover-query-wrap { position:relative; display:flex; align-items:center; min-width:0; }
+.discover-query-wrap > input { padding-right:92px; }
+.discover-image-btn { position:absolute; right:6px; height:38px; padding:0 11px; border-radius:10px; border:1px solid rgba(255,255,255,.1); background:rgba(255,255,255,.045); color:#cbd6e6; cursor:pointer; font-size:11px; font-weight:700; }
+.discover-image-btn:hover { background:rgba(112,201,255,.1); color:#fff; }
+.discover-image-preview { margin-top:10px; min-height:56px; padding:7px 9px; display:flex; align-items:center; gap:10px; border:1px solid rgba(112,201,255,.18); border-radius:13px; background:rgba(112,201,255,.045); color:#c9d5e5; font-size:12px; }
+.discover-image-preview.hidden { display:none; }
+.discover-image-preview img { width:68px; height:44px; object-fit:cover; border-radius:8px; }
+.discover-image-preview span { flex:1; }
+.discover-image-preview button { width:30px; height:30px; border-radius:9px; border:1px solid var(--line); background:rgba(255,255,255,.04); color:#d8dce6; cursor:pointer; }
+.screenshot-discover-result { position:relative; overflow:hidden; }
+.screenshot-discover-result::before { content:''; position:absolute; inset:0; background:linear-gradient(90deg,rgba(10,12,19,.96),rgba(10,12,19,.76)),var(--discover-banner) center/cover no-repeat; opacity:.35; pointer-events:none; }
+.screenshot-discover-result > * { position:relative; z-index:1; }
+.screenshot-discover-result .discover-result-copy em { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; color:#80899b; font-style:normal; font-size:10px; line-height:1.4; }
+.remote-anime-card .card-meta { gap:8px; justify-content:flex-start; }
+.anihub-preview-hero { min-height:100vh; position:relative; display:flex; align-items:flex-end; padding:140px 0 80px; background:#080a10; overflow:hidden; }
+.anihub-preview-hero::before { content:''; position:absolute; inset:0; background:var(--preview-banner) center/cover no-repeat; filter:saturate(.9) blur(1px); transform:scale(1.03); opacity:.5; }
+.anihub-preview-backdrop { position:absolute; inset:0; background:linear-gradient(180deg,rgba(5,7,12,.2),rgba(5,7,12,.55) 42%,#080a10 94%),linear-gradient(90deg,rgba(5,7,12,.8),rgba(5,7,12,.2)); }
+.anihub-preview-shell { position:relative; z-index:2; width:min(1180px,calc(100% - 48px)); margin:0 auto; display:grid; grid-template-columns:240px minmax(0,780px); gap:38px; align-items:end; }
+.anihub-preview-poster { padding:7px; border:1px solid rgba(255,255,255,.14); border-radius:23px; background:rgba(255,255,255,.07); backdrop-filter:blur(18px); box-shadow:0 30px 80px rgba(0,0,0,.45); }
+.anihub-preview-poster img { width:100%; aspect-ratio:.7; object-fit:cover; display:block; border-radius:17px; }
+.anihub-preview-copy h1 { margin:0; font:800 clamp(42px,5.5vw,76px)/1 Manrope,sans-serif; letter-spacing:-.045em; }
+.anihub-preview-original { margin-top:10px; color:#bbc2cf; font-size:14px; }
+.anihub-preview-meta,.anihub-preview-genres { display:flex; flex-wrap:wrap; gap:7px; margin-top:16px; }
+.anihub-preview-meta span,.anihub-preview-genres span { padding:6px 9px; border:1px solid rgba(255,255,255,.1); border-radius:9px; background:rgba(255,255,255,.06); color:#d1d7e2; font-size:11px; }
+.anihub-preview-copy p { max-width:760px; margin:20px 0 0; color:#c0c6d1; line-height:1.75; font-size:14px; }
+.anihub-preview-source { display:inline-flex; margin-top:18px; color:var(--accent-2); font-size:12px; font-weight:700; }
+@media (max-width:800px) { .detail-top-actions { margin-left:8px; margin-right:8px; overflow:auto; } .top-context-btn { white-space:nowrap; } .anihub-preview-shell { grid-template-columns:1fr; } .anihub-preview-poster { width:170px; } .anihub-preview-hero { padding-top:170px; } }
+
+.screenshot-discover-result { grid-template-columns:132px 1fr auto; min-height:94px; }
+.screenshot-discover-result img { width:132px; height:76px; object-fit:cover; }

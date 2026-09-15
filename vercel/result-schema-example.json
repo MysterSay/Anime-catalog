@@ -58,6 +58,14 @@
     "url": "https://s4.anilist.co/file/anilistcdn/media/anime/banner/100668-9ZQSB5x5St7c.jpg",
     "source": "anilist.co"
   },
+  "trailer": {
+    "url": "https://www.youtube.com/watch?v=VIDEO_ID",
+    "embed_url": "https://www.youtube.com/embed/VIDEO_ID",
+    "site": "youtube",
+    "id": "VIDEO_ID",
+    "thumbnail": "https://img.youtube.com/vi/VIDEO_ID/hqdefault.jpg",
+    "source": "anilist.co"
+  },
   "authority": {
     "myanimelist.net": [
       {
@@ -251,7 +259,7 @@
   "status": "",
   "group": "",
   "meta": {
-    "core_version": "2.2.0",
+    "core_version": "2.21.2",
     "anilist_id": 100668,
     "mal_id": 36882,
     "source_catalog": "jut-su.net",
