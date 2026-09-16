@@ -1,91 +1,107 @@
-# YORU Installer 1.1.10
+# YORU Installer 1.4.0
 
-Windows GUI orchestrator для повного встановлення YORU Anime Catalog.
+Windows GUI installer for YORU Anime Catalog.
 
-## Головний принцип
+## 1.4.0: Turso without WSL
 
-Користувач задає **одну власну назву проєкту**. Installer використовує її як назву:
+The installer no longer installs, repairs, or uses WSL, Ubuntu, or Turso CLI.
 
-- Cloudflare Pages project;
-- Vercel Core project;
-- Turso database.
+Turso is managed directly through the official Turso Platform REST API:
 
-Installer не підставляє `myster-anime`, `anime-catalog` чи `yoru-anime` як готові назви.
+- validate Platform API token;
+- list organizations;
+- find/create the `default` database group;
+- create or reuse the project database;
+- obtain `libsql://...` database URL;
+- create the full-access database auth token used by Cloudflare.
 
-## Структура, яку очікує Installer
+When the Turso button is pressed the installer opens the Turso Dashboard. Sign in, create a **Platform API Token** in Account/Organization settings -> API Tokens, copy it, then return to the installer and press OK. The installer reads the clipboard, validates the token against `https://api.turso.tech`, selects the personal organization, and stores the token encrypted with Windows DPAPI.
+
+This removes the WSL/MSI/Ubuntu dependency and therefore also removes the previous WSL MSI 1603 failure path.
+
+## Portable `data/` layout
+
+Everything the installer itself downloads or creates stays next to the EXE in `data/`:
 
 ```text
-core/
-site/
-extension/
 install/
+  YoruInstaller.exe
+  data/
+    auth/
+      github/
+      cloudflare/
+      vercel/
+      git/
+      home/
+      turso/
+    cache/
+      npm/
+    downloads/
+    logs/
+    project/
+      Anime-catalog/
+    state/
+      installer-state.json
+    tools/
+      node/
+      git/
+      gh/
+      wrangler/
+      vercel/
 ```
 
-Для сумісності зі старими checkout-ами папка `vercel/` також розпізнається як ядро, але новий архів використовує `core/`.
+Turso credentials are stored in the encrypted installer state inside `data/state`; no Linux runtime is created.
 
-Якщо Installer запущений окремо і не знаходить проєкт, він клонує:
+## Portable tools
+
+Downloaded on demand:
+
+- Node.js 24.21.0 x64;
+- MinGit 2.55.0.5 x64;
+- GitHub CLI 2.101.0 x64;
+- Wrangler 4.132.0;
+- Vercel CLI 59.19.0.
+
+## Authorization panel
+
+The installer shows the active identity for GitHub, Cloudflare, Vercel and Turso. Clicking a service button starts its authorization flow. GitHub/Cloudflare/Vercel one-time codes are surfaced in their own GUI rows instead of being hidden in the log.
+
+Turso uses a Platform API Token copied from the Turso Dashboard rather than a WSL CLI login.
+
+## Project name check
+
+The button next to the shared project name is **Check** instead of Copy. It validates the slug, checks the active Cloudflare Pages account, and checks whether the exact `https://<name>.pages.dev` address is already occupied.
+
+## Repository
+
+The installer requires GitHub authorization and clones:
 
 ```text
-gh repo clone MysterSay/Anime-catalog
+MysterSay/Anime-catalog
 ```
 
-і продовжує без перезапуску.
+into:
 
-## Акаунти
+```text
+data/project/Anime-catalog
+```
 
-Перед використанням кожного сервісу Installer показує активний акаунт та просить підтвердження:
+## Deployment flow
 
-- GitHub (коли потрібен clone/login);
-- Cloudflare;
-- Vercel;
-- Turso.
+1. Prepare portable tools and clone/update the project.
+2. Validate GitHub, Cloudflare, Vercel and Turso authorization.
+3. Validate the shared project name.
+4. Deploy Python Core to Vercel.
+5. Deploy Site to Cloudflare Pages.
+6. Create/reuse Turso database through Platform API and mint DB auth token.
+7. Write Cloudflare secrets and Vercel environment variables.
+8. Final deploy and health checks.
+9. Deploy player preview aliases.
+10. Update the extension URL and open Tampermonkey/extension folder.
 
-Якщо вибрано інший акаунт, стару локальну прив'язку цього сервісу очищено перед повторним входом.
-
-## Ключі та URL
-
-Для чистого встановлення Installer заново отримує/генерує:
-
-- Site URL;
-- Core URL;
-- `TURSO_DATABASE_URL`;
-- `TURSO_AUTH_TOKEN`;
-- `CORE_API_KEY`.
-
-Після цього він заново записує потрібні Cloudflare secrets та Vercel environment variables, тому старі значення не повинні залишатися між різними clean installs.
-
-Turso account Access Token і DB auth token — різні речі. Account token потрібний Installer-у для роботи CLI; DB token передається сайту як `TURSO_AUTH_TOKEN`.
-
-## Безпека
-
-Секретні значення в installer state шифруються Windows DPAPI для поточного користувача Windows. Повні секрети не повинні друкуватися в лог.
-
-## Завершення
-
-Після успішного встановлення Installer:
-
-- перевіряє Core health;
-- перевіряє Site health/version;
-- перевіряє Site -> Core wiring;
-- прописує актуальний Site URL у `anime-to-yoru-collector-*.user.js`;
-- відкриває сторінку Tampermonkey;
-- відкриває папку `extension`.
-
-## Збірка
+## Build
 
 ```powershell
 cd install\src
 go build -trimpath -ldflags="-s -w -H windowsgui" -o ..\YoruInstaller.exe .
 ```
-
-
-## Прив’язка розширення
-
-Перед відкриттям папки `extension` Installer підміняє `DEFAULT_BASE` у userscript на фактичний production URL створеного Cloudflare Pages сайту.
-
-Після встановлення userscript адресу можна змінити без редагування коду: у панелі **Anime → YORU** затисніть `Shift` і натисніть домен у верхньому рядку. Розширення приймає і простий домен, і повний `https://` URL.
-
-
-## Player preview aliases
-
-Installer 1.1.10 після production deploy автоматично створює/оновлює preview aliases `p-anihub`, `p-animeon`, `p-jutsu`, `p-animego`. Вони потрібні Site 7.5.1 для native virtual-origin DOM player режиму.

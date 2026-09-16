@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Anime → YORU</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <strong>Anime → YORU</strong>
+        <span>Collector v3.2.0</span>
+      </div>
+      <span class="badge" id="browserBadge">WebExtension</span>
+    </header>
+
+    <section class="card">
+      <label for="siteBase">Сайт YORU</label>
+      <div class="site-row">
+        <input id="siteBase" type="text" spellcheck="false" autocomplete="off" placeholder="mrsay.pages.dev">
+        <button id="saveSite" class="compact" type="button">Зберегти</button>
+      </div>
+      <p id="siteStatus" class="status">Завантаження…</p>
+    </section>
+
+    <section class="actions">
+      <button id="openPanel" class="primary" type="button">Відкрити панель на сторінці</button>
+      <button id="openYoru" type="button">Відкрити YORU</button>
+    </section>
+
+    <footer>
+      Працює без Tampermonkey. Панель автоматично доступна на підтримуваних аніме-сайтах.
+    </footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

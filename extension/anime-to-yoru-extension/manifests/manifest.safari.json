@@ -1,0 +1,93 @@
+{
+  "manifest_version": 3,
+  "name": "Anime → YORU Collector",
+  "version": "3.2.0",
+  "description": "Збирає дані аніме зі сторінок підтримуваних сайтів і передає їх у YORU без Tampermonkey.",
+  "permissions": [
+    "storage",
+    "notifications"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "Anime → YORU",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://myanimelist.net/*",
+        "*://*.myanimelist.net/*",
+        "*://anilist.co/*",
+        "*://*.anilist.co/*",
+        "*://jut-su.net/*",
+        "*://*.jut-su.net/*",
+        "*://ru.yummyani.me/*",
+        "*://*.ru.yummyani.me/*",
+        "*://crunchyroll.com/*",
+        "*://*.crunchyroll.com/*",
+        "*://shikimori.io/*",
+        "*://*.shikimori.io/*",
+        "*://animevost.org/*",
+        "*://*.animevost.org/*",
+        "*://jutsu.tv/*",
+        "*://*.jutsu.tv/*",
+        "*://jut.su/*",
+        "*://*.jut.su/*",
+        "*://animego.studio/*",
+        "*://*.animego.studio/*",
+        "*://anilibria.tv/*",
+        "*://*.anilibria.tv/*",
+        "*://anilibria.top/*",
+        "*://*.anilibria.top/*",
+        "*://aniliberty.top/*",
+        "*://*.aniliberty.top/*",
+        "*://uaserials.com/*",
+        "*://*.uaserials.com/*",
+        "*://uachan.com/*",
+        "*://*.uachan.com/*",
+        "*://uachan.top/*",
+        "*://*.uachan.top/*",
+        "*://anihub.in.ua/*",
+        "*://*.anihub.in.ua/*",
+        "*://amanogawa.space/*",
+        "*://*.amanogawa.space/*",
+        "*://animeon.club/*",
+        "*://*.animeon.club/*",
+        "*://anidesu.net/*",
+        "*://*.anidesu.net/*",
+        "*://mikai.me/*",
+        "*://*.mikai.me/*",
+        "*://anitube.in.ua/*",
+        "*://*.anitube.in.ua/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "service_worker": "background.js",
+    "preferred_environment": [
+      "service_worker",
+      "document"
+    ]
+  }
+}

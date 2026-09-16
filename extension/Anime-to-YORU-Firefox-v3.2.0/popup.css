@@ -1,0 +1,24 @@
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;width:390px;background:#0b0f17;color:#eef4ff}
+main{padding:16px}
+header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
+header div{display:flex;flex-direction:column;gap:3px}
+header strong{font-size:18px;letter-spacing:.1px}
+header span{font-size:11px;color:#8f9caf}
+.badge{padding:5px 8px;border:1px solid rgba(112,201,255,.22);border-radius:999px;background:rgba(112,201,255,.08);color:#bfeaff!important}
+.card{padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:13px;background:#111824}
+label{display:block;margin-bottom:7px;color:#aab7c8;font-size:12px;font-weight:700}
+.site-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
+input,button{font:inherit}
+input{width:100%;height:38px;border:1px solid rgba(255,255,255,.12);border-radius:10px;background:#0b111b;color:#fff;padding:0 11px;outline:none}
+input:focus{border-color:rgba(112,201,255,.55);box-shadow:0 0 0 3px rgba(112,201,255,.08)}
+button{min-height:39px;border:1px solid rgba(255,255,255,.12);border-radius:10px;background:#151e2b;color:#e8eef8;cursor:pointer;font-weight:750}
+button:hover{background:#1a2636}
+button.primary{border-color:rgba(112,201,255,.33);background:rgba(112,201,255,.13);color:#dbf5ff}
+button.compact{padding:0 11px;font-size:12px}
+button:disabled{opacity:.55;cursor:default}
+.status{min-height:16px;margin:8px 0 0;color:#8391a4;font-size:11px}
+.status.ok{color:#8ee6b0}.status.error{color:#ff98a9}.status.warn{color:#ffd38a}
+.actions{display:grid;gap:8px;margin-top:10px}
+footer{margin-top:12px;color:#718096;font-size:10.5px;line-height:1.45}

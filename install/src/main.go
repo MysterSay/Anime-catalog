@@ -3,16 +3,20 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +32,15 @@ import (
 )
 
 const (
-	appVersion       = "1.1.10"
-	vercelCLIVersion = "59.16.0"
+	appVersion          = "1.4.0"
+	vercelCLIVersion    = "59.19.0"
+	wranglerVersion     = "4.132.0"
+	nodeVersion         = "24.21.0"
+	githubCLIVersion    = "2.101.0"
+	gitVersion          = "2.55.0.5"
+	yoruWSLDistroPrefix = "YORU-Ubuntu"
+	ubuntuRootfsURL     = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
+	wslLatestReleaseAPI = "https://api.github.com/repos/microsoft/WSL/releases/latest"
 
 	WM_DESTROY = 0x0002
 	WM_CLOSE   = 0x0010
@@ -94,6 +105,9 @@ const (
 	CTRL_CF_SIGNUP     = 1007
 	CTRL_VERCEL_SIGNUP = 1008
 	CTRL_TURSO_SIGNUP  = 1009
+	CTRL_GITHUB_SIGNUP = 1010
+	CTRL_AUTH_REFRESH  = 1011
+	CTRL_CHECK_PROJECT = 1012
 
 	CTRL_CF_PROJECT     = 1101
 	CTRL_SITE_URL       = 1102
@@ -220,30 +234,35 @@ type runtimeState struct {
 }
 
 type appUI struct {
-	hwnd     uintptr
-	hFont    uintptr
-	logEdit  uintptr
-	stepList uintptr
-	status   uintptr
-	startBtn uintptr
-	stopBtn  uintptr
-	fields   map[int]uintptr
-	copies   map[int]int
+	hwnd       uintptr
+	hFont      uintptr
+	logEdit    uintptr
+	stepList   uintptr
+	status     uintptr
+	startBtn   uintptr
+	stopBtn    uintptr
+	fields     map[int]uintptr
+	copies     map[int]int
+	authStatus map[string]uintptr
+	authCode   map[string]uintptr
 }
 
 var (
-	ui         appUI
-	appRoot    string
-	installDir string
-	statePath  string
-	logPath    string
-	logFile    *os.File
-	logMu      sync.Mutex
-	runMu      sync.Mutex
-	running    bool
-	cancelRun  context.CancelFunc
-	current    runtimeState
-	wslDistro  string
+	ui          appUI
+	appRoot     string
+	installDir  string
+	dataRoot    string
+	statePath   string
+	logPath     string
+	logFile     *os.File
+	logMu       sync.Mutex
+	runMu       sync.Mutex
+	running     bool
+	cancelRun   context.CancelFunc
+	authMu      sync.Mutex
+	authRunning bool
+	current     runtimeState
+	wslDistro   string
 
 	uiQueueMu    sync.Mutex
 	uiQueue      []func()
@@ -251,10 +270,10 @@ var (
 )
 
 var steps = []string{
-	"1. Пошук/клонування проєкту та інструменти",
-	"2. Cloudflare: акаунт / підтвердження",
-	"3. Vercel: акаунт / підтвердження",
-	"4. Turso: акаунт / підтвердження",
+	"1. GitHub + структура проєкту та інструменти",
+	"2. Cloudflare: авторизація + перевірка назви",
+	"3. Vercel: авторизація",
+	"4. Turso: авторизація",
 	"5. Початковий деплой Core + Site",
 	"6. Створення Turso DB та отримання ключів",
 	"7. Підключення секретів між сервісами",
@@ -289,12 +308,19 @@ func wndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
 			openURL("https://www.tampermonkey.net/")
 		case CTRL_EXTENSION:
 			openFolder(filepath.Join(appRoot, "extension"))
+		case CTRL_GITHUB_SIGNUP:
+			go interactiveAuthorizeService("github")
 		case CTRL_CF_SIGNUP:
-			openURL("https://dash.cloudflare.com/sign-up")
+			go interactiveAuthorizeService("cloudflare")
 		case CTRL_VERCEL_SIGNUP:
-			openURL("https://vercel.com/signup")
+			go interactiveAuthorizeService("vercel")
 		case CTRL_TURSO_SIGNUP:
-			openURL("https://turso.tech/")
+			go interactiveAuthorizeService("turso")
+		case CTRL_AUTH_REFRESH:
+			go refreshAuthorizationPanel()
+		case CTRL_CHECK_PROJECT:
+			raw := getText(ui.fields[CTRL_CF_PROJECT])
+			go interactiveCheckProjectName(raw)
 		default:
 			if fieldID, ok := ui.copies[id]; ok {
 				copyText(getText(ui.fields[fieldID]))
@@ -323,33 +349,36 @@ func main() {
 		panic(err)
 	}
 	installDir = filepath.Dir(exe)
+	dataRoot = filepath.Join(installDir, "data")
+	if err = ensureDataLayout(); err != nil {
+		panic(err)
+	}
+	configureIsolatedEnvironment()
 	appRoot = findProjectRoot()
 	if appRoot == "" {
-		appRoot = filepath.Join(installDir, "Anime-catalog")
+		appRoot = filepath.Join(dataRoot, "project", "Anime-catalog")
 	}
-	statePath = filepath.Join(installDir, "installer-state.json")
-	_ = os.MkdirAll(filepath.Join(installDir, "logs"), 0755)
-	logPath = filepath.Join(installDir, "logs", "install-"+time.Now().Format("20060102-150405")+".log")
+	statePath = filepath.Join(dataRoot, "state", "installer-state.json")
+	logPath = filepath.Join(dataRoot, "logs", "install-"+time.Now().Format("20060102-150405")+".log")
 	logFile, _ = os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if logFile != nil {
 		defer logFile.Close()
 	}
 
 	current = loadState()
-	// State v1/v2 used three unrelated default project names and could also keep
-	// deployment-specific URLs/tokens after a remote project had been deleted.
-	// Starting with v1.1.7 a single explicit project name is the source of truth.
-	// Legacy state keeps account authorization, but deployment wiring is cleared.
 	if current.ProjectName == "" {
 		clearDeploymentWiring(false)
 	}
 
 	createMainWindow()
 	appendLog("YORU Installer v" + appVersion)
-	appendLog("Project root: " + appRoot + " (якщо проєкту немає, він буде клонований сюди)")
+	appendLog("Data root: " + dataRoot)
+	appendLog("Project root: " + appRoot + " (репозиторій завжди зберігається у data\\project)")
 	appendLog("State: " + statePath)
+	appendLog("Tools/auth/cache/Ubuntu/репозиторій ізольовані всередині data.")
 	appendLog("Secrets у state-файлі зберігаються через Windows DPAPI.")
 	refreshUIFromState()
+	go refreshAuthorizationPanel()
 
 	var m msg
 	for {
@@ -374,19 +403,21 @@ func createMainWindow() {
 	}
 	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 	style := uintptr(WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE)
-	hwnd, _, _ := procCreateWindowExW.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(p16("YORU Installer — автоматичне розгортання"))), style, 80, 60, 1220, 820, 0, 0, hInst, 0)
+	hwnd, _, _ := procCreateWindowExW.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(p16("YORU Installer — автоматичне розгортання"))), style, 80, 40, 1220, 900, 0, 0, hInst, 0)
 	ui.hwnd = hwnd
 
 	font, _, _ := procCreateFontW.Call(18, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(p16("Segoe UI"))))
 	ui.hFont = font
 	ui.fields = map[int]uintptr{}
 	ui.copies = map[int]int{}
+	ui.authStatus = map[string]uintptr{}
+	ui.authCode = map[string]uintptr{}
 
 	label(hwnd, "Етапи встановлення", 18, 16, 420, 24)
 	ui.stepList = control("LISTBOX", "", WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT, 18, 44, 705, 190, hwnd, 1301)
 
 	label(hwnd, "Лог", 18, 244, 100, 24)
-	ui.logEdit = control("EDIT", "", WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|WS_HSCROLL|ES_LEFT|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_READONLY, 18, 272, 705, 430, hwnd, 1302)
+	ui.logEdit = control("EDIT", "", WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|WS_HSCROLL|ES_LEFT|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_READONLY, 18, 272, 705, 500, hwnd, 1302)
 
 	label(hwnd, "Параметри, ключі та посилання", 748, 16, 430, 24)
 	addField("Корінь проєкту", CTRL_ROOT, 748, 46, false)
@@ -399,25 +430,26 @@ func createMainWindow() {
 	addField("TURSO_AUTH_TOKEN", CTRL_TURSO_TOKEN, 748, 452, false)
 	addField("CORE_API_KEY", CTRL_CORE_KEY, 748, 510, false)
 
-	label(hwnd, "Реєстрація / кабінети", 748, 570, 250, 20)
-	button(hwnd, "Cloudflare", 748, 594, 105, 30, CTRL_CF_SIGNUP, false)
-	button(hwnd, "Vercel", 862, 594, 95, 30, CTRL_VERCEL_SIGNUP, false)
-	button(hwnd, "Turso", 966, 594, 85, 30, CTRL_TURSO_SIGNUP, false)
-	button(hwnd, "Tampermonkey", 1060, 594, 112, 30, CTRL_TAMPER, false)
+	label(hwnd, "Авторизація сервісів", 748, 570, 250, 20)
+	button(hwnd, "Оновити статус", 1040, 566, 132, 27, CTRL_AUTH_REFRESH, false)
+	addAuthRow("github", "GitHub", CTRL_GITHUB_SIGNUP, 594)
+	addAuthRow("cloudflare", "Cloudflare", CTRL_CF_SIGNUP, 642)
+	addAuthRow("vercel", "Vercel", CTRL_VERCEL_SIGNUP, 690)
+	addAuthRow("turso", "Turso", CTRL_TURSO_SIGNUP, 738)
 
-	ui.startBtn = button(hwnd, "Почати / продовжити", 18, 716, 190, 36, CTRL_START, true)
-	ui.stopBtn = button(hwnd, "Зупинити", 218, 716, 110, 36, CTRL_STOP, false)
-	button(hwnd, "Відкрити сайт", 338, 716, 120, 36, CTRL_OPEN_SITE, false)
-	button(hwnd, "Core health", 468, 716, 110, 36, CTRL_OPEN_CORE, false)
-	button(hwnd, "Tampermonkey", 588, 716, 125, 36, CTRL_TAMPER, false)
-	button(hwnd, "Extension", 748, 716, 105, 36, CTRL_EXTENSION, false)
+	ui.startBtn = button(hwnd, "Почати / продовжити", 18, 800, 190, 36, CTRL_START, true)
+	ui.stopBtn = button(hwnd, "Зупинити", 218, 800, 110, 36, CTRL_STOP, false)
+	button(hwnd, "Відкрити сайт", 338, 800, 120, 36, CTRL_OPEN_SITE, false)
+	button(hwnd, "Core health", 468, 800, 110, 36, CTRL_OPEN_CORE, false)
+	button(hwnd, "Tampermonkey", 588, 800, 125, 36, CTRL_TAMPER, false)
+	button(hwnd, "Extension", 748, 800, 105, 36, CTRL_EXTENSION, false)
 
-	ui.status = label(hwnd, "Готово до запуску", 870, 720, 305, 28)
+	ui.status = label(hwnd, "Готово до запуску", 870, 804, 305, 28)
 
-	for _, s := range steps {
-		procSendMessageW.Call(ui.stepList, LB_ADDSTRING, 0, uintptr(unsafe.Pointer(p16("○ "+s))))
+	for _, st := range steps {
+		procSendMessageW.Call(ui.stepList, LB_ADDSTRING, 0, uintptr(unsafe.Pointer(p16("○ "+st))))
 	}
-
+	refreshAuthStatusFromStateDirect()
 	procShowWindow.Call(hwnd, SW_SHOW)
 	procUpdateWindow.Call(hwnd)
 }
@@ -448,9 +480,71 @@ func addField(title string, id, x, y int, editable bool) {
 	}
 	e := control("EDIT", "", style, x, y+22, 365, 28, ui.hwnd, id)
 	ui.fields[id] = e
+	if id == CTRL_CF_PROJECT {
+		button(ui.hwnd, "Перевірити", x+372, y+22, 88, 28, CTRL_CHECK_PROJECT, false)
+		return
+	}
 	copyID := CTRL_COPY_BASE + len(ui.copies) + 1
 	button(ui.hwnd, "Копіювати", x+372, y+22, 88, 28, copyID, false)
 	ui.copies[copyID] = id
+}
+
+func addAuthRow(service, title string, buttonID, y int) {
+	button(ui.hwnd, title, 748, y, 112, 38, buttonID, false)
+	h := control("STATIC", "Потрібна авторизація", WS_CHILD|WS_VISIBLE, 874, y, 298, 20, ui.hwnd, 0)
+	ui.authStatus[service] = h
+	codeStyle := uintptr(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_READONLY | ES_AUTOHSCROLL)
+	c := control("EDIT", "Код: —", codeStyle, 874, y+20, 298, 22, ui.hwnd, 0)
+	ui.authCode[service] = c
+}
+
+func authDisplay(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "Потрібна авторизація"
+	}
+	return "✓ " + value
+}
+
+func setAuthStatusDirect(service, value string) {
+	if ui.authStatus == nil {
+		return
+	}
+	if h := ui.authStatus[service]; h != 0 {
+		setText(h, value)
+	}
+}
+
+func setAuthStatus(service, value string) {
+	postUI(func() { setAuthStatusDirect(service, value) })
+}
+
+func setAuthCodeDirect(service, code string) {
+	if ui.authCode == nil {
+		return
+	}
+	text := "Код: —"
+	if strings.TrimSpace(code) != "" {
+		text = "Код: " + strings.TrimSpace(code)
+	}
+	if h := ui.authCode[service]; h != 0 {
+		setText(h, text)
+	}
+}
+
+func setAuthCode(service, code string) {
+	postUI(func() { setAuthCodeDirect(service, code) })
+}
+
+func refreshAuthStatusFromStateDirect() {
+	setAuthStatusDirect("github", authDisplay(current.GitHubAccount))
+	setAuthStatusDirect("cloudflare", authDisplay(current.CloudflareAccount))
+	setAuthStatusDirect("vercel", authDisplay(current.VercelAccount))
+	setAuthStatusDirect("turso", authDisplay(current.TursoAccount))
+	setAuthCodeDirect("github", "")
+	setAuthCodeDirect("cloudflare", "")
+	setAuthCodeDirect("vercel", "")
+	setAuthCodeDirect("turso", "")
 }
 
 func setText(hwnd uintptr, s string) { procSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(p16(s)))) }
@@ -609,6 +703,7 @@ func refreshUIFromStateDirect() {
 	setText(ui.fields[CTRL_TURSO_URL], current.TursoURL)
 	setText(ui.fields[CTRL_TURSO_TOKEN], current.TursoToken)
 	setText(ui.fields[CTRL_CORE_KEY], current.CoreKey)
+	refreshAuthStatusFromStateDirect()
 	if current.Step > 0 {
 		idx := current.Step
 		if idx >= len(steps) {
@@ -837,13 +932,13 @@ func runFlow(ctx context.Context) error {
 }
 
 func projectCoreDir(path string) string {
-	for _, name := range []string{"core", "vercel"} {
+	for _, name := range []string{"vercel", "core"} {
 		p := filepath.Join(path, name)
 		if st, err := os.Stat(p); err == nil && st.IsDir() {
 			return p
 		}
 	}
-	return filepath.Join(path, "core")
+	return filepath.Join(path, "vercel")
 }
 
 func isProjectRoot(path string) bool {
@@ -862,41 +957,34 @@ func isProjectRoot(path string) bool {
 }
 
 func findProjectRoot() string {
-	candidates := []string{
-		filepath.Dir(installDir),
-		installDir,
-		filepath.Join(installDir, "Anime-catalog"),
-		filepath.Join(filepath.Dir(installDir), "Anime-catalog"),
+	if dataRoot == "" {
+		return ""
 	}
-	seen := map[string]bool{}
-	for _, c := range candidates {
-		a, _ := filepath.Abs(c)
-		key := strings.ToLower(filepath.Clean(a))
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		if isProjectRoot(a) {
-			return a
-		}
+	candidate := filepath.Join(dataRoot, "project", "Anime-catalog")
+	if isProjectRoot(candidate) {
+		return candidate
 	}
 	return ""
 }
 
 func addCommonToolPaths() {
+	if dataRoot == "" {
+		return
+	}
 	paths := []string{
-		`C:\Program Files\GitHub CLI`,
-		`C:\Program Files\Git\cmd`,
-		filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "GitHub CLI"),
+		filepath.Join(dataRoot, "tools", "node"),
+		filepath.Join(dataRoot, "tools", "git", "cmd"),
+		filepath.Join(dataRoot, "tools", "git", "mingw64", "bin"),
+		filepath.Join(dataRoot, "tools", "gh", "bin"),
+		filepath.Join(dataRoot, "tools", "gh"),
 	}
 	old := os.Getenv("PATH")
-	for _, p := range paths {
-		if p == "" {
+	for i := len(paths) - 1; i >= 0; i-- {
+		p := paths[i]
+		if p == "" || strings.Contains(strings.ToLower(old), strings.ToLower(p)) {
 			continue
 		}
-		if _, err := os.Stat(p); err == nil && !strings.Contains(strings.ToLower(old), strings.ToLower(p)) {
-			old += ";" + p
-		}
+		old = p + ";" + old
 	}
 	_ = os.Setenv("PATH", old)
 }
@@ -904,94 +992,83 @@ func addCommonToolPaths() {
 func findTool(name string) string {
 	addCommonToolPaths()
 	if p, err := exec.LookPath(name); err == nil {
-		return p
+		clean, _ := filepath.Abs(p)
+		if dataRoot == "" || strings.HasPrefix(strings.ToLower(clean), strings.ToLower(filepath.Clean(dataRoot)+string(os.PathSeparator))) {
+			return p
+		}
 	}
 	return ""
 }
 
 func ensureWindowsTool(ctx context.Context, exeName, wingetID, friendly, url string) (string, error) {
-	if p := findTool(exeName); p != "" {
-		return p, nil
+	switch strings.ToLower(exeName) {
+	case "gh.exe", "gh":
+		if err := ensurePortableGit(ctx); err != nil {
+			return "", err
+		}
+		if err := ensurePortableGitHubCLI(ctx); err != nil {
+			return "", err
+		}
+		return ghExePath(), nil
+	case "git.exe", "git":
+		if err := ensurePortableGit(ctx); err != nil {
+			return "", err
+		}
+		return gitExePath(), nil
+	case "node.exe", "node":
+		if err := ensurePortableNode(ctx); err != nil {
+			return "", err
+		}
+		return nodeExePath(), nil
 	}
-	if _, err := exec.LookPath("winget.exe"); err != nil {
-		messageSync("Не знайдено "+friendly+". Він потрібен для автоматичного клонування проєкту.\n\nWindows Package Manager (winget) теж недоступний, тому зараз відкрию офіційну сторінку встановлення.", friendly, MB_OK|MB_ICONWARNING)
-		openURL(url)
-		return "", fmt.Errorf("%s не встановлений", friendly)
-	}
-	messageSync("Не знайдено "+friendly+".\n\nПрограма зараз встановить його автоматично через winget, а потім продовжить без перезапуску.", friendly, MB_OK|MB_ICONINFORMATION)
-	appendLog("Встановлюю " + friendly + " через winget...")
-	_, err := runDirect(ctx, installDir, "", nil, "winget.exe", "install", "--id", wingetID, "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
-	if err != nil {
-		openURL(url)
-		return "", fmt.Errorf("автоматичне встановлення %s: %w", friendly, err)
-	}
-	addCommonToolPaths()
-	if p := findTool(exeName); p != "" {
-		return p, nil
-	}
-	return "", fmt.Errorf("%s встановлено, але EXE ще не видно у PATH; перезапусти YORU Installer", friendly)
+	return "", fmt.Errorf("%s не підтримується як portable tool", friendly)
 }
 
 func ensureProject(ctx context.Context) error {
+	if err := ensurePortableNode(ctx); err != nil {
+		return err
+	}
+	if err := ensurePortableGit(ctx); err != nil {
+		return err
+	}
+	if err := ensurePortableGitHubCLI(ctx); err != nil {
+		return err
+	}
+	gh := ghExePath()
+	if err := ensureGitHubAccount(ctx, gh); err != nil {
+		return err
+	}
+	_, _ = runDirect(ctx, dataRoot, "", nil, gh, "auth", "setup-git", "--hostname", "github.com")
+
 	if root := findProjectRoot(); root != "" {
 		appRoot = root
 		setFieldText(CTRL_ROOT, appRoot)
-		appendLog("Проєкт знайдено: " + appRoot)
+		appendLog("Проєкт знайдено у data: " + appRoot)
 		return nil
 	}
 
-	target := filepath.Join(installDir, "Anime-catalog")
+	target := filepath.Join(dataRoot, "project", "Anime-catalog")
 	appRoot = target
 	setFieldText(CTRL_ROOT, appRoot)
-	appendLog("Проєкт не знайдено. Автоматично клоную MysterSay/Anime-catalog у: " + target)
-
-	if st, err := os.Stat(target); err == nil && st.IsDir() {
+	appendLog("Проєкт не знайдено. Клоную MysterSay/Anime-catalog у data\\project: " + target)
+	if st, statErr := os.Stat(target); statErr == nil && st.IsDir() {
 		entries, _ := os.ReadDir(target)
 		if len(entries) > 0 {
-			return fmt.Errorf("папка %s вже існує і не схожа на Anime-catalog. Перейменуй/видали її або перемісти YoruInstaller.exe", target)
+			return fmt.Errorf("папка %s вже існує і не схожа на Anime-catalog; очисти data\\project\\Anime-catalog", target)
 		}
 	}
-
-	gh, err := ensureWindowsTool(ctx, "gh.exe", "GitHub.cli", "GitHub CLI", "https://cli.github.com/")
-	if err != nil {
-		return err
-	}
-	if _, err = ensureWindowsTool(ctx, "git.exe", "Git.Git", "Git", "https://git-scm.com/download/win"); err != nil {
-		return err
-	}
-	if err = confirmExistingGitHubAccount(ctx, gh); err != nil {
-		return err
-	}
-
+	_ = os.MkdirAll(filepath.Dir(target), 0755)
 	appendLog("> gh repo clone MysterSay/Anime-catalog " + target)
-	_, cloneErr := runDirect(ctx, installDir, "", nil, gh, "repo", "clone", "MysterSay/Anime-catalog", target)
-	if cloneErr != nil {
-		appendLog("Перша спроба clone не вдалася. Перевіряю GitHub authorization...")
-		if _, authErr := runDirect(ctx, installDir, "", nil, gh, "auth", "status", "--hostname", "github.com"); authErr != nil {
-			messageSync("GitHub CLI потребує входу для доступу до MysterSay/Anime-catalog.\n\nЗараз відкриється GitHub authorization. Підтвердь вхід у браузері — після цього програма сама повторить clone.", "GitHub", MB_OK|MB_ICONINFORMATION)
-			if _, authErr = runDirect(ctx, installDir, "", openFirstURLHook(), gh, "auth", "login", "--web", "--hostname", "github.com"); authErr != nil {
-				return fmt.Errorf("GitHub login: %w", authErr)
-			}
-			if st, statErr := os.Stat(target); statErr == nil && st.IsDir() && !isProjectRoot(target) {
-				entries, _ := os.ReadDir(target)
-				if len(entries) == 0 {
-					_ = os.Remove(target)
-				}
-			}
-			appendLog("> gh repo clone MysterSay/Anime-catalog " + target + " (retry)")
-			_, cloneErr = runDirect(ctx, installDir, "", nil, gh, "repo", "clone", "MysterSay/Anime-catalog", target)
-		}
-	}
+	_, cloneErr := runDirect(ctx, dataRoot, "", nil, gh, "repo", "clone", "MysterSay/Anime-catalog", target)
 	if cloneErr != nil {
 		return fmt.Errorf("gh repo clone MysterSay/Anime-catalog: %w", cloneErr)
 	}
 	if !isProjectRoot(target) {
 		return fmt.Errorf("репозиторій клоновано, але структура Anime-catalog неповна: %s", target)
 	}
-
 	appRoot = target
 	setFieldText(CTRL_ROOT, appRoot)
-	appendLog("Проєкт успішно клоновано. Продовжую встановлення без перезапуску.")
+	appendLog("Проєкт успішно клоновано всередину data. Продовжую без перезапуску.")
 	return nil
 }
 
@@ -1003,37 +1080,24 @@ func stepPrerequisites(ctx context.Context) error {
 		p := filepath.Join(appRoot, d)
 		st, err := os.Stat(p)
 		if err != nil || !st.IsDir() {
-			return fmt.Errorf("після пошуку/клонування не знайдено папку %s", p)
+			return fmt.Errorf("після клонування не знайдено папку %s", p)
 		}
 	}
 	corePath := projectCoreDir(appRoot)
 	if st, err := os.Stat(corePath); err != nil || !st.IsDir() {
-		return fmt.Errorf("після пошуку/клонування не знайдено папку ядра %s", corePath)
+		return fmt.Errorf("після клонування не знайдено папку ядра %s", corePath)
 	}
 	appendLog("Структура проєкту: OK")
-
-	if _, err := runCmd(ctx, appRoot, "", nil, "node --version"); err != nil {
-		messageSync("Не знайдено Node.js. Він потрібен для Wrangler і Vercel CLI.\n\nЗараз відкрию офіційний сайт Node.js. Встанови LTS і натисни «Почати / продовжити» ще раз.", "Потрібен Node.js", MB_OK|MB_ICONWARNING)
-		openURL("https://nodejs.org/en/download")
-		return errors.New("Node.js не встановлений")
-	}
-	if _, err := runCmd(ctx, appRoot, "", nil, "npx --version"); err != nil {
-		return fmt.Errorf("npx недоступний: %w", err)
-	}
-	appendLog("Node.js / npx: OK")
-
-	if _, err := runCaptureDecoded(ctx, appRoot, "wsl.exe", "--status"); err != nil {
-		messageSync("Для офіційного Turso CLI на Windows потрібен WSL.\n\nВстанови WSL, перезапусти Windows якщо система попросить, після чого знову запусти YORU Installer.", "Потрібен WSL", MB_OK|MB_ICONWARNING)
-		openURL("https://learn.microsoft.com/windows/wsl/install")
-		return errors.New("WSL не готовий")
-	}
-
-	distro, err := chooseWSLDistro(ctx)
-	if err != nil {
+	if err := ensurePortableNode(ctx); err != nil {
 		return err
 	}
-	wslDistro = distro
-	appendLog("WSL: OK; робочий дистрибутив: " + wslDistro)
+	if err := ensureWranglerCLI(ctx, filepath.Join(appRoot, "site")); err != nil {
+		return err
+	}
+	if err := ensureVercelCLI(ctx, corePath); err != nil {
+		return err
+	}
+	appendLog("Portable Node.js / Wrangler / Vercel: OK; усе знаходиться у data\\tools")
 	return nil
 }
 
@@ -1061,11 +1125,6 @@ func identitySummary(out string, maxLines int) string {
 		lines = append(lines, "…")
 	}
 	return strings.Join(lines, "\n")
-}
-
-func confirmServiceAccount(service, summary string) bool {
-	text := service + " CLI зараз використовує:\n\n" + summary + "\n\nВикористати саме цей акаунт для YORU?\n\nТак — продовжити.\nНі — вийти з нього та увійти/зареєструвати інший акаунт."
-	return messageSync(text, service+" — підтвердження акаунта", MB_YESNO|MB_ICONINFORMATION) == IDYES
 }
 
 func resetServiceBinding(service string) {
@@ -1104,44 +1163,31 @@ func cloudflareAccountLabel(out string) string {
 }
 
 func ensureCloudflareAccount(ctx context.Context, siteDir string) error {
-	for attempt := 1; attempt <= 6; attempt++ {
+	for attempt := 1; attempt <= 4; attempt++ {
 		out, err := runWrangler(ctx, siteDir, "", nil, "whoami")
-		if err != nil || !strings.Contains(strings.ToLower(out), "logged in") {
-			messageSync("Cloudflare CLI ще не авторизований.\n\nЗараз відкриється сторінка Cloudflare. Увійди або створи потрібний акаунт, а потім підтвердь OAuth/device login. Після входу installer ОБОВ'ЯЗКОВО покаже знайдений акаунт перед продовженням.", "Cloudflare", MB_OK|MB_ICONINFORMATION)
-			openURL("https://dash.cloudflare.com/sign-up")
-			if _, err = runWrangler(ctx, siteDir, "", openFirstURLHook(), "login", "--device"); err != nil {
-				return fmt.Errorf("Cloudflare login: %w", err)
-			}
-			continue
-		}
-
-		summary := identitySummary(out, 12)
-		appendLog("Cloudflare active identity:\n" + summary)
-		if confirmServiceAccount("Cloudflare", summary) {
+		if err == nil && strings.Contains(strings.ToLower(out), "logged in") {
 			current.CloudflareAccount = cloudflareAccountLabel(out)
+			if current.CloudflareAccount == "" {
+				current.CloudflareAccount = "Cloudflare OAuth"
+			}
+			setAuthStatus("cloudflare", authDisplay(current.CloudflareAccount))
+			setAuthCode("cloudflare", "")
 			saveState()
-			appendLog("Cloudflare акаунт підтверджено користувачем: " + current.CloudflareAccount)
+			appendLog("Cloudflare active identity: " + current.CloudflareAccount)
 			return nil
 		}
 
-		appendLog("Cloudflare акаунт відхилено користувачем; виконую logout і готую вхід в інший акаунт.")
-		resetServiceBinding("cloudflare")
-		_ = os.Unsetenv("CLOUDFLARE_API_TOKEN")
-		_ = os.Unsetenv("CLOUDFLARE_API_KEY")
-		_ = os.Unsetenv("CLOUDFLARE_EMAIL")
-		_, _ = runWrangler(ctx, siteDir, "", nil, "logout")
-		messageSync("Поточний Cloudflare-акаунт відхилено.\n\nЗараз відкриється нова авторизація. У браузері увійди або зареєструй ІНШИЙ потрібний акаунт. Після входу installer знову покаже його для підтвердження.", "Cloudflare — інший акаунт", MB_OK|MB_ICONINFORMATION)
-		openURL("https://dash.cloudflare.com/sign-up")
-		if _, err = runWrangler(ctx, siteDir, "", openFirstURLHook(), "login", "--device"); err != nil {
-			return fmt.Errorf("Cloudflare login іншого акаунта: %w", err)
+		setAuthStatus("cloudflare", "Потрібна авторизація")
+		messageSync("Cloudflare CLI не авторизований. Зараз відкриється OAuth/device login. Увійди в потрібний акаунт — окремого підтвердження «це той акаунт?» більше не буде; активний акаунт завжди видно праворуч у блоці авторизації.", "Cloudflare — потрібна авторизація", MB_OK|MB_ICONINFORMATION)
+		openURL("https://dash.cloudflare.com/")
+		if _, err = runWrangler(ctx, siteDir, "", authorizationFlowHook("cloudflare"), "login", "--device"); err != nil {
+			return fmt.Errorf("Cloudflare login: %w", err)
 		}
 	}
-	return errors.New("Cloudflare: забагато спроб зміни акаунта")
+	return errors.New("Cloudflare: не вдалося підтвердити авторизацію після login")
 }
 
-func vercelToolRoot() string {
-	return filepath.Join(installDir, ".tools", "vercel")
-}
+func vercelToolRoot() string { return filepath.Join(dataRoot, "tools", "vercel") }
 
 func vercelToolPath() string {
 	return filepath.Join(vercelToolRoot(), "node_modules", ".bin", "vercel.cmd")
@@ -1151,80 +1197,44 @@ func vercelEntryPath() string {
 	return filepath.Join(vercelToolRoot(), "node_modules", "vercel", "dist", "index.js")
 }
 
-func vercelNPMCacheDir() string {
-	return filepath.Join(installDir, ".tools", "npm-cache")
-}
+func vercelNPMCacheDir() string { return filepath.Join(dataRoot, "cache", "npm") }
 
 func runVercel(ctx context.Context, dir, stdin string, hook func(string), args ...string) (string, error) {
 	entry := vercelEntryPath()
 	if _, err := os.Stat(entry); err != nil {
 		return "", fmt.Errorf("Vercel CLI entrypoint не знайдено: %s", entry)
 	}
-	logArgs := []string{entry}
-	logArgs = append(logArgs, args...)
-	appendLog("> node " + redactCommand(joinArgsForLog(logArgs...)))
-	return runDirect(ctx, dir, stdin, hook, "node", logArgs...)
+	allArgs := []string{entry, "--global-config", vercelGlobalConfigDir()}
+	allArgs = append(allArgs, args...)
+	appendLog("> node " + redactCommand(joinArgsForLog(allArgs...)))
+	return runDirect(ctx, dir, stdin, hook, nodeExePath(), allArgs...)
 }
 
 func ensureVercelCLI(ctx context.Context, coreDir string) error {
+	if err := ensurePortableNode(ctx); err != nil {
+		return err
+	}
 	entry := vercelEntryPath()
 	if _, err := os.Stat(entry); err == nil {
 		if out, verr := runVercel(ctx, coreDir, "", nil, "--version"); verr == nil && strings.Contains(strings.ToLower(out), "vercel") {
-			appendLog("Vercel CLI: OK (ізольована копія installer)")
+			appendLog("Vercel CLI: OK (data\\tools\\vercel)")
 			return nil
 		}
-		appendLog("Локальна копія Vercel CLI пошкоджена; перевстановлюю її в ізольованому каталозі.")
+		appendLog("Portable Vercel CLI пошкоджений; перевстановлюю в data\\tools\\vercel.")
 		_ = os.RemoveAll(vercelToolRoot())
-		_ = os.RemoveAll(vercelNPMCacheDir())
-	} else if st, rootErr := os.Stat(vercelToolRoot()); rootErr == nil && st.IsDir() {
-		appendLog("Знайдено незавершену копію Vercel CLI від попередньої спроби; очищаю тільки install\\.tools\\vercel і локальний cache.")
-		_ = os.RemoveAll(vercelToolRoot())
-		_ = os.RemoveAll(vercelNPMCacheDir())
 	}
-
-	if err := os.MkdirAll(vercelToolRoot(), 0755); err != nil {
-		return fmt.Errorf("не вдалося створити каталог Vercel CLI: %w", err)
-	}
-	if err := os.MkdirAll(vercelNPMCacheDir(), 0755); err != nil {
-		return fmt.Errorf("не вдалося створити ізольований npm cache: %w", err)
-	}
-
-	appendLog("Встановлюю ізольований Vercel CLI " + vercelCLIVersion + " у install\\.tools\\vercel ...")
-	installOnce := func() error {
-		// Не передаємо абсолютні Windows-шляхи через cmd.exe --prefix/--cache.
-		// npm запускається через node + npm-cli.js, cwd вже дорівнює .tools\vercel,
-		// а окремий cache задається environment variable. Це прибирає проблему з
-		// буквальними лапками у шляхах на кшталт <cwd>\"D:\...\.tools\vercel".
-		oldCache, hadCache := os.LookupEnv("npm_config_cache")
-		if err := os.Setenv("npm_config_cache", vercelNPMCacheDir()); err != nil {
-			return err
-		}
-		defer func() {
-			if hadCache {
-				_ = os.Setenv("npm_config_cache", oldCache)
-			} else {
-				_ = os.Unsetenv("npm_config_cache")
-			}
-		}()
-		return installNPMDirect(ctx, vercelToolRoot(), "vercel@"+vercelCLIVersion)
-	}
-
-	if err := installOnce(); err != nil {
-		appendLog("Перша спроба встановлення Vercel CLI не вдалася; очищаю ЛИШЕ ізольований installer npm cache і повторюю один раз.")
-		_ = os.RemoveAll(vercelToolRoot())
-		_ = os.RemoveAll(vercelNPMCacheDir())
-		_ = os.MkdirAll(vercelToolRoot(), 0755)
-		_ = os.MkdirAll(vercelNPMCacheDir(), 0755)
-		if retryErr := installOnce(); retryErr != nil {
-			return fmt.Errorf("встановлення ізольованого Vercel CLI після повторної спроби: %w", retryErr)
-		}
+	_ = os.MkdirAll(vercelToolRoot(), 0755)
+	_ = os.MkdirAll(vercelNPMCacheDir(), 0755)
+	appendLog("Встановлюю Vercel CLI " + vercelCLIVersion + " у data\\tools\\vercel ...")
+	if err := installNPMDirect(ctx, vercelToolRoot(), "vercel@"+vercelCLIVersion); err != nil {
+		return fmt.Errorf("встановлення portable Vercel CLI: %w", err)
 	}
 	if _, err := os.Stat(entry); err != nil {
 		return fmt.Errorf("Vercel CLI встановлено, але entrypoint %s не знайдено", entry)
 	}
 	out, err := runVercel(ctx, coreDir, "", nil, "--version")
 	if err != nil {
-		return fmt.Errorf("перевірка ізольованого Vercel CLI: %w", err)
+		return fmt.Errorf("перевірка Vercel CLI: %w", err)
 	}
 	appendLog("Vercel CLI готовий: " + strings.TrimSpace(lastUsefulLine(out)))
 	return nil
@@ -1255,51 +1265,31 @@ func ensureVercelAccount(ctx context.Context, coreDir string) error {
 		return err
 	}
 
-	for attempt := 1; attempt <= 6; attempt++ {
+	for attempt := 1; attempt <= 4; attempt++ {
 		out, err := runVercel(ctx, coreDir, "", nil, "whoami")
-		if err != nil {
-			if !vercelAuthMissing(out) {
-				appendLog("Vercel whoami завершився технічною помилкою; повторний login НЕ запускається.")
-				return fmt.Errorf("Vercel CLI technical error during whoami: %w", err)
+		if err == nil {
+			username := strings.TrimSpace(lastUsefulLine(out))
+			if username != "" && !vercelAuthMissing(out) {
+				current.VercelAccount = username
+				setAuthStatus("vercel", authDisplay(username))
+				setAuthCode("vercel", "")
+				saveState()
+				appendLog("Vercel active identity: " + username)
+				return nil
 			}
-			messageSync("Vercel CLI працює, але не має активної авторизації.\n\nЗараз відкриється login. Увійди або створи потрібний акаунт. Після успішного входу installer спочатку виконає whoami і покаже знайдений username для підтвердження.", "Vercel", MB_OK|MB_ICONINFORMATION)
-			openURL("https://vercel.com/signup")
-			if _, err = runVercel(ctx, coreDir, "", openFirstURLHook(), "login"); err != nil {
-				return fmt.Errorf("Vercel login: %w", err)
-			}
-			continue
+		}
+		if err != nil && !vercelAuthMissing(out) {
+			return fmt.Errorf("Vercel CLI technical error during whoami: %w", err)
 		}
 
-		username := strings.TrimSpace(lastUsefulLine(out))
-		if username == "" {
-			return errors.New("Vercel whoami успішний, але username порожній")
-		}
-		summary := "Користувач: " + username
-		if teams, terr := runVercel(ctx, coreDir, "", nil, "teams", "ls"); terr == nil {
-			ts := identitySummary(teams, 8)
-			if ts != "" {
-				summary += "\n\nДоступні teams/scopes:\n" + ts
-			}
-		}
-		appendLog("Vercel active identity: " + username)
-		if confirmServiceAccount("Vercel", summary) {
-			current.VercelAccount = username
-			saveState()
-			appendLog("Vercel акаунт підтверджено користувачем: " + username)
-			return nil
-		}
-
-		appendLog("Vercel акаунт відхилено користувачем; виконую logout і очищаю стару project/team прив'язку.")
-		resetServiceBinding("vercel")
-		_ = os.Unsetenv("VERCEL_TOKEN")
-		_, _ = runVercel(ctx, coreDir, "", nil, "logout")
-		messageSync("Поточний Vercel-акаунт відхилено.\n\nУвійди або зареєструй інший потрібний акаунт. Після входу installer знову покаже username/teams для підтвердження.", "Vercel — інший акаунт", MB_OK|MB_ICONINFORMATION)
-		openURL("https://vercel.com/signup")
-		if _, err = runVercel(ctx, coreDir, "", openFirstURLHook(), "login"); err != nil {
-			return fmt.Errorf("Vercel login іншого акаунта: %w", err)
+		setAuthStatus("vercel", "Потрібна авторизація")
+		messageSync("Vercel CLI не має активної авторизації. Зараз відкриється login. Увійди в потрібний акаунт; після входу username автоматично з'явиться у блоці авторизації.", "Vercel — потрібна авторизація", MB_OK|MB_ICONINFORMATION)
+		openURL("https://vercel.com/login")
+		if _, err = runVercel(ctx, coreDir, "", authorizationFlowHook("vercel"), "login"); err != nil {
+			return fmt.Errorf("Vercel login: %w", err)
 		}
 	}
-	return errors.New("Vercel: забагато спроб зміни акаунта")
+	return errors.New("Vercel: не вдалося підтвердити авторизацію після login")
 }
 
 func tursoAuthMissing(out string) bool {
@@ -1319,103 +1309,220 @@ func tursoAuthMissing(out string) bool {
 	return false
 }
 
-func acquireTursoPlatformToken(ctx context.Context, signup bool) error {
-	current.TursoPlatformToken = ""
-	verb := "login"
-	if signup {
-		verb = "signup"
+type tursoOrganizationAPI struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+	Type string `json:"type"`
+}
+
+type tursoGroupAPI struct {
+	Name string `json:"name"`
+}
+
+type tursoDatabaseAPI struct {
+	DbID     string `json:"DbId"`
+	Hostname string `json:"Hostname"`
+	Name     string `json:"Name"`
+}
+
+func tursoPlatformRequest(ctx context.Context, token, method, path string, body any) (int, []byte, error) {
+	endpoint := "https://api.turso.tech" + path
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, err
+		}
+		reader = bytes.NewReader(payload)
 	}
-	appendLog("Turso: запускаю " + verb + " --headless; після браузерної авторизації потрібен Access Token.")
-	out, err := runWSLWithoutTursoToken(ctx, "", openFirstURLHook(), "turso auth "+verb+" --headless")
-	if err != nil && !strings.Contains(strings.ToLower(out), "visit") {
-		return fmt.Errorf("Turso %s --headless: %w", verb, err)
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, data, nil
+}
+
+func tursoAPIError(status int, body []byte) error {
+	text := strings.TrimSpace(string(body))
+	if len(text) > 700 {
+		text = text[:700]
+	}
+	if text == "" {
+		text = http.StatusText(status)
+	}
+	return fmt.Errorf("Turso Platform API HTTP %d: %s", status, text)
+}
+
+func tursoIdentityFromToken(ctx context.Context, token string) (string, []tursoOrganizationAPI, error) {
+	if strings.TrimSpace(token) == "" {
+		return "", nil, errors.New("Turso Platform API token відсутній")
+	}
+	status, body, err := tursoPlatformRequest(ctx, token, http.MethodGet, "/v1/auth/validate", nil)
+	if err != nil {
+		return "", nil, err
+	}
+	if status != http.StatusOK {
+		return "", nil, tursoAPIError(status, body)
+	}
+	status, body, err = tursoPlatformRequest(ctx, token, http.MethodGet, "/v1/organizations", nil)
+	if err != nil {
+		return "", nil, err
+	}
+	if status != http.StatusOK {
+		return "", nil, tursoAPIError(status, body)
+	}
+	var orgs []tursoOrganizationAPI
+	if err := json.Unmarshal(body, &orgs); err != nil {
+		return "", nil, fmt.Errorf("Turso organizations JSON: %w", err)
+	}
+	if len(orgs) == 0 {
+		return "", nil, errors.New("Turso API token валідний, але акаунт не має organization")
+	}
+	chosen := orgs[0].Slug
+	for _, org := range orgs {
+		if strings.EqualFold(org.Type, "personal") && strings.TrimSpace(org.Slug) != "" {
+			chosen = org.Slug
+			break
+		}
+	}
+	if strings.TrimSpace(chosen) == "" {
+		return "", nil, errors.New("Turso organization slug порожній")
+	}
+	return chosen, orgs, nil
+}
+
+func tursoEnsureGroup(ctx context.Context, token, org string) (string, error) {
+	base := "/v1/organizations/" + url.PathEscape(org)
+	status, body, err := tursoPlatformRequest(ctx, token, http.MethodGet, base+"/groups", nil)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", tursoAPIError(status, body)
+	}
+	var listing struct {
+		Groups []tursoGroupAPI `json:"groups"`
+	}
+	if err := json.Unmarshal(body, &listing); err != nil {
+		return "", fmt.Errorf("Turso groups JSON: %w", err)
+	}
+	for _, g := range listing.Groups {
+		if strings.EqualFold(g.Name, "default") {
+			return g.Name, nil
+		}
+	}
+	if len(listing.Groups) > 0 && strings.TrimSpace(listing.Groups[0].Name) != "" {
+		return listing.Groups[0].Name, nil
 	}
 
+	status, body, err = tursoPlatformRequest(ctx, token, http.MethodGet, "/v1/locations", nil)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", tursoAPIError(status, body)
+	}
+	var locs struct {
+		Locations map[string]string `json:"locations"`
+	}
+	if err := json.Unmarshal(body, &locs); err != nil {
+		return "", fmt.Errorf("Turso locations JSON: %w", err)
+	}
+	location := ""
+	for _, preferred := range []string{"aws-eu-west-1", "fra", "lhr", "ams"} {
+		if _, ok := locs.Locations[preferred]; ok {
+			location = preferred
+			break
+		}
+	}
+	if location == "" {
+		for code := range locs.Locations {
+			location = code
+			break
+		}
+	}
+	if location == "" {
+		return "", errors.New("Turso не повернув жодної доступної location")
+	}
+	appendLog("Turso: створюю group default у location " + location)
+	status, body, err = tursoPlatformRequest(ctx, token, http.MethodPost, base+"/groups", map[string]any{"name": "default", "location": location})
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK && status != http.StatusConflict {
+		return "", tursoAPIError(status, body)
+	}
+	return "default", nil
+}
+
+func acquireTursoPlatformToken(ctx context.Context, signup bool) error {
+	current.TursoPlatformToken = ""
+	current.TursoAccount = ""
+	setAuthStatus("turso", "Авторизація...")
+	openURL("https://app.turso.tech/")
+	messageSync("У браузері увійди або зареєструйся в Turso.\n\nПотім у Turso Dashboard відкрий Account/Organization settings -> API Tokens, створи Platform API Token (наприклад `yoru-installer`) і натисни Copy.\n\nПовернись у YORU Installer та натисни OK. Installer сам прочитає token із буфера обміну. WSL, Ubuntu і Turso CLI більше НЕ потрібні.", "Turso — Platform API Token", MB_OK|MB_ICONINFORMATION)
 	for attempt := 1; attempt <= 4; attempt++ {
-		messageSync("У браузері заверши вхід/реєстрацію Turso.\n\nНа сторінці Access Token натисни Copy. Можна копіювати як сам token, так і рядок `export TURSO_API_TOKEN=...`.\n\nПісля копіювання повернись у YORU Installer і натисни OK — вставляти вручну нікуди не треба, installer сам прочитає буфер обміну та перевірить token.", "Turso — скопіюй Access Token", MB_OK|MB_ICONINFORMATION)
 		clip, cerr := readClipboardText()
 		if cerr != nil {
-			messageSync("Не вдалося прочитати буфер обміну: "+cerr.Error()+"\n\nСкопіюй Access Token ще раз і натисни OK.", "Turso", MB_OK|MB_ICONWARNING)
+			messageSync("Не вдалося прочитати буфер обміну: "+cerr.Error()+"\n\nСкопіюй Platform API Token у Turso Dashboard і натисни OK.", "Turso", MB_OK|MB_ICONWARNING)
 			continue
 		}
 		token := extractTursoPlatformToken(clip)
 		if token == "" {
-			messageSync("У буфері обміну не знайдено Turso Access Token.\n\nСкопіюй token на сторінці Turso (або весь рядок `export TURSO_API_TOKEN=...`) і натисни OK.", "Turso", MB_OK|MB_ICONWARNING)
+			messageSync("У буфері обміну не знайдено Turso Platform API Token.\n\nСкопіюй token із Turso Dashboard -> API Tokens і натисни OK.", "Turso", MB_OK|MB_ICONWARNING)
 			continue
 		}
-		current.TursoPlatformToken = token
-		who, werr := runWSL(ctx, "", nil, "turso auth whoami")
-		if werr == nil && !tursoAuthMissing(who) && strings.TrimSpace(lastUsefulLine(who)) != "" {
+		org, _, verr := tursoIdentityFromToken(ctx, token)
+		if verr == nil {
+			current.TursoPlatformToken = token
+			current.TursoAccount = org
+			setAuthStatus("turso", authDisplay(org))
+			setAuthCode("turso", "")
 			saveState()
-			appendLog("Turso Access Token отримано з буфера обміну, перевірено та збережено через DPAPI.")
+			appendLog("Turso Platform API token перевірено. Organization: " + org + ". Token збережено через Windows DPAPI у data\\state.")
 			return nil
 		}
-		current.TursoPlatformToken = ""
-		saveState()
-		messageSync("Скопійований Turso Access Token не пройшов перевірку.\n\nПереконайся, що скопійовано саме Access Token для щойно вибраного акаунта, а не database token.", "Turso token не прийнято", MB_OK|MB_ICONWARNING)
+		messageSync("Скопійований token не пройшов перевірку Turso Platform API:\n\n"+verr.Error()+"\n\nСтвори/скопіюй Platform API Token ще раз і натисни OK.", "Turso token не прийнято", MB_OK|MB_ICONWARNING)
 	}
-	return errors.New("Turso: не вдалося отримати валідний Access Token з буфера обміну")
+	return errors.New("Turso: не вдалося отримати валідний Platform API Token з буфера обміну")
 }
 
 func ensureTursoAccount(ctx context.Context) error {
-	for attempt := 1; attempt <= 6; attempt++ {
-		out, err := runWSL(ctx, "", nil, "turso auth whoami")
-		missing := tursoAuthMissing(out) || strings.TrimSpace(lastUsefulLine(out)) == ""
-		if err != nil || missing {
-			// A saved platform token may have expired; do not let an error string become a fake identity.
-			current.TursoPlatformToken = ""
+	if strings.TrimSpace(current.TursoPlatformToken) != "" {
+		org, _, err := tursoIdentityFromToken(ctx, current.TursoPlatformToken)
+		if err == nil {
+			current.TursoAccount = org
+			setAuthStatus("turso", authDisplay(org))
+			setAuthCode("turso", "")
 			saveState()
-			messageSync("Turso CLI не має підтвердженої активної авторизації.\n\nЗараз installer відкриє Turso у браузері. Після входу/реєстрації Turso покаже Access Token — натисни Copy. Потім installer сам забере token із буфера обміну та перевірить акаунт.", "Turso", MB_OK|MB_ICONINFORMATION)
-			if aerr := acquireTursoPlatformToken(ctx, false); aerr != nil {
-				appendLog("Turso login flow не завершився; пробую signup flow...")
-				if aerr = acquireTursoPlatformToken(ctx, true); aerr != nil {
-					return fmt.Errorf("Turso auth: %w", aerr)
-				}
-			}
-			continue
-		}
-
-		username := strings.TrimSpace(lastUsefulLine(out))
-		if tursoAuthMissing(username) || strings.Contains(strings.ToLower(username), "not logged in") {
-			current.TursoPlatformToken = ""
-			continue
-		}
-		summary := "Користувач/organization: " + username
-		if orgs, oerr := runWSL(ctx, "", nil, "turso org list"); oerr == nil && !tursoAuthMissing(orgs) {
-			osum := identitySummary(orgs, 8)
-			if osum != "" {
-				summary += "\n\nДоступні organizations:\n" + osum
-			}
-		}
-		appendLog("Turso active identity: " + username)
-		if confirmServiceAccount("Turso", summary) {
-			current.TursoAccount = username
-			// If this was an old CLI session, capture its current API token for resume.
-			if current.TursoPlatformToken == "" {
-				if tokOut, terr := runWSL(ctx, "", nil, "turso auth token"); terr == nil {
-					if tok := extractTursoPlatformToken(tokOut); tok != "" {
-						current.TursoPlatformToken = tok
-					}
-				}
-			}
-			saveState()
-			appendLog("Turso акаунт підтверджено користувачем: " + username)
+			appendLog("Turso active organization: " + org + " (Platform API)")
 			return nil
 		}
-
-		appendLog("Turso акаунт відхилено користувачем; виконую logout і очищаю DB URL/token та platform token зі state.")
-		_, _ = runWSL(ctx, "", nil, "turso auth logout")
+		appendLog("Збережений Turso Platform API token більше не валідний: " + err.Error())
 		resetServiceBinding("turso")
-		messageSync("Поточний Turso-акаунт відхилено.\n\nЗараз відкриється авторизація іншого акаунта. Після входу на сторінці Turso натисни Copy Access Token; installer сам прочитає буфер обміну, а потім ще раз покаже знайдений Turso username/organization для підтвердження.", "Turso — інший акаунт", MB_OK|MB_ICONINFORMATION)
-		if err = acquireTursoPlatformToken(ctx, false); err != nil {
-			return fmt.Errorf("Turso auth іншого акаунта: %w", err)
-		}
 	}
-	return errors.New("Turso: забагато спроб зміни акаунта")
+	setAuthStatus("turso", "Потрібна авторизація")
+	return acquireTursoPlatformToken(ctx, false)
 }
 
 func githubIdentity(ctx context.Context, gh string) (string, string, error) {
-	out, err := runDirect(ctx, installDir, "", nil, gh, "api", "user")
+	out, err := runDirect(ctx, dataRoot, "", nil, gh, "api", "user")
 	if err != nil {
 		return "", "", err
 	}
@@ -1437,39 +1544,392 @@ func githubIdentity(ctx context.Context, gh string) (string, string, error) {
 	return u.Login, summary, nil
 }
 
-func confirmExistingGitHubAccount(ctx context.Context, gh string) error {
-	if _, err := runDirect(ctx, installDir, "", nil, gh, "auth", "status", "--active", "--hostname", "github.com"); err != nil {
-		appendLog("GitHub CLI не має активного акаунта; для публічного clone підтвердження GitHub не потрібне, якщо clone пройде без login.")
-		return nil
+func ensureGitHubAccount(ctx context.Context, gh string) error {
+	for attempt := 1; attempt <= 4; attempt++ {
+		if _, err := runDirect(ctx, dataRoot, "", nil, gh, "auth", "status", "--active", "--hostname", "github.com"); err == nil {
+			login, summary, identityErr := githubIdentity(ctx, gh)
+			if identityErr == nil && strings.TrimSpace(login) != "" {
+				current.GitHubAccount = login
+				setAuthStatus("github", authDisplay("@"+login))
+				setAuthCode("github", "")
+				saveState()
+				appendLog("GitHub active identity: " + strings.ReplaceAll(summary, "\n", " | "))
+				return nil
+			}
+		}
+
+		setAuthStatus("github", "Потрібна авторизація")
+		messageSync("GitHub CLI не авторизований. Авторизація тепер обов'язкова, тому що installer клонує та перевіряє репозиторій через GitHub CLI. Зараз відкриється GitHub login.", "GitHub — потрібна авторизація", MB_OK|MB_ICONINFORMATION)
+		openURL("https://github.com/login")
+		if _, err := runDirect(ctx, dataRoot, "", authorizationFlowHook("github"), gh, "auth", "login", "--web", "--hostname", "github.com", "--git-protocol", "https", "--insecure-storage"); err != nil {
+			return fmt.Errorf("GitHub login: %w", err)
+		}
 	}
-	for attempt := 1; attempt <= 6; attempt++ {
-		login, summary, err := githubIdentity(ctx, gh)
+	return errors.New("GitHub: не вдалося підтвердити авторизацію після login")
+}
+
+func jsonContainsProjectName(value any, wanted string) bool {
+	wanted = strings.ToLower(strings.TrimSpace(wanted))
+	switch v := value.(type) {
+	case map[string]any:
+		for key, raw := range v {
+			lk := strings.ToLower(strings.TrimSpace(key))
+			if lk == "name" || lk == "project_name" || lk == "projectname" {
+				if name, ok := raw.(string); ok && strings.EqualFold(strings.TrimSpace(name), wanted) {
+					return true
+				}
+			}
+			if jsonContainsProjectName(raw, wanted) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if jsonContainsProjectName(item, wanted) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cloudflareProjectExistsInAccount(ctx context.Context, siteDir, name string) (bool, error) {
+	out, err := runWrangler(ctx, siteDir, "", nil, "pages", "project", "list", "--json")
+	if err == nil {
+		clean := regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`).ReplaceAllString(out, "")
+		startObj, startArr := strings.Index(clean, "{"), strings.Index(clean, "[")
+		start := -1
+		if startObj >= 0 && (startArr < 0 || startObj < startArr) {
+			start = startObj
+		} else if startArr >= 0 {
+			start = startArr
+		}
+		if start >= 0 {
+			clean = clean[start:]
+			endObj, endArr := strings.LastIndex(clean, "}"), strings.LastIndex(clean, "]")
+			end := endObj
+			if endArr > end {
+				end = endArr
+			}
+			if end >= 0 {
+				clean = clean[:end+1]
+			}
+			var doc any
+			if json.Unmarshal([]byte(clean), &doc) == nil {
+				return jsonContainsProjectName(doc, name), nil
+			}
+		}
+	}
+
+	textOut, textErr := runWrangler(ctx, siteDir, "", nil, "pages", "project", "list")
+	if textErr != nil {
 		if err != nil {
-			return nil
+			return false, err
 		}
-		if confirmServiceAccount("GitHub", summary) {
-			current.GitHubAccount = login
-			saveState()
-			appendLog("GitHub акаунт підтверджено користувачем: " + login)
-			return nil
+		return false, textErr
+	}
+	needle := strings.ToLower(strings.TrimSpace(name))
+	for _, raw := range strings.Split(strings.ReplaceAll(textOut, "\r", ""), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
 		}
-		resetServiceBinding("github")
-		_ = os.Unsetenv("GH_TOKEN")
-		_ = os.Unsetenv("GITHUB_TOKEN")
-		if login != "" {
-			_, _ = runDirect(ctx, installDir, "", nil, gh, "auth", "logout", "--hostname", "github.com", "--user", login)
-		}
-		messageSync("Поточний GitHub-акаунт відхилено. Увійди в інший акаунт; після login installer знову покаже його для підтвердження.", "GitHub — інший акаунт", MB_OK|MB_ICONINFORMATION)
-		if _, err = runDirect(ctx, installDir, "", openFirstURLHook(), gh, "auth", "login", "--web", "--hostname", "github.com", "--git-protocol", "https"); err != nil {
-			return fmt.Errorf("GitHub login іншого акаунта: %w", err)
+		parts := regexp.MustCompile(`[\s│|]+`).Split(strings.ToLower(line), -1)
+		for _, part := range parts {
+			if strings.Trim(part, " \t") == needle {
+				return true, nil
+			}
 		}
 	}
-	return errors.New("GitHub: забагато спроб зміни акаунта")
+	return false, nil
+}
+
+func cloudflarePageResponds(ctx context.Context, name string) (bool, int) {
+	url := "https://" + name + ".pages.dev/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, 0
+	}
+	req.Header.Set("User-Agent", "YORU-Installer/"+appVersion)
+	client := &http.Client{
+		Timeout:       7 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, 0
+	}
+	defer resp.Body.Close()
+	_, _ = io.CopyN(io.Discard, resp.Body, 512)
+	if (resp.StatusCode >= 200 && resp.StatusCode < 400) || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return true, resp.StatusCode
+	}
+	return false, resp.StatusCode
+}
+
+func interactiveCheckProjectName(raw string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		messageSync("Введи назву проєкту, яку потрібно перевірити.", "Перевірка назви", MB_OK|MB_ICONWARNING)
+		return
+	}
+	name := normalizeSharedProjectName(raw)
+	if !validSharedProjectName(name) {
+		messageSync("Назва має бути 1-48 символів і після нормалізації містити тільки латинські a-z, цифри та дефіси.", "Некоректна назва", MB_OK|MB_ICONWARNING)
+		return
+	}
+	if name != raw {
+		setFieldText(CTRL_CF_PROJECT, name)
+	}
+	setStatus("Перевіряю назву " + name + "...")
+	appendLog("Ручна перевірка Cloudflare Pages name: " + name)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	if taken, status := cloudflarePageResponds(ctx, name); taken {
+		setStatus("Назва зайнята: " + name)
+		messageSync(fmt.Sprintf("Назва «%s» зайнята.\n\nhttps://%s.pages.dev вже відповідає (HTTP %d).\n\nВибери іншу назву проєкту.", name, name, status), "Cloudflare Pages — зайнято", MB_OK|MB_ICONWARNING)
+		return
+	}
+
+	siteDir := filepath.Join(appRoot, "site")
+	if st, err := os.Stat(siteDir); err != nil || !st.IsDir() {
+		siteDir = installDir
+	}
+	who, whoErr := runWrangler(ctx, siteDir, "", nil, "whoami")
+	loggedIn := whoErr == nil && strings.Contains(strings.ToLower(who), "logged in")
+	if !loggedIn {
+		setStatus("URL вільний; потрібна Cloudflare авторизація для повної перевірки")
+		messageSync("Точна адреса https://"+name+".pages.dev зараз не зайнята.\n\nАле Cloudflare CLI не авторизований, тому installer не може перевірити список Pages projects активного акаунта.\n\nНатисни кнопку Cloudflare, авторизуйся, а потім натисни «Перевірити» ще раз.", "Cloudflare Pages — часткова перевірка", MB_OK|MB_ICONINFORMATION)
+		return
+	}
+
+	exists, err := cloudflareProjectExistsInAccount(ctx, siteDir, name)
+	if err != nil {
+		setStatus("Помилка перевірки назви")
+		messageSync("Не вдалося перевірити список Cloudflare Pages projects:\n\n"+err.Error(), "Перевірка назви", MB_OK|MB_ICONERROR)
+		return
+	}
+	if exists && !cloudflareResumeAllowed(name) {
+		setStatus("Назва зайнята в Cloudflare: " + name)
+		messageSync("Pages project «"+name+"» уже існує в активному Cloudflare-акаунті.\n\nВибери іншу назву, щоб installer не перезаписав існуючий сайт.", "Cloudflare Pages — зайнято", MB_OK|MB_ICONWARNING)
+		return
+	}
+	if exists && cloudflareResumeAllowed(name) {
+		setStatus("Існуючий проєкт доступний для resume: " + name)
+		messageSync("Pages project «"+name+"» уже існує і відповідає збереженому Site URL цього installer.\n\nНазву можна використовувати для продовження попереднього встановлення.", "Cloudflare Pages — resume", MB_OK|MB_ICONINFORMATION)
+		return
+	}
+
+	setStatus("Назва вільна: " + name)
+	appendLog("Cloudflare Pages manual check: «" + name + "» вільна.")
+	messageSync("Назва «"+name+"» вільна.\n\nCloudflare Pages project з такою назвою не знайдено, а https://"+name+".pages.dev не зайнятий.", "Cloudflare Pages — вільно", MB_OK|MB_ICONINFORMATION)
+}
+
+func cloudflareResumeAllowed(name string) bool {
+	expected := "https://" + strings.ToLower(strings.TrimSpace(name)) + ".pages.dev"
+	return strings.EqualFold(strings.TrimRight(strings.TrimSpace(current.SiteURL), "/"), expected) && current.ProjectName == name
+}
+
+func ensureCloudflareProjectNameAvailable(ctx context.Context, siteDir string) error {
+	name := current.ProjectName
+	exists, err := cloudflareProjectExistsInAccount(ctx, siteDir, name)
+	if err != nil {
+		return fmt.Errorf("не вдалося перевірити список Cloudflare Pages projects: %w", err)
+	}
+	if exists {
+		if cloudflareResumeAllowed(name) {
+			appendLog("Cloudflare Pages project «" + name + "» вже існує і відповідає збереженому Site URL — дозволяю resume.")
+			return nil
+		}
+		return fmt.Errorf("Cloudflare Pages project «%s» вже існує в активному акаунті. Щоб installer випадково не перезаписав чужий/старий сайт, введи іншу назву проєкту", name)
+	}
+	if taken, status := cloudflarePageResponds(ctx, name); taken {
+		return fmt.Errorf("адреса https://%s.pages.dev вже відповідає (HTTP %d). Точний Pages slug зайнятий; вибери іншу назву проєкту", name, status)
+	}
+	appendLog("Cloudflare Pages name preflight: «" + name + "» не знайдено в активному акаунті, точний pages.dev URL не зайнятий.")
+	return nil
+}
+
+func refreshAuthorizationPanel() {
+	runMu.Lock()
+	busy := running
+	runMu.Unlock()
+	if busy {
+		return
+	}
+	setAuthStatus("github", "Перевірка...")
+	setAuthStatus("cloudflare", "Перевірка...")
+	setAuthStatus("vercel", "Перевірка...")
+	setAuthStatus("turso", "Перевірка...")
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	if gh := ghExePath(); fileExists(gh) {
+		if _, err := runDirect(ctx, dataRoot, "", nil, gh, "auth", "status", "--active", "--hostname", "github.com"); err == nil {
+			if login, _, ierr := githubIdentity(ctx, gh); ierr == nil && login != "" {
+				setAuthStatus("github", authDisplay("@"+login))
+			} else {
+				setAuthStatus("github", "Потрібна авторизація")
+			}
+		} else {
+			setAuthStatus("github", "Потрібна авторизація")
+		}
+	} else {
+		setAuthStatus("github", "Потрібна авторизація")
+	}
+
+	siteDir := filepath.Join(appRoot, "site")
+	if !dirExists(siteDir) {
+		siteDir = dataRoot
+	}
+	if fileExists(wranglerEntryPath()) {
+		if out, err := runWranglerDirect(ctx, siteDir, "", nil, "whoami"); err == nil && strings.Contains(strings.ToLower(out), "logged in") {
+			setAuthStatus("cloudflare", authDisplay(cloudflareAccountLabel(out)))
+		} else {
+			setAuthStatus("cloudflare", "Потрібна авторизація")
+		}
+	} else {
+		setAuthStatus("cloudflare", "Потрібна авторизація")
+	}
+
+	coreDir := projectCoreDir(appRoot)
+	if !dirExists(coreDir) {
+		coreDir = dataRoot
+	}
+	if fileExists(vercelEntryPath()) {
+		if out, err := runVercel(ctx, coreDir, "", nil, "whoami"); err == nil && !vercelAuthMissing(out) {
+			user := strings.TrimSpace(lastUsefulLine(out))
+			if user != "" {
+				setAuthStatus("vercel", authDisplay(user))
+			} else {
+				setAuthStatus("vercel", "Потрібна авторизація")
+			}
+		} else {
+			setAuthStatus("vercel", "Потрібна авторизація")
+		}
+	} else {
+		setAuthStatus("vercel", "Потрібна авторизація")
+	}
+
+	if strings.TrimSpace(current.TursoPlatformToken) != "" {
+		if org, _, err := tursoIdentityFromToken(ctx, current.TursoPlatformToken); err == nil {
+			setAuthStatus("turso", authDisplay(org))
+		} else {
+			setAuthStatus("turso", "Потрібна авторизація")
+		}
+	} else {
+		setAuthStatus("turso", "Потрібна авторизація")
+	}
+}
+
+func interactiveAuthorizeService(service string) {
+	authMu.Lock()
+	if authRunning {
+		authMu.Unlock()
+		return
+	}
+	authRunning = true
+	authMu.Unlock()
+	defer func() { authMu.Lock(); authRunning = false; authMu.Unlock() }()
+	runMu.Lock()
+	busy := running
+	runMu.Unlock()
+	if busy {
+		messageSync("Зупини поточне встановлення перед зміною акаунта.", "Авторизація", MB_OK|MB_ICONWARNING)
+		return
+	}
+	label := map[string]string{"github": "GitHub", "cloudflare": "Cloudflare", "vercel": "Vercel", "turso": "Turso"}[service]
+	if label == "" {
+		return
+	}
+	setAuthStatus(service, "Авторизація...")
+	setAuthCode(service, "")
+	setStatus("Авторизація " + label + "...")
+	appendLog(label + ": ручна браузерна авторизація запущена кнопкою користувача.")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	var err error
+	switch service {
+	case "github":
+		err = ensurePortableGit(ctx)
+		if err == nil {
+			err = ensurePortableGitHubCLI(ctx)
+		}
+		if err == nil {
+			gh := ghExePath()
+			login, _, _ := githubIdentity(ctx, gh)
+			if login != "" {
+				_, _ = runDirect(ctx, dataRoot, "", nil, gh, "auth", "logout", "--hostname", "github.com", "--user", login)
+			}
+			resetServiceBinding("github")
+			setAuthStatus("github", "Потрібна авторизація")
+			_, err = runDirect(ctx, dataRoot, "", authorizationFlowHook("github"), gh, "auth", "login", "--web", "--hostname", "github.com", "--git-protocol", "https", "--insecure-storage")
+			if err == nil {
+				_, _ = runDirect(ctx, dataRoot, "", nil, gh, "auth", "setup-git", "--hostname", "github.com")
+				err = ensureGitHubAccount(ctx, gh)
+			}
+		}
+	case "cloudflare":
+		err = ensurePortableNode(ctx)
+		if err == nil {
+			err = ensureWranglerCLI(ctx, dataRoot)
+		}
+		if err == nil {
+			siteDir := filepath.Join(appRoot, "site")
+			if !dirExists(siteDir) {
+				siteDir = dataRoot
+			}
+			_, _ = runWranglerDirect(ctx, siteDir, "", nil, "logout")
+			resetServiceBinding("cloudflare")
+			setAuthStatus("cloudflare", "Потрібна авторизація")
+			_, err = runWranglerDirect(ctx, siteDir, "", authorizationFlowHook("cloudflare"), "login", "--device")
+			if err == nil {
+				err = ensureCloudflareAccount(ctx, siteDir)
+			}
+		}
+	case "vercel":
+		coreDir := projectCoreDir(appRoot)
+		if !dirExists(coreDir) {
+			coreDir = dataRoot
+		}
+		err = ensureVercelCLI(ctx, coreDir)
+		if err == nil {
+			_, _ = runVercel(ctx, coreDir, "", nil, "logout")
+			resetServiceBinding("vercel")
+			setAuthStatus("vercel", "Потрібна авторизація")
+			_, err = runVercel(ctx, coreDir, "", authorizationFlowHook("vercel"), "login")
+			if err == nil {
+				err = ensureVercelAccount(ctx, coreDir)
+			}
+		}
+	case "turso":
+		resetServiceBinding("turso")
+		setAuthStatus("turso", "Потрібна авторизація")
+		err = acquireTursoPlatformToken(ctx, false)
+		if err == nil {
+			err = ensureTursoAccount(ctx)
+		}
+	}
+	if err != nil {
+		appendLog(label + ": помилка ручної авторизації: " + err.Error())
+		setAuthStatus(service, "Потрібна авторизація")
+		setStatus("Помилка авторизації " + label)
+		messageSync(label+": авторизація не завершена.\n\n"+err.Error(), label+" — авторизація", MB_OK|MB_ICONERROR)
+		return
+	}
+	appendLog(label + ": браузерна авторизація завершена успішно.")
+	setAuthCode(service, "")
+	setStatus(label + ": авторизовано")
+	go refreshAuthorizationPanel()
 }
 
 func stepCloudflare(ctx context.Context) error {
 	siteDir := filepath.Join(appRoot, "site")
-	return ensureCloudflareAccount(ctx, siteDir)
+	if err := ensureCloudflareAccount(ctx, siteDir); err != nil {
+		return err
+	}
+	return ensureCloudflareProjectNameAvailable(ctx, siteDir)
 }
 
 func stepVercel(ctx context.Context) error {
@@ -1483,16 +1943,20 @@ func tursoShell(command string) string {
 }
 
 func runWSL(ctx context.Context, stdin string, hook func(string), command string) (string, error) {
-	args := []string{}
-	if strings.TrimSpace(wslDistro) != "" {
-		args = append(args, "-d", wslDistro, "--")
+	if strings.TrimSpace(wslDistro) == "" {
+		wslDistro = privateWSLDistroName()
 	}
-	prefix := "export PATH=\"$HOME/.turso:$HOME/.local/bin:$PATH\"; "
+	args := []string{"-d", wslDistro, "--user", "root", "--", "bash", "-lc"}
+	prefix := "export HOME=/root; export PATH=\"$HOME/.turso:$HOME/.local/bin:$PATH\"; "
 	if strings.TrimSpace(current.TursoPlatformToken) != "" {
 		prefix += "export TURSO_API_TOKEN=" + shQuote(current.TursoPlatformToken) + "; "
 	}
-	args = append(args, "bash", "-lc", prefix+command)
-	return runDirect(ctx, appRoot, stdin, hook, "wsl.exe", args...)
+	args = append(args, prefix+command)
+	workDir := dataRoot
+	if dirExists(appRoot) {
+		workDir = appRoot
+	}
+	return runDirect(ctx, workDir, stdin, hook, "wsl.exe", args...)
 }
 
 func runWSLWithoutTursoToken(ctx context.Context, stdin string, hook func(string), command string) (string, error) {
@@ -1503,13 +1967,7 @@ func runWSLWithoutTursoToken(ctx context.Context, stdin string, hook func(string
 }
 
 func stepTursoAuth(ctx context.Context) error {
-	if _, err := runWSL(ctx, "", nil, "command -v turso >/dev/null 2>&1"); err != nil {
-		messageSync("Turso CLI не знайдено у WSL. Програма зараз встановить офіційний CLI командою Turso install script.", "Turso CLI", MB_OK|MB_ICONINFORMATION)
-		if _, err = runWSL(ctx, "", nil, "curl -sSfL https://get.tur.so/install.sh | bash"); err != nil {
-			return fmt.Errorf("встановлення Turso CLI: %w", err)
-		}
-	}
-	appendLog("Turso CLI: OK")
+	appendLog("Turso: використовую Platform API напряму; WSL/Ubuntu/Turso CLI не потрібні.")
 	return ensureTursoAccount(ctx)
 }
 
@@ -1540,7 +1998,15 @@ func stepInitialDeploy(ctx context.Context) error {
 	appendLog("Core URL: " + current.CoreURL)
 
 	appendLog("Створюю/перевіряю Cloudflare Pages project...")
-	createOut, _ := runWrangler(ctx, siteDir, "", nil, "pages", "project", "create", current.CloudflareProject, "--production-branch", "main")
+	createOut := ""
+	if current.SiteURL == "" {
+		createOut, err = runWrangler(ctx, siteDir, "", nil, "pages", "project", "create", current.CloudflareProject, "--production-branch", "main")
+		if err != nil {
+			return fmt.Errorf("створення Cloudflare Pages project %s: %w", current.CloudflareProject, err)
+		}
+	} else {
+		appendLog("Cloudflare Pages project уже прив'язаний до локального state; пропускаю повторне create.")
+	}
 	out, err = runWrangler(ctx, siteDir, "", nil, "pages", "deploy", ".", "--project-name", current.CloudflareProject)
 	if err != nil {
 		messageSync("Cloudflare Pages deploy не завершився. Перевір лог. Якщо ім'я project зайняте/невірне — зміни поле Cloudflare project і запусти знову.", "Cloudflare Pages", MB_OK|MB_ICONWARNING)
@@ -1553,6 +2019,21 @@ func stepInitialDeploy(ctx context.Context) error {
 	if current.SiteURL == "" {
 		return errors.New("не вдалося визначити реальний Cloudflare Pages URL з output Wrangler")
 	}
+	expectedSiteURL := "https://" + current.ProjectName + ".pages.dev"
+	if !strings.EqualFold(strings.TrimRight(current.SiteURL, "/"), expectedSiteURL) {
+		assigned := current.SiteURL
+		if createOut != "" {
+			if u, parseErr := url.Parse(assigned); parseErr == nil {
+				assignedProject := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".pages.dev")
+				if assignedProject != "" {
+					_, _ = runWrangler(ctx, siteDir, "", nil, "pages", "project", "delete", assignedProject, "--yes")
+				}
+			}
+		}
+		current.SiteURL = ""
+		setFieldText(CTRL_SITE_URL, "")
+		return fmt.Errorf("Cloudflare не видав точну адресу %s; отримано %s. Назва вже зайнята, вибери іншу", expectedSiteURL, assigned)
+	}
 	setFieldText(CTRL_SITE_URL, current.SiteURL)
 	saveState()
 	appendLog("Site URL: " + current.SiteURL)
@@ -1561,32 +2042,70 @@ func stepInitialDeploy(ctx context.Context) error {
 
 func stepTursoDB(ctx context.Context) error {
 	current.TursoDB = current.ProjectName
-	appendLog("Перевіряю Turso database " + current.TursoDB + "...")
-	if _, err := runWSL(ctx, "", nil, "turso db show "+shQuote(current.TursoDB)+" --url"); err != nil {
-		if _, err = runWSL(ctx, "", nil, "turso db create "+shQuote(current.TursoDB)+" --wait"); err != nil {
-			return fmt.Errorf("створення Turso DB: %w", err)
+	if strings.TrimSpace(current.TursoPlatformToken) == "" || strings.TrimSpace(current.TursoAccount) == "" {
+		if err := ensureTursoAccount(ctx); err != nil {
+			return err
 		}
 	}
-	out, err := runWSL(ctx, "", nil, "turso db show "+shQuote(current.TursoDB)+" --url")
+	token := current.TursoPlatformToken
+	org := current.TursoAccount
+	group, err := tursoEnsureGroup(ctx, token, org)
 	if err != nil {
-		return fmt.Errorf("Turso db show --url: %w", err)
+		return fmt.Errorf("Turso group: %w", err)
 	}
-	reURL := regexp.MustCompile(`libsql://[^\s]+`)
-	current.TursoURL = strings.TrimSpace(reURL.FindString(out))
-	if current.TursoURL == "" {
-		return errors.New("Turso URL не знайдено у виводі CLI")
+	base := "/v1/organizations/" + url.PathEscape(org) + "/databases"
+	dbPath := base + "/" + url.PathEscape(current.TursoDB)
+	appendLog("Перевіряю Turso database " + current.TursoDB + " через Platform API...")
+	status, body, err := tursoPlatformRequest(ctx, token, http.MethodGet, dbPath, nil)
+	if err != nil {
+		return err
 	}
+	var dbResp struct {
+		Database tursoDatabaseAPI `json:"database"`
+	}
+	if status == http.StatusNotFound {
+		appendLog("Turso database не існує; створюю у group " + group + "...")
+		status, body, err = tursoPlatformRequest(ctx, token, http.MethodPost, base, map[string]any{"name": current.TursoDB, "group": group})
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return tursoAPIError(status, body)
+		}
+		if err := json.Unmarshal(body, &dbResp); err != nil {
+			return fmt.Errorf("Turso create database JSON: %w", err)
+		}
+	} else if status == http.StatusOK {
+		if err := json.Unmarshal(body, &dbResp); err != nil {
+			return fmt.Errorf("Turso database JSON: %w", err)
+		}
+	} else {
+		return tursoAPIError(status, body)
+	}
+	if strings.TrimSpace(dbResp.Database.Hostname) == "" {
+		return errors.New("Turso API не повернув database hostname")
+	}
+	current.TursoURL = "libsql://" + strings.TrimSpace(dbResp.Database.Hostname)
 	setFieldText(CTRL_TURSO_URL, current.TursoURL)
 	appendLog("TURSO_DATABASE_URL: " + current.TursoURL)
 
 	if current.TursoToken == "" {
-		out, err = runWSL(ctx, "", nil, "turso db tokens create "+shQuote(current.TursoDB)+" --expiration never")
+		status, body, err = tursoPlatformRequest(ctx, token, http.MethodPost, dbPath+"/auth/tokens?expiration=never&authorization=full-access", nil)
 		if err != nil {
-			return fmt.Errorf("Turso token create: %w", err)
+			return err
 		}
-		current.TursoToken = extractJWT(out)
+		if status != http.StatusOK {
+			return tursoAPIError(status, body)
+		}
+		var tok struct {
+			JWT string `json:"jwt"`
+		}
+		if err := json.Unmarshal(body, &tok); err != nil {
+			return fmt.Errorf("Turso database token JSON: %w", err)
+		}
+		current.TursoToken = strings.TrimSpace(tok.JWT)
 		if current.TursoToken == "" {
-			return errors.New("Turso token не вдалося автоматично витягнути з консолі")
+			return errors.New("Turso Platform API не повернув database auth token")
 		}
 	}
 	setFieldText(CTRL_TURSO_TOKEN, current.TursoToken)
@@ -1595,7 +2114,7 @@ func stepTursoDB(ctx context.Context) error {
 	}
 	setFieldText(CTRL_CORE_KEY, current.CoreKey)
 	saveState()
-	appendLog("TURSO_AUTH_TOKEN: отримано і збережено через DPAPI (у лог token не друкується).")
+	appendLog("TURSO_AUTH_TOKEN: створено через Platform API і збережено через DPAPI (у лог token не друкується).")
 	appendLog("CORE_API_KEY: згенеровано локально і збережено через DPAPI.")
 	return nil
 }
@@ -1837,55 +2356,674 @@ func runCaptureDecoded(ctx context.Context, dir, name string, args ...string) (s
 }
 
 func chooseWSLDistro(ctx context.Context) (string, error) {
-	out, err := runCaptureDecoded(ctx, appRoot, "wsl.exe", "-l", "-q")
+	if err := ensureYoruWSL(ctx); err != nil {
+		return "", err
+	}
+	wslDistro = privateWSLDistroName()
+	return privateWSLDistroName(), nil
+}
+
+func ensureDataLayout() error {
+	for _, rel := range []string{"tools", "downloads", "cache/npm", "auth/github", "auth/cloudflare", "auth/vercel", "auth/git", "auth/home", "auth/turso", "project", "state", "logs"} {
+		if err := os.MkdirAll(filepath.Join(dataRoot, filepath.FromSlash(rel)), 0755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func configureIsolatedEnvironment() {
+	_ = os.Setenv("GH_CONFIG_DIR", filepath.Join(dataRoot, "auth", "github"))
+	_ = os.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(dataRoot, "auth", "git", ".gitconfig"))
+	_ = os.Setenv("HOME", filepath.Join(dataRoot, "auth", "home"))
+	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(dataRoot, "auth", "cloudflare"))
+	_ = os.Setenv("XDG_CACHE_HOME", filepath.Join(dataRoot, "cache", "xdg"))
+	_ = os.Setenv("npm_config_cache", filepath.Join(dataRoot, "cache", "npm"))
+	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "VERCEL_TOKEN", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY", "CLOUDFLARE_EMAIL"} {
+		_ = os.Unsetenv(k)
+	}
+	addCommonToolPaths()
+}
+
+func dirExists(path string) bool  { st, err := os.Stat(path); return err == nil && st.IsDir() }
+func fileExists(path string) bool { st, err := os.Stat(path); return err == nil && !st.IsDir() }
+func portableNodeRoot() string    { return filepath.Join(dataRoot, "tools", "node") }
+func nodeExePath() string         { return filepath.Join(portableNodeRoot(), "node.exe") }
+func portableGitRoot() string     { return filepath.Join(dataRoot, "tools", "git") }
+func gitExePath() string          { return filepath.Join(portableGitRoot(), "cmd", "git.exe") }
+func portableGHRoot() string      { return filepath.Join(dataRoot, "tools", "gh") }
+func ghExePath() string {
+	p := filepath.Join(portableGHRoot(), "bin", "gh.exe")
+	if fileExists(p) {
+		return p
+	}
+	return filepath.Join(portableGHRoot(), "gh.exe")
+}
+func wranglerToolRoot() string { return filepath.Join(dataRoot, "tools", "wrangler") }
+func wranglerEntryPath() string {
+	return filepath.Join(wranglerToolRoot(), "node_modules", "wrangler", "bin", "wrangler.js")
+}
+func vercelGlobalConfigDir() string { return filepath.Join(dataRoot, "auth", "vercel") }
+
+func downloadFile(ctx context.Context, rawURL, dst, label string) error {
+	if fileExists(dst) {
+		return nil
+	}
+	_ = os.MkdirAll(filepath.Dir(dst), 0755)
+	tmp := dst + ".part"
+	_ = os.Remove(tmp)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("не вдалося отримати список WSL-дистрибутивів: %w", err)
+		return err
 	}
-	var usable []string
-	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
-		name := strings.TrimSpace(strings.TrimPrefix(line, "*"))
-		if name == "" {
-			continue
-		}
-		low := strings.ToLower(name)
-		if strings.HasPrefix(low, "docker-desktop") {
-			continue
-		}
-		usable = append(usable, name)
+	req.Header.Set("User-Agent", "YORU-Installer/"+appVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("завантаження %s: %w", label, err)
 	}
-	if len(usable) > 0 {
-		for _, name := range usable {
-			if strings.EqualFold(name, "Ubuntu") || strings.HasPrefix(strings.ToLower(name), "ubuntu-") {
-				return name, nil
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("завантаження %s: HTTP %d", label, resp.StatusCode)
+	}
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	buf := make([]byte, 1024*1024)
+	var done int64
+	total := resp.ContentLength
+	lastPct := -10
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := f.Write(buf[:n]); werr != nil {
+				return werr
+			}
+			done += int64(n)
+			if total > 0 {
+				pct := int(done * 100 / total)
+				if pct >= lastPct+10 {
+					lastPct = pct
+					setStatus(fmt.Sprintf("%s: %d%%", label, pct))
+					appendLog(fmt.Sprintf("%s: %d%%", label, pct))
+				}
 			}
 		}
-		return usable[0], nil
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return rerr
+		}
 	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	appendLog(label + ": завантажено у data\\downloads")
+	return nil
+}
 
-	messageSync("WSL встановлено, але знайдено лише службовий docker-desktop. Він не підходить для Turso CLI.\n\nInstaller зараз спробує встановити Ubuntu у WSL. Windows може попросити права адміністратора або перезапуск.", "Потрібен Linux-дистрибутив WSL", MB_OK|MB_ICONINFORMATION)
-	appendLog("У WSL немає користувацького Linux-дистрибутива; пробую встановити Ubuntu...")
-	installOut, installErr := runCaptureDecoded(ctx, appRoot, "wsl.exe", "--install", "-d", "Ubuntu", "--no-launch")
-	if strings.TrimSpace(installOut) != "" {
-		for _, line := range strings.Split(strings.ReplaceAll(installOut, "\r", ""), "\n") {
-			if strings.TrimSpace(line) != "" {
-				appendLog(line)
+func extractZipTo(zipPath, dest string, stripFirst bool) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	_ = os.RemoveAll(dest)
+	if err = os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	for _, f := range r.File {
+		name := filepath.Clean(filepath.FromSlash(f.Name))
+		if stripFirst {
+			parts := strings.Split(name, string(os.PathSeparator))
+			if len(parts) < 2 {
+				continue
 			}
+			name = filepath.Join(parts[1:]...)
+		}
+		if name == "." || name == "" {
+			continue
+		}
+		target := filepath.Join(dest, name)
+		cleanDest := filepath.Clean(dest) + string(os.PathSeparator)
+		cleanTarget := filepath.Clean(target)
+		if !strings.HasPrefix(strings.ToLower(cleanTarget), strings.ToLower(cleanDest)) {
+			return errors.New("unsafe zip path")
+		}
+		if f.FileInfo().IsDir() {
+			_ = os.MkdirAll(target, 0755)
+			continue
+		}
+		_ = os.MkdirAll(filepath.Dir(target), 0755)
+		rc, e := f.Open()
+		if e != nil {
+			return e
+		}
+		out, e := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, f.Mode())
+		if e != nil {
+			rc.Close()
+			return e
+		}
+		_, e = io.Copy(out, rc)
+		rc.Close()
+		out.Close()
+		if e != nil {
+			return e
 		}
 	}
-	if installErr != nil {
-		openURL("https://learn.microsoft.com/windows/wsl/install")
-		return "", fmt.Errorf("не вдалося автоматично встановити Ubuntu у WSL: %w", installErr)
+	return nil
+}
+
+func ensurePortableNode(ctx context.Context) error {
+	if fileExists(nodeExePath()) {
+		if out, err := runCaptureDecoded(ctx, dataRoot, nodeExePath(), "--version"); err == nil && strings.TrimSpace(out) != "" {
+			addCommonToolPaths()
+			return nil
+		}
+	}
+	url := "https://nodejs.org/download/release/v" + nodeVersion + "/node-v" + nodeVersion + "-win-x64.zip"
+	zipPath := filepath.Join(dataRoot, "downloads", "node-v"+nodeVersion+"-win-x64.zip")
+	appendLog("Готую portable Node.js " + nodeVersion + " у data\\tools\\node...")
+	if err := downloadFile(ctx, url, zipPath, "Node.js"); err != nil {
+		return err
+	}
+	if err := extractZipTo(zipPath, portableNodeRoot(), true); err != nil {
+		return fmt.Errorf("розпакування Node.js: %w", err)
+	}
+	addCommonToolPaths()
+	return nil
+}
+
+func ensurePortableGit(ctx context.Context) error {
+	if fileExists(gitExePath()) {
+		return nil
+	}
+	zipPath := filepath.Join(dataRoot, "downloads", "MinGit-"+gitVersion+"-64-bit.zip")
+	url := "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/MinGit-" + gitVersion + "-64-bit.zip"
+	appendLog("Готую portable Git у data\\tools\\git...")
+	if err := downloadFile(ctx, url, zipPath, "Git"); err != nil {
+		return err
+	}
+	if err := extractZipTo(zipPath, portableGitRoot(), false); err != nil {
+		return fmt.Errorf("розпакування Git: %w", err)
+	}
+	addCommonToolPaths()
+	if !fileExists(gitExePath()) {
+		return errors.New("portable Git розпаковано, але cmd\\git.exe не знайдено")
+	}
+	return nil
+}
+
+func ensurePortableGitHubCLI(ctx context.Context) error {
+	if fileExists(ghExePath()) {
+		return nil
+	}
+	zipPath := filepath.Join(dataRoot, "downloads", "gh_"+githubCLIVersion+"_windows_amd64.zip")
+	url := "https://github.com/cli/cli/releases/download/v" + githubCLIVersion + "/gh_" + githubCLIVersion + "_windows_amd64.zip"
+	appendLog("Готую GitHub CLI у data\\tools\\gh...")
+	if err := downloadFile(ctx, url, zipPath, "GitHub CLI"); err != nil {
+		return err
+	}
+	if err := extractZipTo(zipPath, portableGHRoot(), true); err != nil {
+		return fmt.Errorf("розпакування GitHub CLI: %w", err)
+	}
+	addCommonToolPaths()
+	if !fileExists(ghExePath()) {
+		return errors.New("GitHub CLI розпаковано, але gh.exe не знайдено")
+	}
+	return nil
+}
+
+func runWranglerDirect(ctx context.Context, dir, stdin string, hook func(string), args ...string) (string, error) {
+	entry := wranglerEntryPath()
+	if !fileExists(entry) {
+		return "", fmt.Errorf("Wrangler entrypoint не знайдено: %s", entry)
+	}
+	all := append([]string{entry}, args...)
+	appendLog("> node " + redactCommand(joinArgsForLog(all...)))
+	return runDirect(ctx, dir, stdin, hook, nodeExePath(), all...)
+}
+func ensureWranglerCLI(ctx context.Context, dir string) error {
+	if err := ensurePortableNode(ctx); err != nil {
+		return err
+	}
+	entry := wranglerEntryPath()
+	if fileExists(entry) {
+		if _, err := runWranglerDirect(ctx, dir, "", nil, "--version"); err == nil {
+			return nil
+		}
+		_ = os.RemoveAll(wranglerToolRoot())
+	}
+	_ = os.MkdirAll(wranglerToolRoot(), 0755)
+	appendLog("Встановлюю Wrangler " + wranglerVersion + " у data\\tools\\wrangler...")
+	if err := installNPMDirect(ctx, wranglerToolRoot(), "wrangler@"+wranglerVersion); err != nil {
+		return err
+	}
+	if !fileExists(entry) {
+		return fmt.Errorf("Wrangler entrypoint не знайдено після install: %s", entry)
+	}
+	return nil
+}
+
+func privateWSLDistroName() string {
+	h := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(dataRoot))))
+	return fmt.Sprintf("%s-%x", yoruWSLDistroPrefix, h[:4])
+}
+
+func yoruWSLInstallDir() string { return filepath.Join(dataRoot, "wsl", "ubuntu") }
+func yoruWSLRootfsPath() string {
+	return filepath.Join(dataRoot, "downloads", "ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz")
+}
+func system32Exe(name string) string {
+	root := strings.TrimSpace(os.Getenv("SystemRoot"))
+	if root == "" {
+		root = `C:\Windows`
+	}
+	// Prefer an explicit Windows system path. Portable YORU tools intentionally
+	// modify PATH, so Windows platform binaries must never depend on PATH lookup.
+	candidate := filepath.Join(root, "System32", name)
+	if fileExists(candidate) {
+		return candidate
+	}
+	// Sysnative is useful if a future 32-bit build ever calls this code on x64.
+	sysnative := filepath.Join(root, "Sysnative", name)
+	if fileExists(sysnative) {
+		return sysnative
+	}
+	return candidate
+}
+
+func wslExePath() string { return system32Exe("wsl.exe") }
+func powershellExePath() string {
+	root := strings.TrimSpace(os.Getenv("SystemRoot"))
+	if root == "" {
+		root = `C:\Windows`
+	}
+	p := filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	if fileExists(p) {
+		return p
+	}
+	return "powershell.exe"
+}
+func msiexecExePath() string { return system32Exe("msiexec.exe") }
+
+func probeWSL(ctx context.Context) (string, error) {
+	// `wsl --status` is NOT a readiness check here.  On several Windows builds it
+	// returns a non-zero code even though WSL1 is fully usable.  Listing distros is
+	// the smallest command that proves the Windows WSL subsystem can actually run.
+	return runCaptureDecoded(ctx, dataRoot, wslExePath(), "-l", "-q")
+}
+
+func yoruWSLReady(ctx context.Context) bool {
+	out, err := probeWSL(ctx)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
+		if strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(line, "*")), privateWSLDistroName()) {
+			return true
+		}
+	}
+	return false
+}
+
+func encodePowerShellCommand(script string) string {
+	u := utf16.Encode([]rune(script))
+	b := make([]byte, len(u)*2)
+	for i, v := range u {
+		b[i*2] = byte(v)
+		b[i*2+1] = byte(v >> 8)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+func enableWindowsFeaturesElevated(ctx context.Context, features []string, reason string) (bool, error) {
+	if len(features) == 0 {
+		return false, nil
+	}
+	_ = os.MkdirAll(filepath.Join(dataRoot, "cache"), 0755)
+	resultPath := filepath.Join(dataRoot, "cache", "yoru-enable-windows-features.result")
+	_ = os.Remove(resultPath)
+
+	var quoted []string
+	for _, f := range features {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			quoted = append(quoted, "'"+strings.ReplaceAll(f, "'", "''")+"'")
+		}
+	}
+	if len(quoted) == 0 {
+		return false, nil
 	}
 
-	out, _ = runCaptureDecoded(ctx, appRoot, "wsl.exe", "-l", "-q")
-	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
-		name := strings.TrimSpace(strings.TrimPrefix(line, "*"))
-		if strings.EqualFold(name, "Ubuntu") || strings.HasPrefix(strings.ToLower(name), "ubuntu-") {
-			messageSync("Ubuntu встановлено у WSL. Якщо це перший запуск дистрибутива, Windows може попросити завершити його ініціалізацію.\n\nПісля цього натисни «Почати / продовжити» ще раз. Installer збереже весь поточний стан.", "WSL Ubuntu встановлено", MB_OK|MB_ICONINFORMATION)
-			return "", errors.New("Ubuntu встановлено; потрібна первинна ініціалізація WSL-дистрибутива")
+	// Do not pass a .ps1 path through Start-Process -Verb RunAs.  That proved
+	// fragile on Windows when YORU lives under a non-ASCII path.  Instead the
+	// elevated PowerShell receives an ASCII -EncodedCommand and invokes DISM
+	// directly.  The elevated child writes a small result file back into data.
+	resultPS := strings.ReplaceAll(resultPath, "'", "''")
+	childScript := "$ErrorActionPreference='Stop'\r\n" +
+		"$restart=$false\r\n" +
+		"$details=@()\r\n" +
+		"$dism=Join-Path $env:WINDIR 'System32\\dism.exe'\r\n" +
+		"try {\r\n" +
+		"  foreach($name in @(" + strings.Join(quoted, ",") + ")) {\r\n" +
+		"    & $dism '/Online' '/Enable-Feature' ('/FeatureName:'+$name) '/All' '/NoRestart' | Out-Null\r\n" +
+		"    $code=$LASTEXITCODE\r\n" +
+		"    $details += ($name+'='+$code)\r\n" +
+		"    if($code -eq 3010) { $restart=$true }\r\n" +
+		"    elseif($code -ne 0) { throw ('DISM '+$name+' exit code '+$code) }\r\n" +
+		"  }\r\n" +
+		"  [System.IO.File]::WriteAllText('" + resultPS + "', ('OK|'+$restart+'|'+($details -join ',')), (New-Object System.Text.UTF8Encoding($false)))\r\n" +
+		"  exit 0\r\n" +
+		"} catch {\r\n" +
+		"  [System.IO.File]::WriteAllText('" + resultPS + "', ('ERROR|'+$_.Exception.Message), (New-Object System.Text.UTF8Encoding($false)))\r\n" +
+		"  exit 1\r\n" +
+		"}\r\n"
+	encoded := encodePowerShellCommand(childScript)
+
+	messageSync(reason+"\n\nWindows зараз покаже UAC. Installer запустить DISM напряму з підвищеними правами. Ubuntu і всі Linux-дані залишаться у data.", "Підготовка WSL", MB_OK|MB_ICONINFORMATION)
+	launch := "$ErrorActionPreference='Stop'; try { " +
+		"$p=Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','" + encoded + "') -Verb RunAs -Wait -PassThru; " +
+		"Write-Output ('YORU_ELEVATED_EXIT='+$p.ExitCode); exit 0 " +
+		"} catch { Write-Output ('YORU_UAC_ERROR='+$_.Exception.Message); exit 0 }"
+	out, launchErr := runCaptureDecoded(ctx, dataRoot, powershellExePath(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", launch)
+	cleanOut := strings.TrimSpace(out)
+	if cleanOut != "" {
+		appendLog("Windows UAC/DISM: " + cleanOut)
+	}
+	if strings.Contains(cleanOut, "YORU_UAC_ERROR=") {
+		return false, errors.New(strings.TrimSpace(strings.SplitN(cleanOut, "YORU_UAC_ERROR=", 2)[1]))
+	}
+
+	resultBytes, readErr := os.ReadFile(resultPath)
+	result := strings.TrimSpace(string(resultBytes))
+	if result != "" {
+		appendLog("Windows feature result: " + result)
+	}
+	if strings.HasPrefix(result, "ERROR|") {
+		return false, errors.New(strings.TrimPrefix(result, "ERROR|"))
+	}
+	if readErr != nil || result == "" {
+		if launchErr != nil {
+			return false, fmt.Errorf("UAC/PowerShell launch: %w; output: %s", launchErr, cleanOut)
+		}
+		return false, errors.New("elevated DISM завершився без result-файлу; UAC міг бути скасований або Windows заблокував elevated process")
+	}
+	if !strings.HasPrefix(result, "OK|") {
+		return false, fmt.Errorf("невідомий результат elevated DISM: %s", result)
+	}
+
+	parts := strings.Split(result, "|")
+	restartNeeded := len(parts) >= 2 && strings.EqualFold(strings.TrimSpace(parts[1]), "True")
+	if len(parts) >= 3 && strings.TrimSpace(parts[2]) != "" {
+		appendLog("DISM exit codes: " + strings.TrimSpace(parts[2]))
+	}
+	return restartNeeded, nil
+}
+
+type wslReleaseAsset struct {
+	Name string `json:"name"`
+	URL  string `json:"browser_download_url"`
+}
+type wslReleaseInfo struct {
+	TagName string            `json:"tag_name"`
+	Assets  []wslReleaseAsset `json:"assets"`
+}
+
+func latestWSLMSI(ctx context.Context) (string, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wslLatestReleaseAPI, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "YORU-Installer/"+appVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", "", fmt.Errorf("GitHub WSL release API HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var rel wslReleaseInfo
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", "", err
+	}
+	for _, a := range rel.Assets {
+		low := strings.ToLower(strings.TrimSpace(a.Name))
+		if strings.HasSuffix(low, ".x64.msi") && strings.TrimSpace(a.URL) != "" {
+			return a.Name, a.URL, nil
 		}
 	}
-	return "", errors.New("Ubuntu не з'явився у списку WSL; можливо, Windows потребує перезапуску")
+	return "", "", fmt.Errorf("у stable WSL release %s не знайдено x64 MSI", rel.TagName)
+}
+
+func installModernWSLPackage(ctx context.Context) (bool, error) {
+	name, downloadURL, err := latestWSLMSI(ctx)
+	if err != nil {
+		return false, fmt.Errorf("пошук Microsoft WSL MSI: %w", err)
+	}
+	msiPath := filepath.Join(dataRoot, "downloads", name)
+	appendLog("WSL runtime відсутній/пошкоджений. Завантажую офіційний Microsoft WSL MSI у data\\downloads: " + name)
+	setStatus("WSL runtime: завантаження Microsoft MSI...")
+	if err := downloadFile(ctx, downloadURL, msiPath, "Microsoft WSL MSI"); err != nil {
+		return false, fmt.Errorf("завантаження Microsoft WSL MSI: %w", err)
+	}
+
+	resultPath := filepath.Join(dataRoot, "cache", "yoru-install-wsl-msi.result")
+	_ = os.MkdirAll(filepath.Dir(resultPath), 0755)
+	_ = os.Remove(resultPath)
+	msiPS := strings.ReplaceAll(msiPath, "'", "''")
+	resultPS := strings.ReplaceAll(resultPath, "'", "''")
+	childScript := "$ErrorActionPreference='Stop'\r\n" +
+		"$msi=Join-Path $env:WINDIR 'System32\\msiexec.exe'\r\n" +
+		"try {\r\n" +
+		"  & $msi '/i' '" + msiPS + "' '/qn' '/norestart' | Out-Null\r\n" +
+		"  $code=$LASTEXITCODE\r\n" +
+		"  [System.IO.File]::WriteAllText('" + resultPS + "', ('MSI|'+$code), (New-Object System.Text.UTF8Encoding($false)))\r\n" +
+		"  if($code -eq 0 -or $code -eq 3010 -or $code -eq 1641) { exit 0 }\r\n" +
+		"  exit 1\r\n" +
+		"} catch {\r\n" +
+		"  [System.IO.File]::WriteAllText('" + resultPS + "', ('ERROR|'+$_.Exception.Message), (New-Object System.Text.UTF8Encoding($false)))\r\n" +
+		"  exit 1\r\n" +
+		"}\r\n"
+	encoded := encodePowerShellCommand(childScript)
+	messageSync("Компонент WSL увімкнений, але сам WSL runtime Windows не запускається.\n\nInstaller завантажив офіційний Microsoft WSL MSI у data\\downloads. Зараз Windows покаже UAC для його встановлення.", "Відновлення WSL", MB_OK|MB_ICONINFORMATION)
+	launch := "$ErrorActionPreference='Stop'; try { " +
+		"$p=Start-Process -FilePath '" + strings.ReplaceAll(powershellExePath(), "'", "''") + "' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','" + encoded + "') -Verb RunAs -Wait -PassThru; " +
+		"Write-Output ('YORU_WSL_MSI_ELEVATED_EXIT='+$p.ExitCode); exit 0 " +
+		"} catch { Write-Output ('YORU_WSL_MSI_UAC_ERROR='+$_.Exception.Message); exit 0 }"
+	out, launchErr := runCaptureDecoded(ctx, dataRoot, powershellExePath(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", launch)
+	cleanOut := strings.TrimSpace(out)
+	if cleanOut != "" {
+		appendLog("WSL MSI UAC: " + cleanOut)
+	}
+	if strings.Contains(cleanOut, "YORU_WSL_MSI_UAC_ERROR=") {
+		return false, errors.New(strings.TrimSpace(strings.SplitN(cleanOut, "YORU_WSL_MSI_UAC_ERROR=", 2)[1]))
+	}
+	b, readErr := os.ReadFile(resultPath)
+	result := strings.TrimSpace(string(b))
+	if result != "" {
+		appendLog("WSL MSI result: " + result)
+	}
+	if strings.HasPrefix(result, "ERROR|") {
+		return false, errors.New(strings.TrimPrefix(result, "ERROR|"))
+	}
+	if readErr != nil || !strings.HasPrefix(result, "MSI|") {
+		if launchErr != nil {
+			return false, fmt.Errorf("WSL MSI UAC launch: %w; output: %s", launchErr, cleanOut)
+		}
+		return false, errors.New("WSL MSI installer не залишив result-файл")
+	}
+	code, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(result, "MSI|")))
+	if code != 0 && code != 3010 && code != 1641 {
+		return false, fmt.Errorf("Microsoft WSL MSI exit code %d", code)
+	}
+	return code == 3010 || code == 1641, nil
+}
+
+func wslPathMissing(out string) bool {
+	low := strings.ToLower(strings.TrimSpace(out))
+	return strings.Contains(low, "system cannot find the path specified") ||
+		strings.Contains(low, "системе не удается найти указанный путь") ||
+		strings.Contains(low, "система не может найти указанный путь")
+}
+
+func ensureWSLPlatform(ctx context.Context) error {
+	firstOut, firstErr := probeWSL(ctx)
+	if firstErr == nil {
+		appendLog("Windows WSL subsystem/runtime: OK (wsl -l -q).")
+		return nil
+	}
+	if strings.TrimSpace(firstOut) != "" {
+		appendLog("Initial WSL probe: " + strings.TrimSpace(firstOut))
+	}
+
+	restartFeature, err := enableWindowsFeaturesElevated(ctx,
+		[]string{"Microsoft-Windows-Subsystem-Linux"},
+		"Для приватного Ubuntu YORU потрібен компонент Windows Subsystem for Linux. VirtualMachinePlatform для основного режиму НЕ потрібен — Turso запускатиметься через WSL1.")
+	if err != nil {
+		return err
+	}
+
+	probeOut, probeErr := probeWSL(ctx)
+	if probeErr == nil {
+		appendLog("Windows WSL subsystem готовий після ввімкнення feature.")
+		return nil
+	}
+	if strings.TrimSpace(probeOut) != "" {
+		appendLog("WSL probe після feature: " + strings.TrimSpace(probeOut))
+	}
+
+	// A successful DISM result only enables the inbox Windows component. On
+	// current Windows builds the actual WSL runtime is serviced separately via
+	// the Microsoft Store/MSI package. If wsl.exe exists but fails internally
+	// with ERROR_PATH_NOT_FOUND, repair/install the official stable MSI.
+	if wslPathMissing(firstOut) || wslPathMissing(probeOut) || !restartFeature {
+		restartMSI, msiErr := installModernWSLPackage(ctx)
+		if msiErr != nil {
+			if restartFeature {
+				return fmt.Errorf("WSL feature очікує reboot; додатково не вдалося встановити WSL runtime: %w", msiErr)
+			}
+			return fmt.Errorf("відновлення Microsoft WSL runtime: %w", msiErr)
+		}
+		time.Sleep(2 * time.Second)
+		probeOut2, probeErr2 := probeWSL(ctx)
+		if strings.TrimSpace(probeOut2) != "" {
+			appendLog("WSL probe після Microsoft MSI: " + strings.TrimSpace(probeOut2))
+		}
+		if probeErr2 == nil {
+			appendLog("Microsoft WSL runtime: OK після MSI repair/install.")
+			return nil
+		}
+		if restartFeature || restartMSI {
+			return errors.New("WSL feature/runtime встановлено успішно, але Windows просить завершити оновлення перезапуском. Перезапусти Windows один раз і натисни Turso знову.")
+		}
+		return fmt.Errorf("Microsoft WSL MSI встановлено, але `wsl -l -q` досі не запускається: %s", strings.TrimSpace(probeOut2))
+	}
+	if restartFeature {
+		return errors.New("DISM увімкнув Windows Subsystem for Linux і повернув код 3010: потрібен один перезапуск Windows. Після перезапуску натисни Turso ще раз.")
+	}
+	return fmt.Errorf("WSL не запускається після ввімкнення feature: %s", strings.TrimSpace(probeOut))
+}
+func gunzipFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	gz, err := gzip.NewReader(in)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	_ = os.MkdirAll(filepath.Dir(dst), 0755)
+	tmp := dst + ".part"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, gz)
+	closeErr := out.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmp)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmp)
+		return closeErr
+	}
+	_ = os.Remove(dst)
+	return os.Rename(tmp, dst)
+}
+
+func ensureYoruWSL(ctx context.Context) error {
+	if yoruWSLReady(ctx) {
+		wslDistro = privateWSLDistroName()
+		return nil
+	}
+	if err := ensureWSLPlatform(ctx); err != nil {
+		return err
+	}
+	rootfsGz := yoruWSLRootfsPath()
+	rootfsTar := filepath.Join(dataRoot, "downloads", "ubuntu-noble-wsl-amd64-wsl.rootfs.tar")
+	appendLog("Готую приватний Ubuntu 24.04 для YORU у data\\wsl\\ubuntu (приблизно 340 MB download)...")
+	if err := downloadFile(ctx, ubuntuRootfsURL, rootfsGz, "Ubuntu WSL"); err != nil {
+		return err
+	}
+	if !fileExists(rootfsTar) {
+		setStatus("Ubuntu WSL: розпаковування rootfs...")
+		appendLog("Розпаковую Ubuntu rootfs tar у data\\downloads...")
+		if err := gunzipFile(rootfsGz, rootfsTar); err != nil {
+			return fmt.Errorf("розпаковування Ubuntu rootfs: %w", err)
+		}
+	}
+
+	// WSL1 is deliberately the primary mode.  Turso CLI does not need a VM,
+	// systemd or WSL2.  This keeps the entire Ubuntu filesystem in data and avoids
+	// forcing VirtualMachinePlatform/BIOS virtualization on users that only want
+	// to deploy YORU.
+	_ = os.RemoveAll(yoruWSLInstallDir())
+	_ = os.MkdirAll(yoruWSLInstallDir(), 0755)
+	appendLog("Імпортую " + privateWSLDistroName() + " у data\\wsl\\ubuntu як WSL1 (portable mode)...")
+	out, err := runCaptureDecoded(ctx, dataRoot, wslExePath(), "--import", privateWSLDistroName(), yoruWSLInstallDir(), rootfsTar, "--version", "1")
+	if strings.TrimSpace(out) != "" {
+		appendLog(strings.TrimSpace(out))
+	}
+
+	if err != nil {
+		appendLog("WSL1 import не вдався. Готую VirtualMachinePlatform і спробую WSL2 як fallback...")
+		restartNeeded2, featureErr := enableWindowsFeaturesElevated(ctx,
+			[]string{"Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform"},
+			"WSL1 import не спрацював. Installer спробує WSL2 fallback, для якого потрібен VirtualMachinePlatform.")
+		if featureErr != nil {
+			return fmt.Errorf("WSL1 import: %v; підготовка WSL2: %w", err, featureErr)
+		}
+		if restartNeeded2 {
+			return errors.New("Для WSL2 fallback DISM повернув код 3010. Потрібен один перезапуск Windows; після нього натисни Turso ще раз. WSL1 залишатиметься пріоритетним режимом.")
+		}
+		_ = os.RemoveAll(yoruWSLInstallDir())
+		_ = os.MkdirAll(yoruWSLInstallDir(), 0755)
+		out, err = runCaptureDecoded(ctx, dataRoot, wslExePath(), "--import", privateWSLDistroName(), yoruWSLInstallDir(), rootfsTar, "--version", "2")
+		if strings.TrimSpace(out) != "" {
+			appendLog(strings.TrimSpace(out))
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("імпорт Ubuntu у data не вдався ні через WSL1, ні через WSL2: %w", err)
+	}
+	wslDistro = privateWSLDistroName()
+	if _, err = runWSL(ctx, "", nil, "printf YORU-WSL-OK"); err != nil {
+		return fmt.Errorf("перший запуск YORU Ubuntu: %w", err)
+	}
+	appendLog("Ubuntu готовий: data\\wsl\\ubuntu. Основний режим WSL1; системні Ubuntu-дистрибутиви користувача не використовуються.")
+	return nil
 }
 
 func joinArgsForLog(args ...string) string {
@@ -1901,42 +3039,29 @@ func joinArgsForLog(args ...string) string {
 }
 
 func npmCLIPath() (string, error) {
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		return "", fmt.Errorf("node не знайдено: %w", err)
-	}
-	base := filepath.Dir(nodePath)
-	candidates := []string{
-		filepath.Join(base, "node_modules", "npm", "bin", "npm-cli.js"),
-		filepath.Join(base, "node_modules", "npm", "bin", "npm-cli.cjs"),
-	}
+	candidates := []string{filepath.Join(portableNodeRoot(), "node_modules", "npm", "bin", "npm-cli.js"), filepath.Join(portableNodeRoot(), "node_modules", "npm", "bin", "npm-cli.cjs")}
 	for _, c := range candidates {
-		if _, statErr := os.Stat(c); statErr == nil {
+		if fileExists(c) {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("npm-cli.js не знайдено біля Node.js (%s)", base)
+	return "", fmt.Errorf("npm-cli.js не знайдено у portable Node.js: %s", portableNodeRoot())
 }
 
 func npxCLIPath() (string, error) {
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		return "", fmt.Errorf("node не знайдено: %w", err)
-	}
-	base := filepath.Dir(nodePath)
-	candidates := []string{
-		filepath.Join(base, "node_modules", "npm", "bin", "npx-cli.js"),
-		filepath.Join(base, "node_modules", "npm", "bin", "npx-cli.cjs"),
-	}
+	candidates := []string{filepath.Join(portableNodeRoot(), "node_modules", "npm", "bin", "npx-cli.js"), filepath.Join(portableNodeRoot(), "node_modules", "npm", "bin", "npx-cli.cjs")}
 	for _, c := range candidates {
-		if _, statErr := os.Stat(c); statErr == nil {
+		if fileExists(c) {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("npx-cli.js не знайдено біля Node.js (%s)", base)
+	return "", fmt.Errorf("npx-cli.js не знайдено у portable Node.js: %s", portableNodeRoot())
 }
 
 func runNpxPackage(ctx context.Context, dir, stdin string, hook func(string), pkg string, args ...string) (string, error) {
+	if err := ensurePortableNode(ctx); err != nil {
+		return "", err
+	}
 	npxCLI, err := npxCLIPath()
 	if err != nil {
 		return "", err
@@ -1944,21 +3069,27 @@ func runNpxPackage(ctx context.Context, dir, stdin string, hook func(string), pk
 	all := []string{npxCLI, "--yes", pkg}
 	all = append(all, args...)
 	appendLog("> node " + redactCommand(joinArgsForLog(all...)))
-	return runDirect(ctx, dir, stdin, hook, "node", all...)
+	return runDirect(ctx, dir, stdin, hook, nodeExePath(), all...)
 }
 
 func runWrangler(ctx context.Context, dir, stdin string, hook func(string), args ...string) (string, error) {
-	return runNpxPackage(ctx, dir, stdin, hook, "wrangler@4.120.0", args...)
+	if err := ensureWranglerCLI(ctx, dir); err != nil {
+		return "", err
+	}
+	return runWranglerDirect(ctx, dir, stdin, hook, args...)
 }
 
 func installNPMDirect(ctx context.Context, dir string, pkg string) error {
+	if err := ensurePortableNode(ctx); err != nil {
+		return err
+	}
 	npmCLI, err := npmCLIPath()
 	if err != nil {
 		return err
 	}
 	args := []string{npmCLI, "install", "--no-audit", "--no-fund", pkg}
 	appendLog("> node " + redactCommand(joinArgsForLog(args...)))
-	_, err = runDirect(ctx, dir, "", nil, "node", args...)
+	_, err = runDirect(ctx, dir, "", nil, nodeExePath(), args...)
 	return err
 }
 
@@ -2021,6 +3152,42 @@ func runDirect(ctx context.Context, dir, stdin string, hook func(string), name s
 		return out, fmt.Errorf("%s: %w", name, waitErr)
 	}
 	return out, nil
+}
+
+func extractAuthorizationCode(line string) string {
+	clean := strings.TrimSpace(line)
+	low := strings.ToLower(clean)
+	if !strings.Contains(low, "code") && !strings.Contains(low, "код") {
+		return ""
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(?:one[- ]time|device|verification|authorization|auth)?\s*code(?:\s+is)?\s*[:=]?\s*([A-Z0-9]{4,12}(?:-[A-Z0-9]{4,12}){0,2})`),
+		regexp.MustCompile(`(?i)код(?:\s+авторизац(?:ії|ии))?\s*[:=]?\s*([A-Z0-9]{4,12}(?:-[A-Z0-9]{4,12}){0,2})`),
+	}
+	for _, re := range patterns {
+		if m := re.FindStringSubmatch(clean); len(m) == 2 {
+			code := strings.ToUpper(strings.TrimSpace(m[1]))
+			if len(code) >= 4 {
+				return code
+			}
+		}
+	}
+	fallback := regexp.MustCompile(`\b[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8}){1,2}\b`)
+	if code := fallback.FindString(strings.ToUpper(clean)); code != "" {
+		return code
+	}
+	return ""
+}
+
+func authorizationFlowHook(service string) func(string) {
+	openHook := openFirstURLHook()
+	return func(line string) {
+		openHook(line)
+		if code := extractAuthorizationCode(line); code != "" {
+			setAuthCode(service, code)
+			appendLog(strings.ToUpper(service) + " — КОД АВТОРИЗАЦІЇ: " + code)
+		}
+	}
 }
 
 func openFirstURLHook() func(string) {
