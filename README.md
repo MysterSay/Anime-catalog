@@ -170,10 +170,6 @@ npx --yes wrangler@4.131.1 pages deploy . --project-name PROJECT --branch p-juts
 npx --yes wrangler@4.131.1 pages deploy . --project-name PROJECT --branch p-animego --commit-dirty=true
 ```
 
-## Що не входить у пакет
-
-Немає `migration/`, taxonomy/backfill scripts, окремих Git deploy scripts, `.env.local`, `.venv`, `.vercel`, `.wrangler`, installer state/logs/cache та backup/checkpoint-файлів.
-
 ### Site 7.5.3 — Turso link round-trip
 
 Посилання тепер зберігаються у Turso у двох сумісних представленнях: структурованому `siteLinks` за доменами та плоскому `links` для старого UI. Після кожного ingest Worker одразу читає запис назад з Turso й перевіряє, що кількість посилань не зменшилась. `GET /api/anime?id=...&debug=1` показує raw/normalized counts для діагностики. Якщо Core у `meta.catalog_search.result_counts` заявив більше посилань, ніж реально поклав у фінальний JSON, сайт показує точну розбіжність по доменах замість мовчазного часткового запису.
