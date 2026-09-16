@@ -1,9 +1,9 @@
 const ANILIST_ENDPOINT = 'https://graphql.anilist.co';
-const CORE_PROCESS_URL = 'https://anime-catalog-flame.vercel.app/api/process';
-const CORE_PROCESS_FULL_URL = 'https://anime-catalog-flame.vercel.app/api/process-full';
-const CORE_PROCESS_STREAM_URL = 'https://anime-catalog-flame.vercel.app/api/process-stream';
-const CORE_SEARCH_URL = 'https://anime-catalog-flame.vercel.app/api/search';
-const CORE_TAXONOMY_URL = 'https://anime-catalog-flame.vercel.app/api/taxonomy';
+const CORE_PROCESS_URL = 'https://mrsay.vercel.app/api/process';
+const CORE_PROCESS_FULL_URL = 'https://mrsay.vercel.app/api/process-full';
+const CORE_PROCESS_STREAM_URL = 'https://mrsay.vercel.app/api/process-stream';
+const CORE_SEARCH_URL = 'https://mrsay.vercel.app/api/search';
+const CORE_TAXONOMY_URL = 'https://mrsay.vercel.app/api/taxonomy';
 
 const TITLE_STATUS_OPTIONS = ['Добавленно', 'Буду дивитись', 'Дивлюсь', 'Переглянув', 'Відкладено', 'Кинуто'];
 const CATALOG_CONFIG_VERSION = 1;
@@ -650,6 +650,88 @@ async function tursoHandleHealthApi(env){
   return json({ok:true,storage:'turso-libsql',databaseUrlConfigured:Boolean(env.TURSO_DATABASE_URL),tokenConfigured:Boolean(env.TURSO_AUTH_TOKEN),databaseHost:new URL(tursoHttpBase(env)).host,itemCount:state.anime.length,groupCount:state.config.groupOptions.length,credentialsConfigured:true});
 }
 
+
+async function tursoHandleHealthApi78124(env){
+  try {
+    tursoRequireEnv(env);
+    await tursoEnsureSchema(env);
+    const [countResult] = await tursoPipeline(env,[{
+      sql:'SELECT COUNT(*) AS count FROM yoru_items WHERE entity = ?',
+      args:['anime']
+    }]);
+    const countRow = tursoResultRows(countResult)[0] || {};
+    const itemCount = Math.max(0,Number(countRow.count)||0);
+    return json({
+      ok:true,
+      storage:'turso-libsql',
+      databaseUrlConfigured:Boolean(env.TURSO_DATABASE_URL),
+      tokenConfigured:Boolean(env.TURSO_AUTH_TOKEN),
+      databaseHost:new URL(tursoHttpBase(env)).host,
+      itemCount,
+      credentialsConfigured:true,
+      probe:'sql-pipeline-78124'
+    });
+  } catch (error) {
+    const status = error instanceof HttpError ? error.status : 500;
+    const payload = {
+      ok:false,
+      storage:'turso-libsql',
+      databaseUrlConfigured:Boolean(env && env.TURSO_DATABASE_URL),
+      tokenConfigured:Boolean(env && env.TURSO_AUTH_TOKEN),
+      credentialsConfigured:Boolean(env && env.TURSO_DATABASE_URL && env.TURSO_AUTH_TOKEN),
+      probe:'sql-pipeline-78124',
+      error:error && error.message ? error.message : 'Unknown Turso health error.'
+    };
+    if(error instanceof HttpError){
+      if(error.code) payload.code=error.code;
+      if(error.step) payload.step=error.step;
+      if(error.details) payload.details=error.details;
+    }
+    return json(payload,status>=400&&status<600?status:500);
+  }
+}
+
+
+async function tursoHandleHealthApi78125(env){
+  try {
+    tursoRequireEnv(env);
+    await tursoEnsureSchema(env);
+    const [countResult] = await tursoPipeline(env,[{
+      sql:'SELECT COUNT(*) AS count FROM yoru_items WHERE entity = ?',
+      args:['anime']
+    }]);
+    const countRow = tursoResultRows(countResult)[0] || {};
+    const itemCount = Math.max(0,Number(countRow.count)||0);
+    return json({
+      ok:true,
+      storage:'turso-libsql',
+      databaseUrlConfigured:Boolean(env.TURSO_DATABASE_URL),
+      tokenConfigured:Boolean(env.TURSO_AUTH_TOKEN),
+      databaseHost:new URL(tursoHttpBase(env)).host,
+      itemCount,
+      credentialsConfigured:true,
+      probe:'sql-pipeline-78125'
+    });
+  } catch (error) {
+    const status = error instanceof HttpError ? error.status : 500;
+    const payload = {
+      ok:false,
+      storage:'turso-libsql',
+      databaseUrlConfigured:Boolean(env && env.TURSO_DATABASE_URL),
+      tokenConfigured:Boolean(env && env.TURSO_AUTH_TOKEN),
+      credentialsConfigured:Boolean(env && env.TURSO_DATABASE_URL && env.TURSO_AUTH_TOKEN),
+      probe:'sql-pipeline-78125',
+      error:error && error.message ? error.message : 'Unknown Turso health error.'
+    };
+    if(error instanceof HttpError){
+      if(error.code) payload.code=error.code;
+      if(error.step) payload.step=error.step;
+      if(error.details) payload.details=error.details;
+    }
+    return json(payload,status>=400&&status<600?status:500);
+  }
+}
+
 async function corePayloadWithStoredMikaiKey(env,body){
   const clean={...(body&&typeof body==='object'?body:{})};
   delete clean.mikai_api_key;
@@ -698,6 +780,383 @@ async function resolveAniHubForStored(item){let link=findAniHubLink(item),id=lin
 function pickRelatedArrays(raw){for(const key of ['similar_anime','similar','recommendations','recommended','related','recommendation_items']){const v=raw?.[key];if(Array.isArray(v)&&v.length)return v}return []}
 async function scrapeAniHubSimilar(url){if(!url)return[];const r=await fetch(url,{headers:{Accept:'text/html','User-Agent':'Mozilla/5.0 YORU/7.7'}});if(!r.ok)return[];const html=await r.text(),idx=html.search(/Схоже\s+аніме/i),area=idx>=0?html.slice(idx,idx+55000):'';const found=[],seen=new Set();for(const m of area.matchAll(/href=["'](\/anime\/[^"'#?]+)["']/gi)){const href=m[1],id=extractAniHubIdFromUrl(`https://anihub.in.ua${href}`);if(!id||seen.has(id))continue;seen.add(id);found.push({id,sourceUrl:`https://anihub.in.ua${href}`});if(found.length>=12)break}return found}
 async function handleAniHubSimilarApi(request,env){if(request.method!=='GET')return json({error:'Method not allowed'},405);const id=String(new URL(request.url).searchParams.get('id')||'').trim(),raw=await tursoGetRaw(env,id);if(!raw||raw.entity!=='anime')return json({error:'Тайтл не знайдено.'},404);const item=tursoPublicAnime(raw),resolved=await resolveAniHubForStored(item);if(!resolved)return json({items:[],source:'anihub'});const detailRaw=await aniHubJson(`/anime/${encodeURIComponent(resolved.id)}`),detail=detailRaw?.anime||detailRaw?.item||detailRaw;let related=pickRelatedArrays(detail).map(normalizeAniHubAnime).filter(x=>x.anihubId&&x.anihubId!==resolved.id);if(!related.length){const refs=await scrapeAniHubSimilar(resolved.url||aniHubSourceUrl(detail));for(const ref of refs){try{const p=await aniHubJson(`/anime/${encodeURIComponent(ref.id)}`);related.push(normalizeAniHubAnime(p?.anime||p?.item||p))}catch{}}}if(!related.length){const p=await aniHubJson('/anime/recommended?limit=12');related=(p?.items||p?.results||[]).map(normalizeAniHubAnime)}const state=await tursoLoadState(env),seen=new Set();related=related.filter(x=>x.anihubId!==resolved.id&&!seen.has(x.anihubId)&&(seen.add(x.anihubId)||true)).slice(0,18).map(x=>{const existing=state.anime.find(a=>sameStoredAnime(x,a));return{...x,existingId:existing?.id||'',previewUrl:existing?.id?`title.html?id=${encodeURIComponent(existing.id)}`:`title.html?preview=anihub&anihub=${encodeURIComponent(x.anihubId)}`}});return json({ok:true,items:related,source:'anihub',resolvedAniHubId:resolved.id})}
+
+// --- YORU AniHub persistent cache v7.8.5 ----------------------------------
+const YORU_ANIHUB_CACHE_TTL = Object.freeze({
+  schedule: 30 * 60 * 1000,
+  announced: 6 * 60 * 60 * 1000,
+  recommended: 6 * 60 * 60 * 1000,
+  similar: 7 * 24 * 60 * 60 * 1000,
+  title: 7 * 24 * 60 * 60 * 1000,
+});
+const YORU_ANIHUB_CACHE_MEMORY_MS = 30 * 1000;
+const YORU_ANIHUB_CACHE_MEMORY = new Map();
+const YORU_ANIHUB_CACHE_INFLIGHT = new Map();
+
+function yoruAniHubArray(payload){
+  if(Array.isArray(payload))return payload;
+  if(!payload||typeof payload!=='object')return[];
+  for(const key of ['items','results','data','similar','recommendations','anime'])if(Array.isArray(payload[key]))return payload[key];
+  return[];
+}
+function yoruAniHubPublicItem(raw){
+  const item=normalizeAniHubAnime(raw||{});
+  return {...item,previewUrl:item.anihubId?`title.html?preview=anihub&anihub=${encodeURIComponent(item.anihubId)}`:''};
+}
+function yoruCacheId(kind,key=''){
+  const suffix=String(key||'').trim().replace(/[^a-zA-Z0-9_.:-]+/g,'_').slice(0,180);
+  return `CACHE#ANIHUB#${String(kind||'').toUpperCase()}${suffix?`#${suffix}`:''}`;
+}
+function yoruCacheFresh(record){
+  const expires=Date.parse(String(record?.expiresAt||''));
+  return Number.isFinite(expires)&&expires>Date.now();
+}
+function yoruCacheMeta(record,state='miss'){
+  return {
+    state,
+    savedAt:String(record?.savedAt||record?.updatedAt||''),
+    expiresAt:String(record?.expiresAt||''),
+    stale:record? !yoruCacheFresh(record):false,
+  };
+}
+async function yoruCacheRead(env,id){
+  const memo=YORU_ANIHUB_CACHE_MEMORY.get(id);
+  if(memo&&Date.now()-memo.readAt<YORU_ANIHUB_CACHE_MEMORY_MS)return memo.record;
+  const raw=await tursoGetRaw(env,id);
+  const record=raw&&raw.entity==='cache'?raw:null;
+  YORU_ANIHUB_CACHE_MEMORY.set(id,{readAt:Date.now(),record});
+  return record;
+}
+async function yoruCacheWrite(env,id,kind,key,data,ttlMs){
+  const now=new Date();
+  const record={
+    id,
+    entity:'cache',
+    cacheKind:String(kind||''),
+    cacheKey:String(key||''),
+    data,
+    savedAt:now.toISOString(),
+    expiresAt:new Date(now.getTime()+Math.max(1000,Number(ttlMs)||60000)).toISOString(),
+    updatedAt:now.toISOString(),
+  };
+  await tursoPutRaw(env,record);
+  YORU_ANIHUB_CACHE_MEMORY.set(id,{readAt:Date.now(),record});
+  return record;
+}
+async function yoruCacheRefresh(env,{id,kind,key,ttlMs,loader}){
+  if(YORU_ANIHUB_CACHE_INFLIGHT.has(id))return YORU_ANIHUB_CACHE_INFLIGHT.get(id);
+  const promise=(async()=>{
+    const data=await loader();
+    const record=await yoruCacheWrite(env,id,kind,key,data,ttlMs);
+    return {data:record.data,record,cache:yoruCacheMeta(record,'refresh')};
+  })().finally(()=>YORU_ANIHUB_CACHE_INFLIGHT.delete(id));
+  YORU_ANIHUB_CACHE_INFLIGHT.set(id,promise);
+  return promise;
+}
+async function yoruCacheGet(env,ctx,{id,kind,key='',ttlMs,loader}){
+  const cached=await yoruCacheRead(env,id);
+  if(cached&&yoruCacheFresh(cached))return {data:cached.data,record:cached,cache:yoruCacheMeta(cached,'hit')};
+  if(cached&&Object.prototype.hasOwnProperty.call(cached,'data')){
+    if(ctx?.waitUntil){
+      ctx.waitUntil(yoruCacheRefresh(env,{id,kind,key,ttlMs,loader}).catch(error=>console.warn(`[YORU cache refresh ${kind}]`,error)));
+      return {data:cached.data,record:cached,cache:yoruCacheMeta(cached,'stale')};
+    }
+    try{return await yoruCacheRefresh(env,{id,kind,key,ttlMs,loader})}catch(error){
+      console.warn(`[YORU cache stale fallback ${kind}]`,error);
+      return {data:cached.data,record:cached,cache:yoruCacheMeta(cached,'stale-error')};
+    }
+  }
+  return yoruCacheRefresh(env,{id,kind,key,ttlMs,loader});
+}
+function yoruUniqueAniHubItems(rows,limit=24){
+  const out=[],seen=new Set();
+  for(const raw of rows||[]){
+    const item=raw?.remote?raw:yoruAniHubPublicItem(raw);
+    const uniq=String(item.anihubId||'')||exactCoreTitleKey(item.title||item.originalTitle||'');
+    if(!uniq||seen.has(uniq))continue;
+    seen.add(uniq);out.push(item);
+    if(out.length>=limit)break;
+  }
+  return out;
+}
+async function yoruFetchCollection(kind){
+  const payload=await aniHubJson(`/anime/${kind}?limit=24`);
+  return {kind,items:yoruUniqueAniHubItems(yoruAniHubArray(payload),24)};
+}
+async function handleAniHubCollectionCachedApi(request,env,ctx){
+  if(request.method!=='GET')return json({error:'Method not allowed'},405);
+  const u=new URL(request.url),kind=String(u.searchParams.get('kind')||'').trim().toLowerCase();
+  if(!['announced','recommended'].includes(kind))return json({error:'kind має бути announced або recommended.'},400);
+  const limit=Math.max(1,Math.min(24,Number(u.searchParams.get('limit'))||20));
+  const id=yoruCacheId('collection',kind),ttlMs=YORU_ANIHUB_CACHE_TTL[kind];
+  const snap=await yoruCacheGet(env,ctx,{id,kind:`collection:${kind}`,key:kind,ttlMs,loader:()=>yoruFetchCollection(kind)});
+  const items=yoruUniqueAniHubItems(snap.data?.items||[],24).slice(0,limit);
+  return json({ok:true,kind,count:items.length,items,cache:snap.cache},200,{'cache-control':'public, max-age=300, stale-while-revalidate=3600'});
+}
+
+async function yoruResolveAniHubIdForYoru(env,yoruId,hinted=''){
+  if(hinted)return String(hinted).trim();
+  const raw=await tursoGetRaw(env,yoruId);
+  if(!raw||raw.entity!=='anime')return'';
+  const stored=tursoPublicAnime(raw),direct=yoruStoredExternalIds(stored).anihubId;
+  if(direct)return direct;
+  const resolved=await resolveAniHubForStored(stored);
+  return String(resolved?.id||'').trim();
+}
+async function yoruFetchSimilar(anihubId){
+  const payload=await aniHubJson(`/anime/${encodeURIComponent(anihubId)}/similar/?limit=24&show_nsfw=false`);
+  return {anihubId:String(anihubId),items:yoruUniqueAniHubItems(yoruAniHubArray(payload),24).filter(x=>String(x.anihubId)!==String(anihubId))};
+}
+async function handleAniHubSimilarCachedApi(request,env,ctx){
+  if(request.method!=='GET')return json({error:'Method not allowed'},405);
+  const u=new URL(request.url),yoruId=String(u.searchParams.get('id')||'').trim(),hinted=String(u.searchParams.get('anihub')||'').trim(),limit=Math.max(1,Math.min(24,Number(u.searchParams.get('limit'))||24));
+  if(!yoruId&&!hinted)return json({error:'Не передано id тайтлу YORU або AniHub id.'},400);
+  const anihubId=await yoruResolveAniHubIdForYoru(env,yoruId,hinted);
+  if(!anihubId)return json({ok:true,items:[],count:0,resolvedAniHubId:'',source:'anihub-similar',cache:{state:'unresolved'}});
+  const id=yoruCacheId('similar',anihubId);
+  const snap=await yoruCacheGet(env,ctx,{id,kind:'similar',key:anihubId,ttlMs:YORU_ANIHUB_CACHE_TTL.similar,loader:()=>yoruFetchSimilar(anihubId)});
+  const items=yoruUniqueAniHubItems(snap.data?.items||[],24).filter(x=>String(x.anihubId)!==String(anihubId)).slice(0,limit);
+  return json({ok:true,items,count:items.length,resolvedAniHubId:anihubId,source:'anihub-similar',cache:snap.cache},200,{'cache-control':'public, max-age=600, stale-while-revalidate=86400'});
+}
+
+async function yoruFetchAniHubTitle(anihubId){
+  const raw=await aniHubJson(`/anime/${encodeURIComponent(anihubId)}`),source=raw?.anime||raw?.item||raw;
+  const item=yoruAniHubPublicItem(source);
+  if(!item.sourceUrl)item.sourceUrl=aniHubSourceUrl(source);
+  return {item};
+}
+async function handleAniHubTitleCachedApi(request,env,ctx){
+  if(request.method!=='GET')return json({error:'Method not allowed'},405);
+  const anihubId=String(new URL(request.url).searchParams.get('id')||'').trim();
+  if(!anihubId)return json({error:'Не передано AniHub id.'},400);
+  const id=yoruCacheId('title',anihubId);
+  const snap=await yoruCacheGet(env,ctx,{id,kind:'title',key:anihubId,ttlMs:YORU_ANIHUB_CACHE_TTL.title,loader:()=>yoruFetchAniHubTitle(anihubId)});
+  return json({ok:true,item:snap.data?.item||null,cache:snap.cache},200,{'cache-control':'public, max-age=3600, stale-while-revalidate=86400'});
+}
+
+function yoruScheduleTimestamp(row){
+  let ts=Number(row?.airing_at_timestamp??row?.timestamp??0);if(ts>1e12)ts=Math.floor(ts/1000);if(ts>1e9)return ts;
+  const parsed=Date.parse(row?.airing_at||row?.airingAt||'');return Number.isFinite(parsed)?Math.floor(parsed/1000):0;
+}
+function yoruScheduleTitles(row){
+  const anime=row?.anime&&typeof row.anime==='object'?row.anime:{},titles=anime?.titles&&typeof anime.titles==='object'?anime.titles:{};
+  return [...new Set([row?.anime_title,row?.title,anime?.title_ukrainian,titles?.ukrainian,titles?.uk,titles?.ua,anime?.title,anime?.name,anime?.title_english,titles?.english,anime?.title_original,titles?.original].map(plainTitle).filter(Boolean))];
+}
+function yoruScheduleAnimeId(row){const anime=row?.anime;if(typeof anime==='number'||typeof anime==='string')return String(anime);return String(anime?.id??row?.anime_id??'').trim()}
+function yoruScheduleAniListId(row){const anime=row?.anime&&typeof row.anime==='object'?row.anime:{};return String(row?.anilist_media_id??row?.anilist_id??anime?.anilist_id??anime?.anilistId??'').trim()}
+function yoruScheduleMalId(row){const anime=row?.anime&&typeof row.anime==='object'?row.anime:{};return String(row?.mal_id??anime?.mal_id??anime?.malId??'').trim()}
+function yoruScheduleTotalEpisodes(row){
+  const anime=row?.anime&&typeof row.anime==='object'?row.anime:{};
+  for(const value of [row?.episodes_count,row?.total_episodes,row?.episodesTotal,anime?.episodes_count,anime?.total_episodes,anime?.episodes,anime?.episodesCount]){
+    const n=Number(value);if(Number.isFinite(n)&&n>0)return n;
+  }
+  return null;
+}
+function yoruExtractAniHubIdFromUrl(value){
+  try{const u=new URL(String(value||''));const parts=u.pathname.match(/(?:-|\/)(\d+)(?:\/?$)/);if(parts?.[1])return parts[1]}catch{}
+  return String(value||'').match(/anihub\.in\.ua\/anime\/[^?#]*?(\d+)(?:[/?#]|$)/i)?.[1]||'';
+}
+function yoruStoredExternalIds(item){
+  let anihubId='',anilistId='',malId='';
+  for(const link of item?.links||[]){
+    const value=String(link?.url||'');
+    if(!anilistId)anilistId=value.match(/anilist\.co\/anime\/(\d+)/i)?.[1]||'';
+    if(!malId)malId=value.match(/myanimelist\.net\/anime\/(\d+)/i)?.[1]||'';
+    if(!anihubId&&/anihub\.in\.ua/i.test(value))anihubId=yoruExtractAniHubIdFromUrl(value)||'';
+  }
+  return{anihubId,anilistId,malId};
+}
+function yoruNormalizeScheduleRows(upstream){
+  const rows=[],source=Array.isArray(upstream?.results)?upstream.results:[];
+  for(const value of source){if(Array.isArray(value?.schedules))rows.push(...value.schedules);else rows.push(value)}
+  const out=[];
+  for(const row of rows){
+    const timestamp=yoruScheduleTimestamp(row);if(!timestamp)continue;
+    const episodeRaw=row?.episode??row?.episode_number??row?.number??null,episodeNumber=Number(episodeRaw),episode=Number.isFinite(episodeNumber)&&episodeNumber>0?episodeNumber:plainTitle(episodeRaw||'');
+    if(episode==='')continue;
+    out.push({
+      animeId:yoruScheduleAnimeId(row),
+      anilistMediaId:yoruScheduleAniListId(row),
+      malId:yoruScheduleMalId(row),
+      titles:yoruScheduleTitles(row),
+      episode,
+      totalEpisodes:yoruScheduleTotalEpisodes(row),
+      airingAt:String(row?.airing_at||row?.airingAt||''),
+      airingAtTimestamp:timestamp,
+    });
+  }
+  return out.sort((a,b)=>a.airingAtTimestamp-b.airingAtTimestamp);
+}
+async function yoruFetchSchedule(){
+  const now=Math.floor(Date.now()/1000),start=now-14*86400,end=now+14*86400;
+  const upstream=await aniHubJson(`/airing-schedule/?start=${start}&end=${end}&only_ukrainian=true&group_by=flat`);
+  return {start,end,onlyUkrainian:true,items:yoruNormalizeScheduleRows(upstream)};
+}
+async function yoruScheduleSnapshot(env,ctx){
+  return yoruCacheGet(env,ctx,{id:yoruCacheId('schedule','uk-flat'),kind:'schedule',key:'uk-flat',ttlMs:YORU_ANIHUB_CACHE_TTL.schedule,loader:yoruFetchSchedule});
+}
+async function yoruScheduleSnapshotFast(env,ctx){
+  const id=yoruCacheId('schedule','uk-flat'),kind='schedule',key='uk-flat',ttlMs=YORU_ANIHUB_CACHE_TTL.schedule;
+  const cached=await yoruCacheRead(env,id);
+  if(cached&&Object.prototype.hasOwnProperty.call(cached,'data')){
+    if(!yoruCacheFresh(cached)&&ctx?.waitUntil){
+      ctx.waitUntil(yoruCacheRefresh(env,{id,kind,key,ttlMs,loader:yoruFetchSchedule}).catch(error=>console.warn('[YORU schedule background refresh]',error)));
+      return {data:cached.data,record:cached,cache:yoruCacheMeta(cached,'stale')};
+    }
+    if(yoruCacheFresh(cached))return {data:cached.data,record:cached,cache:yoruCacheMeta(cached,'hit')};
+    return {data:cached.data,record:cached,cache:yoruCacheMeta(cached,'stale')};
+  }
+  if(ctx?.waitUntil){
+    ctx.waitUntil(yoruCacheRefresh(env,{id,kind,key,ttlMs,loader:yoruFetchSchedule}).catch(error=>console.warn('[YORU schedule warmup]',error)));
+  }
+  return {data:{items:[]},record:null,cache:{state:'warming',savedAt:'',expiresAt:'',stale:false}};
+}
+function yoruScheduleIndex(rows){
+  const byAniHub=new Map(),byAniList=new Map(),byMal=new Map(),byTitle=new Map();
+  const put=(map,id,row)=>{const k=String(id||'').trim();if(!k)return;if(!map.has(k))map.set(k,[]);map.get(k).push(row)};
+  for(const row of rows||[]){
+    put(byAniHub,row.animeId,row);put(byAniList,row.anilistMediaId,row);put(byMal,row.malId,row);
+    for(const title of row.titles||[])put(byTitle,exactCoreTitleKey(title),row);
+  }
+  return{byAniHub,byAniList,byMal,byTitle};
+}
+function yoruScheduleRowsForAnime(item,index){
+  if(!item||!index)return[];
+  const out=[],seen=new Set(),add=rows=>{for(const row of rows||[]){const sig=`${row.animeId}|${row.anilistMediaId}|${row.episode}|${row.airingAtTimestamp}`;if(!seen.has(sig)){seen.add(sig);out.push(row)}}};
+  const ids=yoruStoredExternalIds(item);add(index.byAniHub.get(ids.anihubId));add(index.byAniList.get(ids.anilistId));add(index.byMal?.get(ids.malId));
+  for(const title of tursoAliasLines(item)){const k=exactCoreTitleKey(title);if(k)add(index.byTitle.get(k))}
+  return out.sort((a,b)=>a.airingAtTimestamp-b.airingAtTimestamp);
+}
+function yoruAiringForAnime(item,index){
+  const rows=yoruScheduleRowsForAnime(item,index);if(!rows.length)return null;
+  const now=Math.floor(Date.now()/1000),past=rows.filter(x=>x.airingAtTimestamp<=now),future=rows.filter(x=>x.airingAtTimestamp>now);
+  const last=past.sort((a,b)=>b.airingAtTimestamp-a.airingAtTimestamp)[0]||null,next=future.sort((a,b)=>a.airingAtTimestamp-b.airingAtTimestamp)[0]||null;
+  let lastEpisode=last?.episode??null;
+  if((lastEpisode==null||lastEpisode==='')&&next&&Number(next.episode)>1)lastEpisode=Number(next.episode)-1;
+  if(!last&&next&&Number(next.episode)>1)lastEpisode=Number(next.episode)-1;
+  const totalEpisodes=rows.map(x=>Number(x.totalEpisodes||0)).filter(x=>Number.isFinite(x)&&x>0).sort((a,b)=>b-a)[0]||null;
+  if(lastEpisode==null&&!next)return null;
+  return{releasedEpisodes:lastEpisode,lastEpisode,totalEpisodes,nextEpisode:next?.episode??null,nextAt:next?.airingAtTimestamp??0};
+}
+function yoruAnimeWithCachedMeta(raw,index){
+  const item=tursoPublicAnime(raw),ids=yoruStoredExternalIds(item);
+  return{...item,...ids,airing:yoruAiringForAnime(item,index)};
+}
+function yoruSummaryWithCachedMeta(raw,index){
+  const item=tursoNormalizeAnime(raw),summary=tursoSummaryAnime(item),ids=yoruStoredExternalIds(item);
+  return{...summary,originalTitle:item.originalTitle,englishTitle:item.englishTitle,russianTitle:item.russianTitle,...ids,airing:yoruAiringForAnime(item,index)};
+}
+async function tursoHandleAnimeApiCached(request,env,ctx){
+  if(request.method!=='GET')return tursoHandleAnimeApi(request,env);
+  const url=new URL(request.url),id=url.searchParams.get('id')||'',compact=['1','true','yes'].includes(String(url.searchParams.get('compact')||'').toLowerCase()),debug=['1','true','yes'].includes(String(url.searchParams.get('debug')||'').toLowerCase());
+  let schedule=null,index=null;
+  try{schedule=await yoruScheduleSnapshotFast(env,ctx);index=yoruScheduleIndex(schedule.data?.items||[])}catch(error){console.warn('[YORU schedule cache]',error)}
+  if(id){
+    const raw=await tursoGetRaw(env,id);if(!raw||raw.entity!=='anime')return json({error:'Тайтл не знайдено.'},404);
+    const normalized=yoruAnimeWithCachedMeta(raw,index);
+    if(debug)return json({item:normalized,count:1,storage:'turso-libsql',cache:{schedule:schedule?.cache||null},debug:{rawLinkCount:Array.isArray(raw.links)?raw.links.length:0,rawSiteLinkCounts:tursoSiteCounts(raw.siteLinks||{}),normalizedLinkCount:normalized.links.length,normalizedSiteLinkCounts:tursoSiteCounts(normalized.siteLinks||{})}});
+    if(compact)return json({item:normalized,count:1,storage:'turso-libsql',compact:true,cache:{schedule:schedule?.cache||null}});
+    const state=await tursoLoadState(env);return json({item:normalized,count:1,options:state.options,cache:{schedule:schedule?.cache||null}});
+  }
+  const state=await tursoLoadState(env),items=state.anime.map(x=>yoruSummaryWithCachedMeta(x,index)).sort((a,b)=>String(b.addedAt).localeCompare(String(a.addedAt)));
+  return json({items,count:items.length,databaseId:'yoru-turso',sources:[{id:'yoru-turso',name:'Turso',count:items.length}],options:state.options,storage:'turso-libsql',cache:{schedule:schedule?.cache||null}});
+}
+async function handleAniHubScheduleCachedApi(request,env,ctx){
+  if(request.method!=='GET')return json({error:'Method not allowed'},405);
+  const snap=await yoruScheduleSnapshot(env,ctx),data=snap.data||{};
+  return json({ok:true,count:Array.isArray(data.items)?data.items.length:0,start:data.start||0,end:data.end||0,onlyUkrainian:true,items:data.items||[],cache:snap.cache},200,{'cache-control':'public, max-age=60, stale-while-revalidate=600'});
+}
+async function handleAniHubCacheStatusApi(request,env){
+  if(request.method!=='GET')return json({error:'Method not allowed'},405);
+  const keys={
+    schedule:YORU_AIRING_MAP_CACHE_ID,
+    announced:yoruCacheId('collection','announced'),
+    recommended:yoruCacheId('collection','recommended'),
+  },out={};
+  for(const [name,id] of Object.entries(keys)){const record=await yoruCacheRead(env,id);out[name]=record?yoruCacheMeta(record,yoruCacheFresh(record)?'hit':'stale'):{state:'miss',stale:false,savedAt:'',expiresAt:''}}
+  return json({ok:true,cache:out,ttlMs:YORU_ANIHUB_CACHE_TTL});
+}
+
+
+// v7.8.5: schedule is prepared once and stored in Turso as a YORU-id -> airing map.
+// Normal /api/anime reads do not touch AniHub and do not rebuild schedule indexes.
+const YORU_AIRING_MAP_CACHE_ID = yoruCacheId('airing-map','all-flat-v5');
+async function yoruFetchScheduleAll(){
+  const now=Math.floor(Date.now()/1000),start=now-35*86400,end=now+21*86400;
+  const upstream=await aniHubJson(`/airing-schedule/?start=${start}&end=${end}&only_ukrainian=false&group_by=flat`);
+  return {start,end,onlyUkrainian:false,items:yoruNormalizeScheduleRows(upstream)};
+}
+async function yoruBuildResolvedAiringMap(env){
+  const schedule=await yoruFetchScheduleAll();
+  const index=yoruScheduleIndex(schedule.items||[]);
+  const rawAnime=await tursoScanRaw(env,'anime');
+  const byYoruId={};
+  let matched=0;
+  for(const raw of rawAnime){
+    const item=tursoNormalizeAnime(raw),airing=yoruAiringForAnime(item,index);
+    if(!airing)continue;
+    byYoruId[String(item.id)]=airing;
+    matched++;
+  }
+  return {...schedule,byYoruId,animeCount:rawAnime.length,matched};
+}
+async function yoruAiringMapSnapshotFast(env,ctx){
+  const id=YORU_AIRING_MAP_CACHE_ID,kind='airing-map',key='all-flat-v5',ttlMs=YORU_ANIHUB_CACHE_TTL.schedule;
+  const cached=await yoruCacheRead(env,id);
+  if(cached&&Object.prototype.hasOwnProperty.call(cached,'data')){
+    if(!yoruCacheFresh(cached)&&ctx?.waitUntil){
+      ctx.waitUntil(yoruCacheRefresh(env,{id,kind,key,ttlMs,loader:()=>yoruBuildResolvedAiringMap(env)}).catch(error=>console.warn('[YORU airing-map background refresh]',error)));
+      return {data:cached.data,record:cached,cache:yoruCacheMeta(cached,'stale')};
+    }
+    return {data:cached.data,record:cached,cache:yoruCacheMeta(cached,yoruCacheFresh(cached)?'hit':'stale')};
+  }
+  // Cold cache: wait for the single deduplicated refresh. The catalogue itself is already
+  // rendered, so this does not block the main /api/anime response, but it prevents the UI
+  // from receiving an empty map and silently losing episode/countdown badges.
+  return yoruCacheRefresh(env,{id,kind,key,ttlMs,loader:()=>yoruBuildResolvedAiringMap(env)});
+}
+async function handleAniHubAiringMapApi(request,env,ctx){
+  if(request.method!=='GET')return json({error:'Method not allowed'},405);
+  const snap=await yoruAiringMapSnapshotFast(env,ctx),data=snap.data||{},map=data.byYoruId&&typeof data.byYoruId==='object'?data.byYoruId:{};
+  const id=String(new URL(request.url).searchParams.get('id')||'').trim();
+  const meta={count:Object.keys(map).length,matched:Number(data.matched||0),animeCount:Number(data.animeCount||0),scheduleRows:Array.isArray(data.items)?data.items.length:0,start:Number(data.start||0),end:Number(data.end||0),onlyUkrainian:false};
+  if(id)return json({ok:true,id,item:map[id]||null,cache:snap.cache,meta},200,{'cache-control':'private, max-age=15'});
+  return json({ok:true,items:map,cache:snap.cache,meta},200,{'cache-control':'private, max-age=15'});
+}
+async function handleAniHubAiringDebugApi(request,env){
+  if(request.method!=='GET')return json({error:'Method not allowed'},405);
+  const id=String(new URL(request.url).searchParams.get('id')||'').trim();
+  if(!id)return json({error:'Передай YORU id через ?id=...'},400);
+  const raw=await tursoGetRaw(env,id);
+  if(!raw||raw.entity!=='anime')return json({error:'Тайтл не знайдено в Turso.',id},404);
+  const item=tursoNormalizeAnime(raw),storedIds=yoruStoredExternalIds(item);
+  try{
+    const schedule=await yoruFetchScheduleAll(),index=yoruScheduleIndex(schedule.items||[]),matches=yoruScheduleRowsForAnime(item,index),airing=yoruAiringForAnime(item,index);
+    return json({
+      ok:true,
+      id,
+      title:item.title,
+      storedIds,
+      sourceUrl:item.sourceUrl||'',
+      linkCount:Array.isArray(item.links)?item.links.length:0,
+      schedule:{rows:Array.isArray(schedule.items)?schedule.items.length:0,start:schedule.start||0,end:schedule.end||0,onlyUkrainian:false},
+      matching:{rows:matches.length,items:matches.slice(0,30)},
+      airing,
+      now:Math.floor(Date.now()/1000),
+    });
+  }catch(error){
+    return json({ok:false,id,title:item.title,storedIds,error:String(error?.message||error),name:String(error?.name||'Error')},502);
+  }
+}
+
+async function handleAniHubScheduleV783Api(request,env,ctx){
+  if(request.method!=='GET')return json({error:'Method not allowed'},405);
+  const snap=await yoruAiringMapSnapshotFast(env,ctx),data=snap.data||{};
+  return json({ok:true,count:Array.isArray(data.items)?data.items.length:0,start:data.start||0,end:data.end||0,onlyUkrainian:false,matched:Number(data.matched||0),animeCount:Number(data.animeCount||0),items:data.items||[],cache:snap.cache},200,{'cache-control':'private, max-age=30'});
+}
+
+// ---------------------------------------------------------------------------
+
 function secondsLabel(value){const n=Math.max(0,Number(value)||0),m=Math.floor(n/60),s=Math.floor(n%60);return `${m}:${String(s).padStart(2,'0')}`}
 async function kitsuLookup(title){if(!title)return null;const url=`${KITSU_API}/anime?filter%5Btext%5D=${encodeURIComponent(title)}&page%5Blimit%5D=3`,r=await fetch(url,{headers:{Accept:'application/vnd.api+json'}});if(!r.ok)return null;const p=await r.json().catch(()=>({})),rows=Array.isArray(p?.data)?p.data:[];return rows[0]||null}
 function normalizeKitsu(row){const a=row?.attributes||{};return {title:plainTitle(a?.canonicalTitle||a?.titles?.en_jp||a?.titles?.en||a?.titles?.ja_jp||''),titleEnglish:plainTitle(a?.titles?.en||''),poster:pickImageValue(a?.posterImage),banner:pickImageValue(a?.coverImage),description:String(a?.synopsis||a?.description||'').replace(/\s+/g,' ').trim(),type:plainTitle(a?.subtype||''),year:String(a?.startDate||'').slice(0,4),episodes:a?.episodeCount||null,rating:a?.averageRating||null}}
@@ -1159,6 +1618,8 @@ function playerNativeResponseHeaders(upstream,request,localOrigin,remoteOrigin,f
   return headers;
 }
 async function handlePlayerNativeBranch(request,info) {
+  const __yoruHealthUrl=new URL(request.url);
+  if(__yoruHealthUrl.pathname==='/__yoru_player_health')return json({ok:true,mode:'native-preview-origin',site:info.site,version:'7.8.9'},200,{'access-control-allow-origin':'*'});
   const requestUrl=new URL(request.url),localOrigin=requestUrl.origin,remoteOrigin=info.remoteOrigin;
   const target=new URL(requestUrl.pathname+requestUrl.search,remoteOrigin);
   const headers=playerNativeUpstreamHeaders(request,target,localOrigin);
@@ -1203,19 +1664,69 @@ async function handleMikaiPlayerApi(request,env) {
 }
 // ---------------------------------------------------------------------------
 
+
+
+
+
+
+
+// --- YORU native player bridge v7.8.11 -------------------------------------
+// Hybrid port of the working Universal DOM Viewer v32 model:
+// * the provider itself keeps a dedicated Pages preview origin;
+// * absolute third-party iframe/player origins are recursively proxied under
+//   /__yoru_nested/<origin-token>/...;
+// * Referer/Origin/cookies are reconstructed for the remote request;
+// * postMessage target origins and dynamic iframe/src/fetch/XHR URLs are mapped;
+// * AniHub gets the same episodeSources refetch guard used by UDV v32.
+const PLAYER_V7810_NESTED_PREFIX='/__yoru_nested/';
+const PLAYER_V7810_TARGETS=Object.freeze({
+  'anihub.in.ua':'relative border border-white/10 rounded-2xl p-4 shadow-[0_12px_40px_-12px_rgba(0,0,0,0.6)] ring-1 ring-violet-500/5',
+  'animeon.club':'anime-player-section flex-center',
+  'jut-su.net':'jutsu-page__player-video',
+  'animego.studio':'tabs-block__content video-inside',
+});
+function playerV7810EncodeOrigin(origin){return btoa(String(origin)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/g,'')}
+function playerV7810DecodeOrigin(token){try{const raw=String(token||'').replace(/-/g,'+').replace(/_/g,'/'),p=raw+'='.repeat((4-raw.length%4)%4),origin=atob(p),u=new URL(origin);return /^https?:$/.test(u.protocol)?u.origin:''}catch{return''}}
+function playerV7810PrivateHost(host){const h=String(host||'').toLowerCase().replace(/^\[|\]$/g,'');if(!h)return true;if(h==='localhost'||h.endsWith('.localhost')||h.endsWith('.local')||h==='0.0.0.0'||h==='::1')return true;if(/^127\./.test(h)||/^10\./.test(h)||/^192\.168\./.test(h)||/^169\.254\./.test(h))return true;const m=h.match(/^172\.(\d+)\./);if(m&&Number(m[1])>=16&&Number(m[1])<=31)return true;return false}
+function playerV7810OriginAllowed(origin){try{const u=new URL(origin);return /^https?:$/.test(u.protocol)&&!playerV7810PrivateHost(u.hostname)}catch{return false}}
+function playerV7810LocalUrl(localOrigin,primaryOrigin,remoteUrl){const u=remoteUrl instanceof URL?remoteUrl:new URL(String(remoteUrl));if(u.origin===primaryOrigin)return localOrigin+u.pathname+u.search+u.hash;return localOrigin+PLAYER_V7810_NESTED_PREFIX+playerV7810EncodeOrigin(u.origin)+u.pathname+u.search+u.hash}
+function playerV7810NestedInfo(requestUrl){const p=requestUrl.pathname;if(!p.startsWith(PLAYER_V7810_NESTED_PREFIX))return null;const rest=p.slice(PLAYER_V7810_NESTED_PREFIX.length),slash=rest.indexOf('/');if(slash<1)return null;const token=rest.slice(0,slash),origin=playerV7810DecodeOrigin(token);if(!origin||!playerV7810OriginAllowed(origin))return null;return{token,origin,path:rest.slice(slash)||'/'} }
+function playerV7810RemoteReferer(request,primaryOrigin){const ref=request.headers.get('referer');if(!ref)return new URL(primaryOrigin+'/');try{const r=new URL(ref),own=new URL(request.url);if(r.origin!==own.origin)return new URL(primaryOrigin+'/');const nested=playerV7810NestedInfo(r);if(nested)return new URL(nested.path+r.search,nested.origin);return new URL(r.pathname+r.search,primaryOrigin)}catch{return new URL(primaryOrigin+'/')}}
+function playerV7810NestedRequestAllowed(request,site=''){const ref=request.headers.get('referer');try{if(ref&&new URL(ref).origin===new URL(request.url).origin)return true}catch{}const dest=String(request.headers.get('sec-fetch-dest')||'').toLowerCase(),mode=String(request.headers.get('sec-fetch-mode')||'').toLowerCase(),accept=String(request.headers.get('accept')||'').toLowerCase();if(site==='animego.studio'&&request.method==='GET'&&((mode==='navigate'&&['iframe','frame','document'].includes(dest))||accept.includes('text/html')))return true;return false}
+function playerV7810MapRaw(localOrigin,primaryOrigin,remoteBase,raw,{primaryDocument=false}={}){const value=String(raw??'').trim();if(!value||/^(?:data|blob|javascript|mailto|tel):/i.test(value)||value.startsWith('#'))return value;if(primaryDocument&&!/^(?:https?:)?\/\//i.test(value))return value;try{return playerV7810LocalUrl(localOrigin,primaryOrigin,new URL(value,remoteBase))}catch{return value}}
+function playerV7810RewriteHtml(html,finalUrl,localOrigin,primaryOrigin,isPrimary){let out=String(html||'');out=out.replace(/\b(src|href|action|poster|data-src)\s*=\s*(["'])([^"']+)\2/gi,(all,attr,q,raw)=>{const mapped=playerV7810MapRaw(localOrigin,primaryOrigin,finalUrl,raw,{primaryDocument:isPrimary});return`${attr}=${q}${String(mapped).replace(new RegExp(q,'g'),q==='"'?'&quot;':'&#39;')}${q}`});out=out.replace(/\bsrcset\s*=\s*(["'])([^"']+)\1/gi,(all,q,raw)=>{const parts=String(raw).split(',').map(part=>{const m=part.trim().match(/^(\S+)(\s+.+)?$/);if(!m)return part.trim();return playerV7810MapRaw(localOrigin,primaryOrigin,finalUrl,m[1],{primaryDocument:isPrimary})+(m[2]||'')});return`srcset=${q}${parts.join(', ')}${q}`});return out}
+function playerV7810RewriteCss(css,finalUrl,localOrigin,primaryOrigin){return String(css||'').replace(/url\(\s*(["']?)([^)"']+)\1\s*\)/gi,(all,q,raw)=>{const v=String(raw||'').trim();if(!v||/^(?:data|blob):/i.test(v))return all;return`url("${String(playerV7810MapRaw(localOrigin,primaryOrigin,finalUrl,v)).replace(/"/g,'%22')}")`}).replace(/@import\s+(["'])([^"']+)\1/gi,(all,q,raw)=>`@import ${q}${playerV7810MapRaw(localOrigin,primaryOrigin,finalUrl,raw)}${q}`)}
+function playerV7810AniHubGuard(jsText){let out=String(jsText||'');const candidate=out.includes('fetchEpisodeSources')&&out.includes('episodeSources')&&out.includes('Не вдалося завантажити джерела перегляду');if(!candidate)return out;const oldGuard='if(!tr||null!=e6)return;';if(!out.includes(oldGuard))return out;const newGuard='if(!tr)return;if(null!=e6&&((Array.isArray(e6.ashdi)&&e6.ashdi.length)||(Array.isArray(e6.moonanime)&&e6.moonanime.length)||(Array.isArray(e6.fenix)&&e6.fenix.length)||e6.fenix_embed_url))return;';return out.split(oldGuard).join(newGuard)}
+function playerV7810RewriteJs(jsText,finalUrl,localOrigin,primaryOrigin,site){let out=String(jsText||'');try{const remoteOrigin=new URL(finalUrl).origin,base=remoteOrigin===primaryOrigin?localOrigin:(localOrigin+PLAYER_V7810_NESTED_PREFIX+playerV7810EncodeOrigin(remoteOrigin));const apiBase=remoteOrigin+'/api',localApi=base+'/api';if(out.includes(apiBase))out=out.split(apiBase).join(localApi);const eapi=apiBase.replace(/\//g,'\\/'),elapi=localApi.replace(/\//g,'\\/');if(out.includes(eapi))out=out.split(eapi).join(elapi);if(out.includes(remoteOrigin))out=out.split(remoteOrigin).join(base);const er=remoteOrigin.replace(/\//g,'\\/'),eb=base.replace(/\//g,'\\/');if(out.includes(er))out=out.split(er).join(eb);if(site==='jut-su.net'){out=out.replace(/\b(?:window\.)?location\.(hostname|host|origin)\b/g,'window.__yoruRemoteLocation.$1')}}catch{}return site==='anihub.in.ua'?playerV7810AniHubGuard(out):out}
+function playerV7810Runtime(remoteUrl,localOrigin,primaryOrigin,site){const remote=new URL(remoteUrl),isPrimary=remote.origin===primaryOrigin,targetClasses=PLAYER_V7810_TARGETS[site]||'';return `<script data-yoru-v7810-runtime>(()=>{const REMOTE_URL=${JSON.stringify(remote.href)},REMOTE_ORIGIN=${JSON.stringify(remote.origin)},PRIMARY_ORIGIN=${JSON.stringify(primaryOrigin)},LOCAL_ORIGIN=${JSON.stringify(localOrigin)},NESTED_PREFIX=${JSON.stringify(PLAYER_V7810_NESTED_PREFIX)},SITE=${JSON.stringify(site)},TARGET_CLASSES=${JSON.stringify(targetClasses)},PRIMARY_DOC=${JSON.stringify(isPrimary)};const RAW_FETCH=typeof window.fetch==='function'?window.fetch.bind(window):null;function enc(origin){try{return btoa(String(origin)).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/g,'')}catch(_){return''}}function localUrl(u){return u.origin===PRIMARY_ORIGIN?LOCAL_ORIGIN+u.pathname+u.search+u.hash:LOCAL_ORIGIN+NESTED_PREFIX+enc(u.origin)+u.pathname+u.search+u.hash}function map(value){try{const raw=value instanceof URL?value.href:(value instanceof Request?value.url:String(value??''));if(!raw||/^(?:data|blob|javascript|mailto|tel):/i.test(raw)||raw.startsWith('#'))return raw;if(PRIMARY_DOC&&!/^(?:https?:)?\\/\\//i.test(raw))return raw;const u=new URL(raw,REMOTE_URL);return localUrl(u)}catch(_){return String(value??'')}}function mapTargetOrigin(value){try{if(!value||value==='*'||value==='/')return value;const u=new URL(String(value));if(!/^https?:$/.test(u.protocol))return value;return LOCAL_ORIGIN}catch(_){return value}}window.__yoruRemoteUrl=REMOTE_URL;window.__yoruRemoteLocation=new URL(REMOTE_URL);window.__yoruMapPlayerUrl=map;try{if(RAW_FETCH)window.fetch=(input,init)=>{if(input instanceof Request){const m=map(input.url);return RAW_FETCH(m===input.url?input:new Request(m,input),init)}return RAW_FETCH(map(input),init)}}catch(_){}try{const n=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(method,url,...rest){return n.call(this,method,map(url),...rest)}}catch(_){}try{if(navigator.sendBeacon){const n=navigator.sendBeacon.bind(navigator);navigator.sendBeacon=(url,data)=>n(map(url),data)}}catch(_){}try{if(window.EventSource){const N=window.EventSource;window.EventSource=function(url,cfg){return new N(map(url),cfg)};window.EventSource.prototype=N.prototype}}catch(_){}try{if(window.Worker){const N=window.Worker;window.Worker=function(url,opt){return new N(map(url),opt)};window.Worker.prototype=N.prototype}if(window.SharedWorker){const N=window.SharedWorker;window.SharedWorker=function(url,opt){return new N(map(url),opt)};window.SharedWorker.prototype=N.prototype}}catch(_){}try{const n=Element.prototype.setAttribute;Element.prototype.setAttribute=function(name,value){const k=String(name||'').toLowerCase();if(['src','href','action','poster','data-src','xlink:href'].includes(k))value=map(value);return n.call(this,name,value)}}catch(_){}function patch(proto,prop){try{const d=Object.getOwnPropertyDescriptor(proto,prop);if(!d||!d.get||!d.set||d.configurable===false)return;Object.defineProperty(proto,prop,{configurable:d.configurable,enumerable:d.enumerable,get:d.get,set(v){return d.set.call(this,map(v))}})}catch(_){}}try{[[HTMLIFrameElement.prototype,'src'],[HTMLScriptElement.prototype,'src'],[HTMLImageElement.prototype,'src'],[HTMLSourceElement.prototype,'src'],[HTMLMediaElement.prototype,'src'],[HTMLVideoElement.prototype,'poster'],[HTMLLinkElement.prototype,'href']].forEach(x=>patch(x[0],x[1]))}catch(_){}try{const n=Window.prototype.postMessage;Window.prototype.postMessage=function(message,targetOrigin,transfer){const t=mapTargetOrigin(targetOrigin);if(arguments.length>=3)return n.call(this,message,t,transfer);return n.call(this,message,t)}}catch(_){}try{const o=window.open;window.open=function(url,...rest){return o.call(window,map(url),...rest)}}catch(_){}document.addEventListener('click',e=>{const a=e.target?.closest?.('a[href]');if(!a)return;try{const v=a.getAttribute('href');if(v)a.setAttribute('href',map(v))}catch(_){}},true);function send(type,extra={}){try{parent.postMessage({__yoruPlayerBridge:1,type,domain:SITE,...extra},'*')}catch(_){}}function usable(el){if(!el||!el.isConnected)return false;const r=el.getBoundingClientRect();if(r.width<2||r.height<2)return false;const cs=getComputedStyle(el);return cs.display!=='none'&&cs.visibility!=='hidden'&&cs.visibility!=='collapse'&&Number(cs.opacity||1)>.001}function pick(){if(!TARGET_CLASSES)return null;let all=[];try{all=Array.from(document.getElementsByClassName(TARGET_CLASSES))}catch(_){return null}const good=all.filter(usable),pool=good.length?good:all;let best=null,score=-Infinity;for(const el of pool){const r=el.getBoundingClientRect();let s=Math.max(0,r.width)*Math.max(0,r.height);if(el.querySelector?.('iframe,video,audio,canvas,object,embed'))s+=5000000;if(el.querySelector?.('button,input,select,textarea'))s+=50000;if(s>score){score=s;best=el}}return best}function hideOuterChrome(target){if(SITE!=='animeon.club'||!target)return;const xs=[Math.round(innerWidth*.08),Math.round(innerWidth*.5),Math.round(innerWidth*.92)],ys=[1,12,28,48,72,96];const seen=new Set();for(const x of xs)for(const y of ys){let stack=[];try{stack=document.elementsFromPoint(x,y)||[]}catch(_){continue}for(const el of stack){if(!el||seen.has(el)||el===document.body||el===document.documentElement)continue;seen.add(el);if(el===target||target.contains?.(el)||el.contains?.(target))continue;let cs,r;try{cs=getComputedStyle(el);r=el.getBoundingClientRect()}catch(_){continue}if(!r||r.width<innerWidth*.45||r.height<28||r.top>110)continue;if(cs.display==='none'||cs.visibility==='hidden'||Number(cs.opacity||1)<=.001)continue;const hint=(String(el.tagName||'')+' '+String(el.className||'')+' '+String(el.id||'')).toLowerCase(),looksChrome=/(header|navbar|topbar|navigation|\bnav\b)/.test(hint);if(cs.position!=='fixed'&&cs.position!=='sticky'&&!looksChrome)continue;try{el.style.setProperty('visibility','hidden','important');el.style.setProperty('pointer-events','none','important')}catch(_){}}}}function crop(){const el=pick();if(!el||!usable(el))return false;hideOuterChrome(el);let r=el.getBoundingClientRect();const safe=12;if(r.top<safe||r.bottom<safe||r.top>innerHeight-8){const y=Math.max(0,r.top+scrollY-safe);try{scrollTo({left:scrollX,top:y,behavior:'instant'})}catch(_){try{scrollTo(scrollX,y)}catch(__){}}r=el.getBoundingClientRect()}let left=r.left,top=r.top,width=r.width,height=r.height,remoteW=Math.max(1,innerWidth),remoteH=Math.max(1,innerHeight);if(SITE==='anihub.in.ua'){const extraW=Math.max(width,Number(el.scrollWidth)||0),extraH=Math.max(height,Number(el.scrollHeight)||0);left=Math.max(0,left-10);top=Math.max(0,top-10);width=Math.min(Math.max(1,extraW+20),Math.max(1,document.documentElement.scrollWidth-left));height=Math.max(1,extraH+20);remoteW=Math.max(remoteW,Math.ceil(left+width+24));remoteH=Math.max(remoteH,Math.ceil(top+height+24))}send('crop',{rect:{left,top,width,height},viewportW:remoteW,viewportH:remoteH});return true}send('ready',{href:location.href});crop();setInterval(()=>{try{if(!crop())send('searching',{readyState:document.readyState})}catch(e){send('bridge-error',{message:e?.message||String(e)})}},150)})();</script>`}
+function playerV7810InjectHtml(html,finalUrl,localOrigin,primaryOrigin,site){const isPrimary=new URL(finalUrl).origin===primaryOrigin;let out=playerV7810RewriteHtml(html,finalUrl,localOrigin,primaryOrigin,isPrimary);const rt=playerV7810Runtime(finalUrl,localOrigin,primaryOrigin,site),m=out.match(/<head\b[^>]*>/i);if(m){const i=m.index+m[0].length;return out.slice(0,i)+rt+out.slice(i)}return rt+out}
+function playerV7810UpstreamHeaders(request,target,primaryOrigin){const headers=new Headers(),drop=new Set(['host','connection','keep-alive','proxy-authenticate','proxy-authorization','te','trailer','transfer-encoding','upgrade','content-length','accept-encoding','origin','referer','via','forwarded']);for(const[name,value]of request.headers.entries()){const n=name.toLowerCase();if(drop.has(n)||n.startsWith('proxy-')||n.startsWith('cf-')||n.startsWith('x-forwarded-')||n.startsWith('x-yoru-'))continue;try{headers.set(name,value)}catch{}}headers.set('user-agent',request.headers.get('user-agent')||'Mozilla/5.0');const cookie=request.headers.get('cookie');if(cookie)headers.set('cookie',cookie);const rr=playerV7810RemoteReferer(request,primaryOrigin);headers.set('referer',rr.href);if(request.headers.get('origin'))headers.set('origin',rr.origin);return headers}
+function playerV7810RewriteCookie(raw,nestedToken=''){const parts=String(raw||'').split(';'),first=parts.shift()||'';if(!first.includes('='))return null;const attrs=[];let sawPath=false;for(const p0 of parts){let p=p0.trim();if(!p)continue;if(/^domain=/i.test(p)||/^samesite=/i.test(p))continue;if(/^path=/i.test(p)){sawPath=true;const old=p.slice(5)||'/';p='Path='+(nestedToken?(PLAYER_V7810_NESTED_PREFIX+nestedToken+(old.startsWith('/')?old:'/'+old)):old)}attrs.push(p)}if(!sawPath)attrs.push('Path='+(nestedToken?PLAYER_V7810_NESTED_PREFIX+nestedToken+'/':'/'));attrs.push('SameSite=None');if(!attrs.some(x=>/^secure$/i.test(x)))attrs.push('Secure');return`${first.trim()}; ${attrs.join('; ')}`}
+function playerV7810ResponseHeaders(upstream,request,primaryOrigin,finalUrl,nestedToken='',transformed=false){const headers=new Headers(),blocked=new Set(['content-security-policy','content-security-policy-report-only','x-frame-options','frame-options','cross-origin-opener-policy','cross-origin-embedder-policy','cross-origin-resource-policy','permissions-policy','origin-agent-cluster','referrer-policy','content-encoding','transfer-encoding','connection','keep-alive','set-cookie','location']);for(const[name,value]of upstream.headers.entries()){const n=name.toLowerCase();if(blocked.has(n))continue;if(transformed&&['content-length','etag','last-modified','expires'].includes(n))continue;try{headers.set(name,value)}catch{}}const cookies=typeof upstream.headers.getSetCookie==='function'?upstream.headers.getSetCookie():[];if(cookies.length){for(const raw of cookies){const c=playerV7810RewriteCookie(raw,nestedToken);if(c)headers.append('set-cookie',c)}}else{const raw=upstream.headers.get('set-cookie'),c=raw&&playerV7810RewriteCookie(raw,nestedToken);if(c)headers.append('set-cookie',c)}const loc=upstream.headers.get('location');if(loc){try{headers.set('location',playerV7810LocalUrl(new URL(request.url).origin,primaryOrigin,new URL(loc,finalUrl)))}catch{headers.set('location',loc)}}headers.set('referrer-policy','same-origin');if(transformed)headers.set('cache-control','no-store, no-cache, must-revalidate, max-age=0');return headers}
+async function handlePlayerV7810Branch(request,info){const requestUrl=new URL(request.url),localOrigin=requestUrl.origin,primaryOrigin=info.remoteOrigin,site=info.site;if(requestUrl.pathname==='/__yoru_player_health')return new Response(JSON.stringify({ok:true,mode:'hybrid-v32',site,version:'7.8.11'}),{headers:{'content-type':'application/json','cache-control':'no-store','access-control-allow-origin':'*'}});if(requestUrl.pathname==='/__yoru_player_diag')return new Response(JSON.stringify({ok:true,site,mode:'hybrid-v32',nestedPrefix:PLAYER_V7810_NESTED_PREFIX}),{headers:{'content-type':'application/json','cache-control':'no-store'}});const nested=playerV7810NestedInfo(requestUrl);if(requestUrl.pathname.startsWith(PLAYER_V7810_NESTED_PREFIX)&&!nested)return new Response('Invalid nested player origin',{status:403});if(nested&&!playerV7810NestedRequestAllowed(request,site))return new Response('Nested player request requires same-origin referer',{status:403});let target;try{target=nested?new URL(nested.path+requestUrl.search,nested.origin):new URL(requestUrl.pathname+requestUrl.search,primaryOrigin)}catch{return new Response('Invalid upstream URL',{status:400})}const init={method:request.method,headers:playerV7810UpstreamHeaders(request,target,primaryOrigin),redirect:'manual'};if(!['GET','HEAD'].includes(request.method))init.body=await request.arrayBuffer();const upstream=await fetch(target,init),finalUrl=upstream.url||target.href,type=upstream.headers.get('content-type')||'application/octet-stream',nestedToken=nested?.token||'';if(/text\/html|application\/xhtml\+xml/i.test(type)){const text=await upstream.text(),body=playerV7810InjectHtml(text,finalUrl,localOrigin,primaryOrigin,site),headers=playerV7810ResponseHeaders(upstream,request,primaryOrigin,finalUrl,nestedToken,true);headers.set('content-type','text/html; charset=utf-8');return new Response(body,{status:upstream.status,headers})}if(/javascript|ecmascript/i.test(type)||/\.(?:m?js)(?:$|\?)/i.test(finalUrl)||/_next\/static\/chunks\//i.test(finalUrl)){const text=await upstream.text(),body=playerV7810RewriteJs(text,finalUrl,localOrigin,primaryOrigin,site),headers=playerV7810ResponseHeaders(upstream,request,primaryOrigin,finalUrl,nestedToken,true);headers.set('content-type',type||'application/javascript; charset=utf-8');return new Response(body,{status:upstream.status,headers})}if(/text\/css/i.test(type)){const text=await upstream.text(),body=playerV7810RewriteCss(text,finalUrl,localOrigin,primaryOrigin),headers=playerV7810ResponseHeaders(upstream,request,primaryOrigin,finalUrl,nestedToken,true);headers.set('content-type',type);return new Response(body,{status:upstream.status,headers})}return new Response(upstream.body,{status:upstream.status,headers:playerV7810ResponseHeaders(upstream,request,primaryOrigin,finalUrl,nestedToken,false)})}
+// ---------------------------------------------------------------------------
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     try {
       const nativeBranch=playerNativeBranchInfo(url.hostname);
-      if (nativeBranch) return handlePlayerNativeBranch(request,nativeBranch);
+      if (nativeBranch) return handlePlayerV7810Branch(request,nativeBranch);
       if (request.method === 'OPTIONS' && url.pathname.startsWith('/api/')) return new Response(null,{status:204,headers:{'access-control-allow-origin':'*','access-control-allow-methods':'GET, POST, PATCH, DELETE, OPTIONS','access-control-allow-headers':'Content-Type, X-Ingest-Key','access-control-max-age':'86400'}});
+      if (url.pathname === '/api/anihub/collection') return handleAniHubCollectionCachedApi(request,env,ctx);
+      if (url.pathname === '/api/anihub/similar-v2') return handleAniHubSimilarCachedApi(request,env,ctx);
+      if (url.pathname === '/api/anihub/schedule') return handleAniHubScheduleV783Api(request,env,ctx);
+      if (url.pathname === '/api/anihub/airing-map') return handleAniHubAiringMapApi(request,env,ctx);
+      if (url.pathname === '/api/anihub/airing-debug') return handleAniHubAiringDebugApi(request,env);
+      if (url.pathname === '/api/anihub/cache-status') return handleAniHubCacheStatusApi(request,env);
       if (url.pathname === '/api/anihub/random') return handleAniHubRandomApi(request,env);
-      if (url.pathname === '/api/anihub/title') return handleAniHubTitleApi(request);
-      if (url.pathname === '/api/anihub/similar') return handleAniHubSimilarApi(request,env);
+      if (url.pathname === '/api/anihub/title') return handleAniHubTitleCachedApi(request,env,ctx);
+      if (url.pathname === '/api/anihub/similar') return handleAniHubSimilarCachedApi(request,env,ctx);
       if (url.pathname === '/api/anime-identify') return handleAnimeIdentifyApi(request);
       if (url.pathname === '/api/player/mikai') return handleMikaiPlayerApi(request,env);
-      if (url.pathname === '/api/player/view') return handlePlayerDomView(request);
+            
+      
+if (url.pathname === '/api/player/view') return handlePlayerDomView(request);
       if (url.pathname.startsWith('/api/player/p/')) return handlePlayerProxy(request);
       if (url.pathname === '/api/core-search') return handleCoreSearchApi(request,env);
       if (url.pathname === '/api/core-taxonomy') return handleCoreTaxonomyApi(request,env);
@@ -1233,8 +1744,8 @@ export default {
       if (url.pathname === '/api/anime') return tursoHandleAnimeApi(request,env);
       if (url.pathname === '/api/options') return tursoHandleOptionsApi(request,env);
       if (url.pathname === '/api/discover') return handleDiscoverApi(request);
-      if (url.pathname === '/api/version') return json({ok:true,version:'yoru-v7.7.0-anihub-discovery-2026-09-15',storage:'turso-libsql',pythonCoreSearch:env.CORE_SEARCH_URL||CORE_SEARCH_URL,pythonCoreProcessStream:env.CORE_PROCESS_STREAM_URL||CORE_PROCESS_STREAM_URL,pythonCoreProcessFull:env.CORE_PROCESS_FULL_URL||CORE_PROCESS_FULL_URL,progressProtocol:'ndjson-v1',coreJsonIngest:true,mergeTitles:true,deleteTitles:true,editTitles:true,extensionContext:'/api/extension/context',favoriteStorage:'turso-libsql',likedStorage:'turso-libsql',viewedStorage:'turso-libsql',seasonEpisodeStorage:'turso-libsql',groupSettings:'/api/groups',catalogSettings:'/api/catalog-settings',tagDelimiter:'dot',taxonomy:true,genreSources:GENRE_SOURCES,themeSources:THEME_SOURCES,coreTaxonomy:'/api/core-taxonomy',playerHub:true,playerSources:['anihub.in.ua','animeon.club','mikai.me','jut-su.net','animego.studio'],mikaiPlayerApi:'/api/player/mikai',domPlayerView:'/api/player/view',trailerBackground:true,titleCardRefresh:'/api/anime/refresh',anihubRandom:'/api/anihub/random',anihubSimilar:'/api/anihub/similar',screenshotIdentify:'/api/anime-identify'});
-      if (url.pathname === '/api/health') return tursoHandleHealthApi(env);
+      if (url.pathname === '/api/version') return json({ok:true,version:'yoru-v7.8.4-anihub-airing-data-2026-09-15',storage:'turso-libsql',pythonCoreSearch:env.CORE_SEARCH_URL||CORE_SEARCH_URL,pythonCoreProcessStream:env.CORE_PROCESS_STREAM_URL||CORE_PROCESS_STREAM_URL,pythonCoreProcessFull:env.CORE_PROCESS_FULL_URL||CORE_PROCESS_FULL_URL,progressProtocol:'ndjson-v1',coreJsonIngest:true,mergeTitles:true,deleteTitles:true,editTitles:true,extensionContext:'/api/extension/context',favoriteStorage:'turso-libsql',likedStorage:'turso-libsql',viewedStorage:'turso-libsql',seasonEpisodeStorage:'turso-libsql',groupSettings:'/api/groups',catalogSettings:'/api/catalog-settings',tagDelimiter:'dot',taxonomy:true,genreSources:GENRE_SOURCES,themeSources:THEME_SOURCES,coreTaxonomy:'/api/core-taxonomy',playerHub:true,playerSources:['anihub.in.ua','animeon.club','mikai.me','jut-su.net','animego.studio'],mikaiPlayerApi:'/api/player/mikai',domPlayerView:'/api/player/view',trailerBackground:true,titleCardRefresh:'/api/anime/refresh',anihubRandom:'/api/anihub/random',anihubSimilar:'/api/anihub/similar-v2',anihubCacheStatus:'/api/anihub/cache-status',anihubAiringMap:'/api/anihub/airing-map',screenshotIdentify:'/api/anime-identify'});
+      if (url.pathname === '/api/health') return await tursoHandleHealthApi78125(env);
       return env.ASSETS.fetch(request);
     } catch (error) {
       console.error('Yoru Turso worker error', error);

@@ -535,7 +535,7 @@ function stopDomTitlePlayer() {
 function domPlayerPagesProjectHost() {
   const host=String(location.hostname||'').toLowerCase();
   const parts=host.split('.').filter(Boolean);
-  if (parts.length < 3 || parts.slice(-2).join('.') !== 'pages.dev') return '';
+  if (parts.length < 3 || parts.slice(-2).join('.') !== 'pages.dev') return 'mrsay.pages.dev';
   // Production: project.pages.dev. Preview: branch.project.pages.dev.
   // In both cases the project name is the label immediately before pages.dev.
   return `${parts[parts.length-3]}.pages.dev`;
@@ -931,10 +931,10 @@ function loadDomTitlePlayer(stage, domain, pageUrl, serial) {
   const nativeOrigin=domPlayerNativeOrigin(domain);
   const nativeSrc=domPlayerNativeUrl(domain,pageUrl);
   const fallbackSrc=`/api/player/view?site=${encodeURIComponent(domain)}&url=${encodeURIComponent(pageUrl)}`;
-  const useNative=Boolean(nativeOrigin&&nativeSrc);
+  const useNative=Boolean(nativeOrigin&&nativeSrc); // YORU 7.8.9: per-provider native preview origin
   const src=useNative?nativeSrc:fallbackSrc;
   stage.innerHTML=`
-    <div class="player-loading" data-dom-player-loading><span class="detail-loader"></span><strong>Шукаю плеєр ${escapeHtml(domain)}…</strong><small>${useNative?'Native virtual-origin режим Universal DOM Viewer: оригінальний pathname, cookies/session та Next/RSC не підмінюються path-proxy.':'Fallback proxy режим для custom domain.'}</small></div>
+    <div class="player-loading" data-dom-player-loading><span class="detail-loader"></span><strong>Шукаю плеєр ${escapeHtml(domain)}…</strong><small>${useNative?'Native Universal DOM Viewer.':'Native preview-origin Universal DOM Viewer v32 mode.'}</small></div>
     <div class="dom-player-viewport is-loading" data-dom-player-viewport>
       <iframe class="dom-player-frame" data-dom-player-frame src="about:blank" scrolling="no" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen referrerpolicy="origin-when-cross-origin"></iframe>
     </div>`;

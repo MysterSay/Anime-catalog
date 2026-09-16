@@ -69,7 +69,7 @@
   'use strict';
 
   const VERSION = '3.1.2';
-  const DEFAULT_BASE = 'https://myster-anime.pages.dev';
+  const DEFAULT_BASE = 'https://mrsay.pages.dev';
   const SITE_STORAGE_KEY = 'yoru-site-base';
 
   function normalizeSiteBase(value) {

@@ -2630,3 +2630,24 @@ body.modal-open { overflow:hidden; }
 
 .screenshot-discover-result { grid-template-columns:132px 1fr auto; min-height:94px; }
 .screenshot-discover-result img { width:132px; height:76px; object-fit:cover; }
+
+
+/* YORU 7.8.12 - align airing row to card bottom */
+.catalog-grid .anime-card {
+  display:flex;
+  flex-direction:column;
+}
+.catalog-grid .poster-wrap {
+  flex:0 0 auto;
+}
+.catalog-grid .card-body {
+  display:flex;
+  flex:1 1 auto;
+  flex-direction:column;
+  min-height:0;
+}
+.catalog-grid .airing-card-row {
+  width:100%;
+  margin-top:auto !important;
+}
+/* /YORU 7.8.12 */

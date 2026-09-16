@@ -69,7 +69,7 @@ Core 2.21.2 уже повертає `trailer` (`url`, `embed_url`, `site`, `id`,
 
 ```text
 Anime-catalog/
-├─ core/       # Python/FastAPI Core для Vercel
+├─ vercel/     # Python/FastAPI Core для Vercel
 ├─ site/       # Cloudflare Pages сайт + Worker
 ├─ extension/  # Tampermonkey userscript
 ├─ install/    # YoruInstaller.exe + source installer-а

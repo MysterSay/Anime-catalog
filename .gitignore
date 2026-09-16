@@ -1,6 +1,48 @@
-.vercel
-.env*
+# Local secrets / environment
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+**/.env.*.local
+!**/.env.example
 
+# Cloud / deployment caches
+.wrangler/
+**/.wrangler/
 .vercel/
-
 **/.vercel/
+
+# Python
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node
+node_modules/
+**/node_modules/
+
+# Local update / migration packages
+update/
+update*/
+**/update/
+**/update*/
+migration/
+**/migration/
+
+# Backups / temporary files
+*.bak
+*.bak-*
+*.bak-before-*
+*.tmp
+*.temp
+*.log
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
